@@ -1,6 +1,10 @@
+mod assignment;
+mod audit;
+mod authorization;
 mod cli;
 mod client;
 mod command;
+mod journal;
 mod launcher;
 mod protocol;
 mod server;

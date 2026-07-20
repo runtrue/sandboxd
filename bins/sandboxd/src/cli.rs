@@ -15,6 +15,16 @@ pub(crate) enum Command {
     Serve {
         #[arg(long, default_value = DEFAULT_SOCKET)]
         socket: PathBuf,
+        #[arg(long)]
+        workload_socket: Option<PathBuf>,
+        #[arg(long)]
+        broker_uid: Option<u32>,
+        #[arg(long)]
+        work_order_key: Option<PathBuf>,
+        #[arg(long, default_value_t = 64)]
+        maximum_connections: usize,
+        #[arg(long, default_value_t = 5)]
+        io_timeout_seconds: u64,
         #[arg(long, default_value = "/var/lib/runtrue-sandboxd/state")]
         state_root: PathBuf,
         #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]

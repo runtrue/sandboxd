@@ -81,10 +81,16 @@ for _ in $(seq 1 100); do
 done
 
 "$daemon" admit --socket "$socket" --lock "$lock_path" >/dev/null
-"$daemon" create --socket "$socket" --lock "$lock_path" \
-  --sandbox "$source_sandbox" --timeout-seconds 30
+source_create=$("$daemon" create --socket "$socket" --lock "$lock_path" \
+  --sandbox "$source_sandbox" --timeout-seconds 30)
+printf '%s\n' "$source_create"
+source_runtime=$(sed -n 's/.*"runtime_project":"\([^"]*\)".*/\1/p' <<<"$source_create")
+if [[ -z $source_runtime ]]; then
+  echo "operator create response omitted runtime_project" >&2
+  exit 1
+fi
 
-source_runsc_root="$state_root/sandboxes/$source_sandbox/runsc"
+source_runsc_root="$state_root/sandboxes/$source_runtime/runsc"
 runsc_common=(
   --network=sandbox
   --ignore-cgroups=true
@@ -99,7 +105,7 @@ runsc_common=(
 client_healthy=false
 for _ in $(seq 1 100); do
   if /usr/local/bin/runsc --root="$source_runsc_root" "${runsc_common[@]}" \
-    exec --user=65534:65534 "rts-$source_sandbox-client" \
+    exec --user=65534:65534 "rts-$source_runtime-client" \
     /usr/bin/python3 /app/snapshot_health.py >/dev/null 2>&1; then
     client_healthy=true
     break
@@ -111,25 +117,31 @@ if [[ $client_healthy != true ]]; then
   exit 1
 fi
 counter_before=$(/usr/local/bin/runsc --root="$source_runsc_root" "${runsc_common[@]}" \
-  exec --user=65534:65534 "rts-$source_sandbox-client" /bin/cat /tmp/snapshot-counter)
+  exec --user=65534:65534 "rts-$source_runtime-client" /bin/cat /tmp/snapshot-counter)
 
 "$daemon" snapshot --socket "$socket" --sandbox "$source_sandbox" \
   --snapshot "$live_snapshot"
 sleep 1
 "$daemon" inspect --socket "$socket" --sandbox "$source_sandbox" >/dev/null
 counter_after_live=$(/usr/local/bin/runsc --root="$source_runsc_root" "${runsc_common[@]}" \
-  exec --user=65534:65534 "rts-$source_sandbox-client" /bin/cat /tmp/snapshot-counter)
+  exec --user=65534:65534 "rts-$source_runtime-client" /bin/cat /tmp/snapshot-counter)
 if (( counter_after_live <= counter_before )); then
   echo "source counter stopped after live snapshot: before=$counter_before after=$counter_after_live" >&2
   exit 1
 fi
 
-"$daemon" restore --socket "$socket" --lock "$lock_path" \
-  --sandbox "$live_restored_sandbox" --snapshot "$live_snapshot" --timeout-seconds 30
+live_restore=$("$daemon" restore --socket "$socket" --lock "$lock_path" \
+  --sandbox "$live_restored_sandbox" --snapshot "$live_snapshot" --timeout-seconds 30)
+printf '%s\n' "$live_restore"
+live_restored_runtime=$(sed -n 's/.*"runtime_project":"\([^"]*\)".*/\1/p' <<<"$live_restore")
+if [[ -z $live_restored_runtime ]]; then
+  echo "operator restore response omitted runtime_project" >&2
+  exit 1
+fi
 sleep 1
-live_restored_runsc_root="$state_root/sandboxes/$live_restored_sandbox/runsc"
+live_restored_runsc_root="$state_root/sandboxes/$live_restored_runtime/runsc"
 live_restored_counter=$(/usr/local/bin/runsc --root="$live_restored_runsc_root" "${runsc_common[@]}" \
-  exec --user=65534:65534 "rts-$live_restored_sandbox-client" /bin/cat /tmp/snapshot-counter)
+  exec --user=65534:65534 "rts-$live_restored_runtime-client" /bin/cat /tmp/snapshot-counter)
 if (( live_restored_counter <= counter_before )); then
   echo "live-restored counter did not advance: before=$counter_before after=$live_restored_counter" >&2
   exit 1
@@ -137,16 +149,22 @@ fi
 "$daemon" stop --socket "$socket" --sandbox "$live_restored_sandbox" >/dev/null
 
 counter_before_move=$(/usr/local/bin/runsc --root="$source_runsc_root" "${runsc_common[@]}" \
-  exec --user=65534:65534 "rts-$source_sandbox-client" /bin/cat /tmp/snapshot-counter)
+  exec --user=65534:65534 "rts-$source_runtime-client" /bin/cat /tmp/snapshot-counter)
 "$daemon" snapshot --socket "$socket" --sandbox "$source_sandbox" \
   --snapshot "$move_snapshot" --stop-after
-"$daemon" restore --socket "$socket" --lock "$lock_path" \
-  --sandbox "$move_restored_sandbox" --snapshot "$move_snapshot" --timeout-seconds 30
+move_restore=$("$daemon" restore --socket "$socket" --lock "$lock_path" \
+  --sandbox "$move_restored_sandbox" --snapshot "$move_snapshot" --timeout-seconds 30)
+printf '%s\n' "$move_restore"
+move_restored_runtime=$(sed -n 's/.*"runtime_project":"\([^"]*\)".*/\1/p' <<<"$move_restore")
+if [[ -z $move_restored_runtime ]]; then
+  echo "operator restore response omitted runtime_project" >&2
+  exit 1
+fi
 
 sleep 1
-move_restored_runsc_root="$state_root/sandboxes/$move_restored_sandbox/runsc"
+move_restored_runsc_root="$state_root/sandboxes/$move_restored_runtime/runsc"
 counter_after_move=$(/usr/local/bin/runsc --root="$move_restored_runsc_root" "${runsc_common[@]}" \
-  exec --user=65534:65534 "rts-$move_restored_sandbox-client" /bin/cat /tmp/snapshot-counter)
+  exec --user=65534:65534 "rts-$move_restored_runtime-client" /bin/cat /tmp/snapshot-counter)
 if (( counter_after_move <= counter_before_move )); then
   echo "move-restored counter did not advance: before=$counter_before_move after=$counter_after_move" >&2
   exit 1

@@ -3,16 +3,24 @@
 ## Trust boundary
 
 The supported deployment is one trusted Linux worker with a root-owned
-`sandboxd` process and a root-only Unix control socket. Topology documents,
-guest arguments, environment values, OCI image contents, and guest execution
-are treated as untrusted. The worker operator, daemon configuration, local
+`sandboxd` process. Its operator Unix socket accepts UID 0 only. An optional,
+separate workload Unix socket accepts one configured local broker UID, and each
+request on that socket must carry a short-lived signed work order. Tenant
+clients authenticate to an external control plane and never connect directly
+to the privileged worker.
+
+Topology documents, guest arguments, environment values, OCI image contents,
+workload requests, and guest execution are treated as untrusted. The worker
+operator, daemon configuration, work-order signer, local broker process, local
 Docker Engine, runsc binary, iproute2 binary, image store, state store, and
 snapshot store are trusted.
 
 The security boundary for guest code is gVisor plus host namespaces and cgroup
 containment. The daemon itself is privileged and is not a tenant-facing network
-service. Possession of the control socket is equivalent to control of the
-worker.
+service. Possession of the operator socket is equivalent to control of the
+worker. Possession of the workload socket is insufficient without a valid
+signed work order, but compromise of the configured broker or signer remains
+inside the trusted control-plane boundary.
 
 ## Sandbox ownership
 
@@ -58,18 +66,43 @@ only the gVisor executor.
 
 ## Control plane
 
-`sandboxd` listens on a mode `0600` Unix socket inside a mode `0700` directory.
-Requests and responses are newline-delimited JSON with a four-MiB message
-limit, a schema version, and a bounded request identifier. The daemon owns
-image admission handles, active sandbox handles, worker metrics, state paths,
-and snapshot paths.
+`sandboxd` always listens on a mode `0600`, UID-0 operator Unix socket. When
+configured, it also listens on a mode `0600` Unix socket owned by the broker
+UID. Requests and responses are newline-delimited JSON with a four-MiB message
+limit, a schema version, a bounded request identifier, and read/write
+deadlines. A fixed connection limiter rejects excess clients instead of
+creating an unbounded queue or thread set. The listener loop waits for socket
+readiness and drains each ready accept backlog; it does not impose a periodic
+accept-sleep latency floor.
 
-Each sandbox identifier is reserved while create, run, or restore materializes
-host resources. Persistent instances are stored behind a sandbox-specific
-mutex. Graceful shutdown refuses to proceed while a sandbox remains active.
+The operator endpoint verifies `SO_PEERCRED` UID 0 and retains shutdown and
+recovery access. Protocol v2 operator requests carry an explicit local scope;
+protocol v1 remains accepted only on this endpoint for migration. The workload
+endpoint verifies the configured broker UID and protocol-v2 HMAC work orders
+bound to the exact operation, request ID, tenant, workspace, subject, sandbox,
+resource ceilings, nonce, expiration, and assignment epoch. Shutdown has no
+workload work-order representation.
 
-The protocol does not authenticate tenants or authorize operations within a
-tenant. Filesystem ownership of the Unix socket is the access-control mechanism.
+The daemon owns image admission handles, tenant-scoped active sandbox handles,
+worker metrics, state paths, and snapshot paths. Tenant-facing sandbox IDs are
+mapped to opaque epoch-scoped runtime project IDs. Assignments, consumed nonce
+digests, and bounded audit events are persisted under the private control state
+directory. Their bounded append queues preserve ordering and group concurrent
+writes into durable commits. Assignment and replay acknowledgements are issued
+only after persistence; ordered compaction bounds recovery work. A restart
+repairs an incomplete final journal record, rejects complete malformed state,
+and fences active assignments before accepting new work.
+
+Each tenant/workspace/sandbox identity is reserved while create, run, or restore
+materializes host resources. Persistent instances are stored behind a
+sandbox-specific mutex. Snapshots are placed below tenant and workspace
+directories, logs require a scoped live-sandbox lookup, and workload metrics
+contain only the verified scope. The immutable image cache may be shared; its
+contents and global cache metrics are not exposed through workload stats.
+Graceful shutdown refuses to proceed while a sandbox remains active.
+
+The exact request and signing contract is documented in
+[control-plane.md](control-plane.md).
 
 ## Topology admission
 
@@ -180,7 +213,9 @@ exited is represented as stopped and is not passed to runsc restore.
 The checkpoint contains process state, memory, sockets, and writable tmpfs
 contents. The read-only OCI roots are re-admitted from the local image store.
 Snapshot portability is `same_worker`; no artifact export, writable OCI layer,
-external volume, assignment fencing, or cross-worker restore is exposed.
+external volume, or cross-worker restore is exposed. Control operations are
+assignment-epoch fenced, but the local snapshot itself is not yet a
+transferable, worker-fenced artifact.
 
 ## Backend-neutral snapshot types
 

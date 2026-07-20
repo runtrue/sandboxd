@@ -58,6 +58,9 @@ identifier!(ContainerId, "container", 64);
 identifier!(NetworkId, "network", 64);
 identifier!(SnapshotId, "snapshot", 64);
 identifier!(WorkerId, "worker", 64);
+identifier!(TenantId, "tenant", 64);
+identifier!(WorkspaceId, "workspace", 64);
+identifier!(SubjectId, "subject", 128);
 
 #[cfg(test)]
 mod tests {
@@ -69,5 +72,8 @@ mod tests {
         assert!(SandboxId::parse("../tenant").is_err());
         assert!(SandboxId::parse("Tenant").is_err());
         assert!(SandboxId::parse("x".repeat(65)).is_err());
+        assert!(TenantId::parse("tenant-a").is_ok());
+        assert!(WorkspaceId::parse("team-b").is_ok());
+        assert!(SubjectId::parse("service-account_1").is_ok());
     }
 }

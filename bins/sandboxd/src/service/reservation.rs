@@ -1,28 +1,29 @@
-use crate::state::DaemonState;
+use crate::{authorization::SandboxKey, state::DaemonState};
 use runtrue_sandbox_oci::SandboxError;
 use std::sync::atomic::Ordering;
 
 pub(super) struct ProjectReservation<'a> {
     daemon: &'a DaemonState,
-    project: String,
+    key: SandboxKey,
 }
 
 impl<'a> ProjectReservation<'a> {
-    pub(super) fn acquire(daemon: &'a DaemonState, project: &str) -> Result<Self, SandboxError> {
+    pub(super) fn acquire(daemon: &'a DaemonState, key: &SandboxKey) -> Result<Self, SandboxError> {
         let mut active = daemon.active.lock().expect("active lock");
         if daemon.shutdown.load(Ordering::Acquire) {
             return Err(SandboxError::Runtime(
                 "sandboxd is shutting down".to_owned(),
             ));
         }
-        if !active.insert(project.to_owned()) {
+        if !active.insert(key.clone()) {
             return Err(SandboxError::Runtime(format!(
-                "project `{project}` already has an active sandbox"
+                "sandbox `{}` already has an active operation",
+                key.sandbox_id
             )));
         }
         Ok(Self {
             daemon,
-            project: project.to_owned(),
+            key: key.clone(),
         })
     }
 }
@@ -33,6 +34,6 @@ impl Drop for ProjectReservation<'_> {
             .active
             .lock()
             .expect("active lock")
-            .remove(&self.project);
+            .remove(&self.key);
     }
 }
