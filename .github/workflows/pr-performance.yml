@@ -1,0 +1,321 @@
+name: PR performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to benchmark
+        required: true
+        type: string
+      samples:
+        description: Concurrent signed requests per revision
+        required: true
+        default: "12000"
+        type: string
+      concurrency:
+        description: Concurrent clients
+        required: true
+        default: "16"
+        type: string
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: pr-performance-${{ inputs.pr_number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    name: Authorize performance run
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request && github.event.comment.body == '/perf')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.authorize.outputs.pr_number }}
+      base_sha: ${{ steps.authorize.outputs.base_sha }}
+      head_sha: ${{ steps.authorize.outputs.head_sha }}
+      head_repository: ${{ steps.authorize.outputs.head_repository }}
+      harness_sha: ${{ steps.authorize.outputs.harness_sha }}
+      samples: ${{ steps.authorize.outputs.samples }}
+      concurrency: ${{ steps.authorize.outputs.concurrency }}
+    steps:
+      - name: Verify initiator and resolve pull request
+        id: authorize
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        env:
+          REQUESTED_PR: ${{ inputs.pr_number || github.event.issue.number }}
+          REQUESTED_SAMPLES: ${{ inputs.samples || '12000' }}
+          REQUESTED_CONCURRENCY: ${{ inputs.concurrency || '16' }}
+          PERF_APPROVERS: ${{ vars.PERF_APPROVERS }}
+        with:
+          script: |
+            const marker = '<!-- runtrue-pr-performance -->';
+            const fail = message => {
+              core.setFailed(message);
+              throw new Error(message);
+            };
+            const prNumber = Number(process.env.REQUESTED_PR);
+            const samples = Number(process.env.REQUESTED_SAMPLES);
+            const concurrency = Number(process.env.REQUESTED_CONCURRENCY);
+            if (!Number.isInteger(prNumber) || prNumber < 1) {
+              fail('A valid pull request number is required.');
+            }
+            if (!Number.isInteger(samples) || samples < 100 || samples > 20000) {
+              fail('Samples must be an integer between 100 and 20000.');
+            }
+            if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) {
+              fail('Concurrency must be an integer between 1 and 64.');
+            }
+            if (context.eventName === 'issue_comment' && context.payload.comment.body.trim() !== '/perf') {
+              fail('The only supported pull request command is `/perf`.');
+            }
+            if (context.ref !== 'refs/heads/main') {
+              fail('Performance workflows must be dispatched from the main branch.');
+            }
+
+            const permission = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo,
+              username: context.actor,
+            });
+            const trustedPermissions = new Set(['admin', 'maintain', 'write']);
+            if (!trustedPermissions.has(permission.data.permission)) {
+              fail(`@${context.actor} does not have permission to start a performance run.`);
+            }
+            const configuredApprovers = process.env.PERF_APPROVERS
+              .split(',')
+              .map(value => value.trim().toLowerCase())
+              .filter(Boolean);
+            if (configuredApprovers.length > 0 && !configuredApprovers.includes(context.actor.toLowerCase())) {
+              fail(`@${context.actor} is not listed in the PERF_APPROVERS repository variable.`);
+            }
+
+            const pull = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+            if (pull.data.state !== 'open') {
+              fail(`Pull request #${prNumber} is not open.`);
+            }
+            if (pull.data.base.repo.full_name !== `${context.repo.owner}/${context.repo.repo}` || pull.data.base.ref !== 'main') {
+              fail('Performance runs only support pull requests targeting this repository main branch.');
+            }
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('base_sha', pull.data.base.sha);
+            core.setOutput('head_sha', pull.data.head.sha);
+            core.setOutput('head_repository', pull.data.head.repo.full_name);
+            core.setOutput('harness_sha', context.sha);
+            core.setOutput('samples', String(samples));
+            core.setOutput('concurrency', String(concurrency));
+
+            const body = `${marker}
+            ## Performance comparison
+
+            ⏳ Run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) was requested by @${context.actor} and is benchmarking `${pull.data.base.sha.slice(0, 8)}` against `${pull.data.head.sha.slice(0, 8)}`.
+
+            This run is informational and does not automatically gate the pull request.`
+              .split('\n')
+              .map(line => line.trimStart())
+              .join('\n');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(comment => comment.user.type === 'Bot' && comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body });
+            }
+
+  benchmark:
+    name: Compare base and pull request
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.authorize.outputs.harness_sha }}
+          path: harness
+          persist-credentials: false
+      - name: Check out pull request base
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.authorize.outputs.base_sha }}
+          path: baseline
+          persist-credentials: false
+      - name: Check out pull request head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ needs.authorize.outputs.head_repository }}
+          ref: ${{ needs.authorize.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Verify immutable revisions
+        env:
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+        run: |
+          test "$(git -C baseline rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$HEAD_SHA"
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --no-self-update
+          rustup default 1.94.0
+      - name: Validate ephemeral runner
+        run: |
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          sudo -n true
+          command -v python3
+          command -v setpriv
+      - name: Benchmark base revision
+        env:
+          SAMPLES: ${{ needs.authorize.outputs.samples }}
+          CONCURRENCY: ${{ needs.authorize.outputs.concurrency }}
+        run: |
+          mkdir -p results
+          harness/tools/performance/run-control-plane.sh \
+            --source baseline \
+            --output "$GITHUB_WORKSPACE/results/baseline.json" \
+            --samples "$SAMPLES" \
+            --concurrency "$CONCURRENCY"
+      - name: Benchmark pull request revision
+        env:
+          SAMPLES: ${{ needs.authorize.outputs.samples }}
+          CONCURRENCY: ${{ needs.authorize.outputs.concurrency }}
+        run: |
+          harness/tools/performance/run-control-plane.sh \
+            --source candidate \
+            --output "$GITHUB_WORKSPACE/results/candidate.json" \
+            --samples "$SAMPLES" \
+            --concurrency "$CONCURRENCY"
+      - name: Retain raw measurements
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-${{ needs.authorize.outputs.pr_number }}-performance-${{ github.run_id }}
+          path: results/*.json
+          if-no-files-found: error
+          retention-days: 14
+
+  report:
+    name: Report comparison
+    needs: [authorize, benchmark]
+    if: always() && needs.authorize.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Download raw measurements
+        if: needs.benchmark.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-${{ needs.authorize.outputs.pr_number }}-performance-${{ github.run_id }}
+          path: results
+      - name: Update pull request feedback
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        env:
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- runtrue-pr-performance -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const prNumber = Number(process.env.PR_NUMBER);
+            const format = (value, digits = 2) => Number(value).toFixed(digits);
+            const delta = (base, candidate) => ((candidate / base) - 1) * 100;
+            const signed = value => `${value >= 0 ? '+' : ''}${format(value)}%`;
+            const readResult = path => {
+              const result = JSON.parse(fs.readFileSync(path, 'utf8'));
+              const metrics = [
+                result.binary_size_bytes,
+                result.sequential?.p50_ms,
+                result.concurrent?.requests_per_second,
+                result.concurrent?.p50_ms,
+                result.concurrent?.p99_ms,
+              ];
+              if (
+                result.schema_version !== 1 ||
+                typeof result.revision !== 'string' ||
+                !/^[0-9a-f]{40}$/.test(result.revision) ||
+                metrics.some(value => !Number.isFinite(value) || value <= 0)
+              ) {
+                throw new Error(`invalid performance result in ${path}`);
+              }
+              return result;
+            };
+            let body;
+            if (process.env.BENCHMARK_RESULT !== 'success') {
+              body = `${marker}
+              ## Performance comparison
+
+              ❌ [Performance run ${context.runId}](${runUrl}) did not complete successfully. Inspect the run logs before retrying with `/perf`.`;
+            } else {
+              try {
+                const baseline = readResult('results/baseline.json');
+                const candidate = readResult('results/candidate.json');
+                if (JSON.stringify(baseline.configuration) !== JSON.stringify(candidate.configuration)) {
+                  throw new Error('base and pull request benchmark configurations differ');
+                }
+                const throughputDelta = delta(
+                  baseline.concurrent.requests_per_second,
+                  candidate.concurrent.requests_per_second,
+                );
+                const p50Delta = delta(baseline.concurrent.p50_ms, candidate.concurrent.p50_ms);
+                const p99Delta = delta(baseline.concurrent.p99_ms, candidate.concurrent.p99_ms);
+                const sequentialDelta = delta(baseline.sequential.p50_ms, candidate.sequential.p50_ms);
+                const sizeDelta = delta(baseline.binary_size_bytes, candidate.binary_size_bytes);
+                const possibleRegression = throughputDelta < -10 || p99Delta > 15;
+                const summary = possibleRegression
+                  ? '⚠️ Possible regression; rerun once to distinguish code impact from hosted-runner noise.'
+                  : '✅ No large control-plane regression detected in this run.';
+                body = `${marker}
+                ## Performance comparison
+
+                ${summary}
+
+                | Measurement | Base `${baseline.revision.slice(0, 8)}` | PR `${candidate.revision.slice(0, 8)}` | Change |
+                |---|---:|---:|---:|
+                | Concurrent throughput | ${format(baseline.concurrent.requests_per_second, 1)} req/s | ${format(candidate.concurrent.requests_per_second, 1)} req/s | ${signed(throughputDelta)} |
+                | Concurrent p50 | ${format(baseline.concurrent.p50_ms)} ms | ${format(candidate.concurrent.p50_ms)} ms | ${signed(p50Delta)} |
+                | Concurrent p99 | ${format(baseline.concurrent.p99_ms)} ms | ${format(candidate.concurrent.p99_ms)} ms | ${signed(p99Delta)} |
+                | Sequential p50 | ${format(baseline.sequential.p50_ms)} ms | ${format(candidate.sequential.p50_ms)} ms | ${signed(sequentialDelta)} |
+                | Release binary size | ${format(baseline.binary_size_bytes / 1048576)} MiB | ${format(candidate.binary_size_bytes / 1048576)} MiB | ${signed(sizeDelta)} |
+
+                Configuration: ${candidate.configuration.concurrent_requests} signed requests, concurrency ${candidate.configuration.concurrency}, ${candidate.configuration.warmup_requests} warmups. Higher throughput is better; lower latency is better.
+
+                Shared GitHub-hosted runners are noisy, so this comparison is informational rather than a merge gate. Raw JSON is retained for 14 days in [run ${context.runId}](${runUrl}).`;
+              } catch (error) {
+                core.warning(error.message);
+                body = `${marker}
+                ## Performance comparison
+
+                ❌ [Performance run ${context.runId}](${runUrl}) produced invalid comparison data. Inspect the report logs before retrying.`;
+              }
+            }
+            body = body.split('\n').map(line => line.trimStart()).join('\n');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(comment => comment.user.type === 'Bot' && comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body });
+            }
+            await core.summary.addRaw(body.replace(marker, '')).write();

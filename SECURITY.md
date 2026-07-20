@@ -5,8 +5,8 @@
 `sandboxd` is experimental security software. There are no supported stable
 releases. The `main` branch is the only maintained source state.
 
-Do not expose either daemon socket to tenant clients or use the repository as a
-completed multi-tenant security boundary without an independent review.
+Do not expose either daemon socket to tenant clients or treat the repository as
+a complete multi-tenant security boundary without an independent review.
 
 ## Reporting a vulnerability
 

@@ -75,9 +75,9 @@ independent guest CPU or memory guarantees.
 - `sandbox-gvisor` owns runsc execution, OCI bundles, host resources, local
   snapshots, recovery, and cleanup.
 
-See [docs/architecture.md](docs/architecture.md) for the ownership and isolation
-model and [docs/control-plane.md](docs/control-plane.md) for the authenticated
-control contract.
+Detailed documentation covers [architecture and isolation](docs/architecture.md),
+[authenticated control](docs/control-plane.md), and
+[performance feedback](docs/performance.md).
 
 ## Validated host cohort
 
@@ -121,6 +121,9 @@ cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo audit
 cargo deny check advisories licenses bans sources
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/performance/tests
+shellcheck tools/performance/run-control-plane.sh
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 ```
 
 ## Contributing and security
