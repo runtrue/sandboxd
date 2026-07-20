@@ -10,4 +10,6 @@ pub enum CoreError {
     InvalidSpecification(String),
     #[error("invalid snapshot manifest: {0}")]
     InvalidSnapshot(String),
+    #[error("invalid work order: {0}")]
+    InvalidWorkOrder(String),
 }

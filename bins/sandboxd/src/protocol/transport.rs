@@ -40,3 +40,37 @@ pub(crate) fn write_message<T: Serialize>(
         .and_then(|()| stream.write_all(b"\n"))
         .map_err(|source| SandboxError::Runtime(format!("write protocol message: {source}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use std::time::{Duration, Instant};
+
+    #[derive(Deserialize)]
+    struct Probe {
+        #[allow(dead_code)]
+        value: String,
+    }
+
+    #[test]
+    fn read_timeout_bounds_incomplete_clients() {
+        let (reader, _writer) = UnixStream::pair().expect("socket pair");
+        reader
+            .set_read_timeout(Some(Duration::from_millis(25)))
+            .expect("read timeout");
+        let started = Instant::now();
+        assert!(read_message::<Probe>(&reader).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn rejects_unterminated_messages() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        writer.write_all(br#"{"value":"x"}"#).expect("write");
+        writer
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown");
+        assert!(read_message::<Probe>(&reader).is_err());
+    }
+}

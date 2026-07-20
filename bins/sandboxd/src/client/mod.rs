@@ -1,6 +1,8 @@
 use crate::protocol::{
-    read_message, write_message, Operation, Request, Response, PROTOCOL_VERSION,
+    read_message, write_message, Operation, Request, RequestAuthorization, Response,
+    PROTOCOL_VERSION,
 };
+use runtrue_sandbox_core::{SubjectId, TenantId, WorkspaceId};
 use runtrue_sandbox_oci::{io_error, SandboxError, TopologyLock};
 use std::{fs, os::unix::net::UnixStream, path::Path};
 
@@ -8,6 +10,11 @@ pub(crate) fn send(socket: &Path, operation: Operation) -> Result<(), SandboxErr
     let request = Request {
         schema_version: PROTOCOL_VERSION,
         request_id: format!("client-{}", std::process::id()),
+        authorization: Some(RequestAuthorization::Operator {
+            tenant_id: TenantId::parse("local").expect("static tenant identity"),
+            workspace_id: WorkspaceId::parse("local").expect("static workspace identity"),
+            subject_id: SubjectId::parse("local-root").expect("static subject identity"),
+        }),
         operation,
     };
     let mut stream = UnixStream::connect(socket).map_err(|source| io_error(socket, source))?;

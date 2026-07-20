@@ -8,8 +8,13 @@ publish = false
 
 [dependencies]
 clap.workspace = true
+hex.workspace = true
+hmac.workspace = true
+nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 runtrue-sandbox-core.workspace = true
 runtrue-sandbox-gvisor.workspace = true
 runtrue-sandbox-oci.workspace = true

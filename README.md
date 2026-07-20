@@ -7,10 +7,11 @@ multi-container topologies inside gVisor, treats the complete sandbox as the
 lifecycle boundary, and supports sandbox-scoped pause, resume, snapshot, and
 restore.
 
-> **Security status:** the daemon is a privileged local worker. Keep its Unix
-> socket root-owned and do not expose it to untrusted clients. The gVisor guest
-> boundary is exercised locally; the control plane has not completed an
-> adversarial security review. See [SECURITY.md](SECURITY.md).
+> **Security status:** the daemon is a privileged local worker. Its operator
+> socket is root-only. An optional workload socket accepts one configured local
+> broker UID and requires a short-lived signed work order for every request;
+> tenant clients do not connect to either socket. The control path has not
+> completed an independent adversarial review. See [SECURITY.md](SECURITY.md).
 
 ## Capabilities
 
@@ -20,6 +21,9 @@ restore.
 - private sandbox networking with service-name resolution;
 - create, inspect, logs, pause, resume, stop, and crash recovery;
 - cgroup-backed host resource containment and bounded output capture;
+- tenant/workspace-scoped ownership with durable assignment fencing;
+- bounded local control transport with peer credentials, signed work orders,
+  replay protection, and structured audit records;
 - live and stop-and-move gVisor checkpoints;
 - immutable local snapshot publication with SHA-256 verification; and
 - same-worker restore under a new sandbox identity.
@@ -47,7 +51,9 @@ independent guest CPU or memory guarantees.
 
 ## Explicit limitations
 
-- control access is local and root-only; there is no tenant authentication;
+- the tenant-facing identity, policy, and work-order signing service is not part
+  of this worker; the optional local broker boundary supports one configured UID
+  and one active HMAC key;
 - snapshots are stored on the same worker and are not transferable artifacts;
 - writable OCI layers, bind mounts, and external volumes are unsupported;
 - outbound networking and external DNS are disabled;
@@ -70,7 +76,8 @@ independent guest CPU or memory guarantees.
   snapshots, recovery, and cleanup.
 
 See [docs/architecture.md](docs/architecture.md) for the ownership and isolation
-model.
+model and [docs/control-plane.md](docs/control-plane.md) for the authenticated
+control contract.
 
 ## Validated host cohort
 
