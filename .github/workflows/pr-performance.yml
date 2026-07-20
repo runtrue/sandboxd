@@ -36,8 +36,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
     outputs:
       pr_number: ${{ steps.authorize.outputs.pr_number }}
       base_sha: ${{ steps.authorize.outputs.base_sha }}
@@ -215,8 +214,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - name: Download raw measurements
         if: needs.benchmark.result == 'success'
