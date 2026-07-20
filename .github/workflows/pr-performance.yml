@@ -116,7 +116,7 @@ jobs:
             const body = `${marker}
             ## Performance comparison
 
-            ⏳ Run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) was requested by @${context.actor} and is benchmarking `${pull.data.base.sha.slice(0, 8)}` against `${pull.data.head.sha.slice(0, 8)}`.
+            ⏳ Run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) was requested by @${context.actor} and is benchmarking <code>${pull.data.base.sha.slice(0, 8)}</code> against <code>${pull.data.head.sha.slice(0, 8)}</code>.
 
             This run is informational and does not automatically gate the pull request.`
               .split('\n')
@@ -262,7 +262,7 @@ jobs:
               body = `${marker}
               ## Performance comparison
 
-              ❌ [Performance run ${context.runId}](${runUrl}) did not complete successfully. Inspect the run logs before retrying with `/perf`.`;
+              ❌ [Performance run ${context.runId}](${runUrl}) did not complete successfully. Inspect the run logs before retrying with <code>/perf</code>.`;
             } else {
               try {
                 const baseline = readResult('results/baseline.json');
@@ -287,7 +287,7 @@ jobs:
 
                 ${summary}
 
-                | Measurement | Base `${baseline.revision.slice(0, 8)}` | PR `${candidate.revision.slice(0, 8)}` | Change |
+                | Measurement | Base <code>${baseline.revision.slice(0, 8)}</code> | PR <code>${candidate.revision.slice(0, 8)}</code> | Change |
                 |---|---:|---:|---:|
                 | Concurrent throughput | ${format(baseline.concurrent.requests_per_second, 1)} req/s | ${format(candidate.concurrent.requests_per_second, 1)} req/s | ${signed(throughputDelta)} |
                 | Concurrent p50 | ${format(baseline.concurrent.p50_ms)} ms | ${format(candidate.concurrent.p50_ms)} ms | ${signed(p50Delta)} |
