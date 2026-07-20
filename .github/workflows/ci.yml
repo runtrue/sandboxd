@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  quality:
+    name: Rust quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default 1.94.0
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Validate shell syntax
+        run: git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+
+  security:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --no-self-update
+          rustup default 1.94.0
+      - name: Install dependency scanners
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: Audit RustSec advisories
+        run: cargo audit --deny warnings
+      - name: Enforce dependency policy
+        run: cargo deny check advisories licenses bans sources
+
+  reproducible-build:
+    name: Same-run reproducible release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --no-self-update
+          rustup default 1.94.0
+      - name: Build release binaries
+        run: |
+          cargo build --workspace --release --locked
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd > /tmp/sandboxd-first-build.sha256
+      - name: Rebuild from clean outputs
+        run: |
+          cargo clean
+          cargo build --workspace --release --locked
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd > /tmp/sandboxd-second-build.sha256
+          diff --unified /tmp/sandboxd-first-build.sha256 /tmp/sandboxd-second-build.sha256

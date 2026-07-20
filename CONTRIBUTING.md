@@ -28,6 +28,13 @@ bash -n examples/python-compose/run-snapshot-local.sh
 Changes to lifecycle, networking, resource limits, snapshots, recovery, or
 cleanup should also run both root-required example scripts on a clean worker.
 
+The `CI` workflow runs portable quality, dependency-policy, and same-run
+reproducibility checks on GitHub-hosted workers. The manually dispatched
+`gVisor integration` workflow runs only on a dedicated, ephemeral, root-owned
+self-hosted worker labeled `sandboxd-gvisor`. Do not register a long-lived or
+general-purpose privileged runner with this public repository. The privileged
+workflow is intentionally not triggered by pull requests.
+
 ## Change design
 
 - Treat the complete sandbox as the lifecycle and checkpoint boundary.

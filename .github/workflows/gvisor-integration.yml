@@ -1,0 +1,41 @@
+name: gVisor integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gvisor-integration
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  integration:
+    name: Privileged lifecycle and snapshot tests
+    runs-on: [self-hosted, linux, x64, sandboxd-gvisor]
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate dedicated worker
+        run: |
+          test "$(id -u)" -eq 0
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          command -v cargo
+          command -v docker
+          command -v ip
+          command -v runsc
+          docker info >/dev/null
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+      - name: Build local fixture image
+        run: ./examples/python-compose/build-local.sh
+      - name: Test lifecycle, networking, and resource limits
+        run: ./examples/python-compose/run-local.sh
+      - name: Test snapshot and restore
+        run: ./examples/python-compose/run-snapshot-local.sh

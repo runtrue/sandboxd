@@ -1,5 +1,7 @@
 # sandboxd
 
+[![CI](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml/badge.svg)](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml)
+
 `sandboxd` is an experimental local OCI sandbox worker. It runs restricted
 multi-container topologies inside gVisor, treats the complete sandbox as the
 lifecycle boundary, and supports sandbox-scoped pause, resume, snapshot, and
