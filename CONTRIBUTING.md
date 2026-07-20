@@ -3,8 +3,9 @@
 ## Development environment
 
 Use the pinned Rust toolchain from `rust-toolchain.toml`. Runtime integration
-checks require Linux x86-64, cgroup v2, root access, iproute2, Docker Engine,
-GNU tar, and the runsc release listed in the README.
+checks require Linux x86-64, cgroup v2, root access, iproute2, containerd with
+the overlayfs snapshotter, the `ctr` client, and the runsc release listed in the
+README.
 
 Keep backend-neutral contracts in `sandbox-core` and `sandbox-runtime`. OCI
 topology and image handling belong in `sandbox-oci`. gVisor-specific execution,

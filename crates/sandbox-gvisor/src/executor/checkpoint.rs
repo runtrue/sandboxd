@@ -1,6 +1,6 @@
 use super::{
-    bundle, create_resources, runtime_id, validate_admitted, validate_project, AdmittedRootfs,
-    GvisorSandbox, GvisorSandboxState, Resources,
+    bundle, create_resources, runtime_id, validate_admitted, validate_project, GvisorSandbox,
+    GvisorSandboxState, ImmutableRootfs, Resources,
 };
 use crate::{
     compiler::verify_lock,
@@ -25,7 +25,7 @@ pub fn restore_admitted(
     snapshot_id: &SnapshotId,
     runsc_program: &Path,
     ip_program: &Path,
-    admitted: &BTreeMap<String, AdmittedRootfs>,
+    admitted: &BTreeMap<String, ImmutableRootfs>,
 ) -> Result<GvisorSandbox, SandboxError> {
     verify_lock(lock)?;
     validate_project(project)?;
@@ -48,7 +48,7 @@ pub fn restore_admitted(
     }
     let rootfs_by_image = admitted
         .iter()
-        .map(|(id, image)| (id.clone(), image.rootfs.clone()))
+        .map(|(id, image)| (id.clone(), image.rootfs().to_owned()))
         .collect::<BTreeMap<_, _>>();
     let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
     let compatibility = (|| {

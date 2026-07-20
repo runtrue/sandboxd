@@ -364,6 +364,7 @@ impl Runsc {
             "--network=sandbox".to_owned(),
             "--ignore-cgroups=true".to_owned(),
             "--platform=systrap".to_owned(),
+            "--overlay2=none".to_owned(),
             "--file-access=exclusive".to_owned(),
             "--file-access-mounts=exclusive".to_owned(),
             "--directfs=false".to_owned(),

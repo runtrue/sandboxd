@@ -1,5 +1,5 @@
 use crate::{
-    cli::{Cli, Command},
+    cli::{Cli, Command, ServeArgs},
     client,
     protocol::Operation,
     server,
@@ -8,29 +8,42 @@ use runtrue_sandbox_oci::SandboxError;
 
 pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
     match cli.command {
-        Command::Serve {
-            socket,
-            workload_socket,
-            broker_uid,
-            work_order_key,
-            maximum_connections,
-            io_timeout_seconds,
-            state_root,
-            image_store,
-            runsc,
-            ip,
-        } => server::serve(server::ServerConfig {
-            operator_socket: socket,
-            workload_socket,
-            broker_uid,
-            work_order_key,
-            state_root,
-            image_store,
-            runsc,
-            ip,
-            maximum_connections,
-            io_timeout: std::time::Duration::from_secs(io_timeout_seconds),
-        }),
+        Command::Serve(options) => {
+            let ServeArgs {
+                socket,
+                workload_socket,
+                broker_uid,
+                work_order_key,
+                maximum_connections,
+                io_timeout_seconds,
+                state_root,
+                image_store,
+                ctr,
+                containerd_address,
+                containerd_namespace,
+                snapshotter,
+                image_platform,
+                runsc,
+                ip,
+            } = *options;
+            server::serve(server::ServerConfig {
+                operator_socket: socket,
+                workload_socket,
+                broker_uid,
+                work_order_key,
+                state_root,
+                image_store,
+                ctr,
+                containerd_address,
+                containerd_namespace,
+                snapshotter,
+                image_platform,
+                runsc,
+                ip,
+                maximum_connections,
+                io_timeout: std::time::Duration::from_secs(io_timeout_seconds),
+            })
+        }
         Command::Ping { socket } => client::send(&socket, Operation::Ping),
         Command::Stats { socket } => client::send(&socket, Operation::Stats),
         Command::Admit { socket, lock } => client::send(

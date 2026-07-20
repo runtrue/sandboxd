@@ -1,12 +1,14 @@
 # Local two-service fixture
 
-This fixture builds one Python image and runs separate `server` and `client`
-services over a private bridge. The client resolves `server`, verifies its HTTP
-response, and exits. The lifecycle script then pauses the remaining server,
-inspects it, resumes it, stops the complete sandbox, and verifies cleanup.
+This fixture resolves the official Python slim image through the containerd OCI
+provider and runs separate `server` and `client` services over a private bridge.
+The small Python programs are inline Compose commands, so the test requires no
+custom image, Docker Engine, GNU tar, hosted builder, or artifact registry. The
+client resolves `server`, verifies its HTTP response, and exits. The lifecycle
+script then pauses the remaining server, inspects it, resumes it, stops the
+complete sandbox, and verifies cleanup.
 
 ```bash
-./examples/python-compose/build-local.sh
 sudo ./examples/python-compose/run-local.sh
 sudo ./examples/python-compose/run-snapshot-local.sh
 ```

@@ -1,0 +1,29 @@
+name: containerd-network-example
+
+networks:
+  application:
+    internal: true
+    driver: bridge
+
+services:
+  server:
+    image: docker.io/library/alpine:3.20
+    entrypoint: [/bin/busybox, nc]
+    command: [-lk, -p, "8080", -e, /bin/cat]
+    networks: [application]
+    healthcheck:
+      test: [CMD, /bin/busybox, nc, -z, -w, "1", 127.0.0.1, "8080"]
+      interval_ms: 50
+      timeout_ms: 500
+      retries: 40
+    read_only: true
+
+  client:
+    image: docker.io/library/alpine:3.20
+    entrypoint: [/bin/sh, -c]
+    command: ["printf 'containerd-provider-ok\\n' | /bin/busybox nc -w 2 server 8080"]
+    depends_on:
+      server:
+        condition: service_healthy
+    networks: [application]
+    read_only: true

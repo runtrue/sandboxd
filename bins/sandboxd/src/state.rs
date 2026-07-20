@@ -3,7 +3,8 @@ use crate::{
     audit::AuditLog,
     authorization::{SandboxKey, TenantScope, WorkOrderVerifier},
 };
-use runtrue_sandbox_gvisor::executor::{AdmittedRootfs, GvisorSandbox};
+use runtrue_sandbox_gvisor::executor::{GvisorSandbox, ImmutableRootfs};
+use runtrue_sandbox_oci::provider::ImageProvider;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,13 +35,13 @@ pub(crate) struct TenantCounters {
 pub(crate) struct DaemonState {
     pub(crate) state_root: PathBuf,
     pub(crate) snapshot_root: PathBuf,
-    pub(crate) image_store: PathBuf,
+    pub(crate) image_provider: Arc<dyn ImageProvider>,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
     pub(crate) assignments: AssignmentLedger,
     pub(crate) audit: AuditLog,
     pub(crate) work_orders: Option<WorkOrderVerifier>,
-    pub(crate) cache: Mutex<BTreeMap<String, Arc<AdmittedRootfs>>>,
+    pub(crate) cache: Mutex<BTreeMap<String, Arc<ImmutableRootfs>>>,
     pub(crate) active: Mutex<BTreeSet<SandboxKey>>,
     pub(crate) sandboxes: Mutex<BTreeMap<SandboxKey, Arc<Mutex<GvisorSandbox>>>>,
     pub(crate) counters: Mutex<Counters>,

@@ -7,28 +7,56 @@ networks:
 
 services:
   server:
-    image: local/runtrue-sandbox-network-example:20260719
+    image: docker.io/library/python:3.13-slim
     user: "65534:65534"
     read_only: true
     working_dir: /work
-    entrypoint: ["/usr/bin/python3"]
-    command: ["/app/server.py"]
+    entrypoint: ["/usr/local/bin/python3", "-c"]
+    command:
+      - |
+        import http.server, json, os
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def do_GET(self):
+                body = json.dumps({"ok": True, "service": "server", "request_path": self.path, "topology": os.environ["TOPOLOGY_NAME"]}, sort_keys=True).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *_):
+                pass
+        http.server.ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
     environment:
       TOPOLOGY_NAME: sandbox-snapshot-example
     networks: [sandbox]
     healthcheck:
-      test: ["CMD", "/usr/bin/python3", "/app/health.py"]
+      test: ["CMD", "/usr/local/bin/python3", "-c", 'import socket; socket.create_connection(("127.0.0.1", 8080), timeout=0.5).close()']
       interval_ms: 100
       timeout_ms: 1000
       retries: 50
 
   client:
-    image: local/runtrue-sandbox-network-example:20260719
+    image: docker.io/library/python:3.13-slim
     user: "65534:65534"
     read_only: true
     working_dir: /work
-    entrypoint: ["/usr/bin/python3"]
-    command: ["/app/snapshot_client.py"]
+    entrypoint: ["/usr/local/bin/python3", "-c"]
+    command:
+      - |
+        import http.client, json, pathlib, time
+        counter_path = pathlib.Path("/tmp/snapshot-counter")
+        counter = int(counter_path.read_text()) if counter_path.exists() else 0
+        connection = http.client.HTTPConnection("server", 8080, timeout=2)
+        while True:
+            connection.request("GET", "/from-snapshot-client")
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            if payload.get("ok") is not True or payload.get("service") != "server":
+                raise RuntimeError(f"unexpected server response: {payload!r}")
+            counter += 1
+            counter_path.write_text(f"{counter}\n")
+            time.sleep(0.1)
     environment:
       TOPOLOGY_NAME: sandbox-snapshot-example
     networks: [sandbox]

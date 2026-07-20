@@ -81,9 +81,9 @@ fn admit(daemon: &DaemonState, topology: &TopologyLock) -> Result<Value, Sandbox
     let images = admit_topology(daemon, topology)?;
     Ok(serde_json::json!({
         "admitted_images": images.values().map(|image| serde_json::json!({
-            "image_id": image.image_id,
-            "exact_reference": image.exact_reference,
-            "rootfs_digest": image.rootfs_digest,
+            "image_id": image.image().image_id,
+            "exact_reference": image.image().exact_reference,
+            "rootfs_digest": image.rootfs_digest(),
         })).collect::<Vec<_>>()
     }))
 }

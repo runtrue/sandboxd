@@ -15,6 +15,8 @@ pub enum SandboxError {
     Lock(String),
     #[error("local Docker operation failed: {0}")]
     Docker(String),
+    #[error("OCI image provider failed: {0}")]
+    ImageProvider(String),
     #[error("sandbox timed out: {0}")]
     Timeout(String),
     #[error("sandbox runtime failed: {0}")]

@@ -23,12 +23,9 @@ cargo build --quiet --release --offline --manifest-path "$repo_dir/Cargo.toml" \
 "$repo_dir/target/release/runtrue-sandboxctl" \
   lock --compose "$example_dir/compose.yaml" --output "$lock_path"
 
-image_ref=$(docker image inspect local/runtrue-sandbox-network-example:20260719 --format '{{index .RepoDigests 0}}')
-image_key=${image_ref##*@sha256:}
-if [[ ! -f "$image_store/$image_key/prepared-image.json" ]]; then
-  "$repo_dir/target/release/runtrue-sandboxctl" \
-    prepare-image --reference "$image_ref" --image-store "$image_store"
-fi
+"$repo_dir/target/release/runtrue-sandboxctl" \
+  prepare-image --reference docker.io/library/python:3.13-slim \
+  --image-store "$image_store" >/dev/null
 
 install -d -m 0700 "$run_root"
 "$binary" serve --socket "$socket" --state-root "$state_root" \

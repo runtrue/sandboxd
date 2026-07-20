@@ -11,9 +11,9 @@ to the privileged worker.
 
 Topology documents, guest arguments, environment values, OCI image contents,
 workload requests, and guest execution are treated as untrusted. The worker
-operator, daemon configuration, work-order signer, local broker process, local
-Docker Engine, runsc binary, iproute2 binary, image store, state store, and
-snapshot store are trusted.
+operator, daemon configuration, work-order signer, local broker process,
+containerd daemon and snapshotter, `ctr` client, runsc binary, iproute2 binary,
+image store, state store, and snapshot store are trusted.
 
 The security boundary for guest code is gVisor plus host namespaces and cgroup
 containment. The daemon itself is privileged and is not a tenant-facing network
@@ -52,10 +52,11 @@ bins/
 crates/
   sandbox-core/             identities, capabilities, lifecycle, snapshot types
   sandbox-runtime/          backend and live-instance interfaces
-  sandbox-oci/              Compose validation and OCI image preparation
+  sandbox-oci/              Compose validation and OCI provider implementations
   sandbox-gvisor/           gVisor execution, snapshots, recovery, cleanup
 
 examples/
+  containerd-compose/       minimal public-image provider and network fixture
   python-compose/           local multi-container lifecycle and snapshot checks
 ```
 
@@ -112,14 +113,26 @@ value counts; rejects privileged and ambient host features; requires internal
 networks; validates dependency order; resolves images to repository and image
 digests; and writes a canonical topology digest.
 
-The daemon re-verifies the topology digest before execution. Images are
-admitted from a local content-addressed store only when their exact reference,
-image ID, rootfs digest, entry count, and byte count match the prepared metadata.
+The daemon re-verifies the topology digest before execution. The containerd
+provider resolves metadata through containerd and verifies the locked index,
+platform manifest, configuration, and every layer by digest and byte count. It
+also revalidates the descriptor graph and exact OS, architecture, and variant
+before a runtime is created. Layers are fetched without unpacking and pass a
+bounded streaming archive scan before containerd's configured snapshotter may
+extract them. The scan applies compressed, decoded, logical-size, entry-count,
+path-length, and deadline limits and rejects traversal, absolute paths, unsafe
+hardlinks, duplicate entries, special files, extended attributes, and sparse
+metadata. A second bounded scan of the materialized rootfs rejects residual
+special files and extended attributes before immutable publication.
 
-Image preparation is an operator-side trust boundary. It uses local Docker to
-create and export a digest-pinned image, GNU tar to materialize its rootfs, and
-a complete tree digest before atomic publication. Docker and tar are not used
-to execute guest workloads.
+Activation adds only empty runtime-owned `/etc/hosts` and `/etc/resolv.conf`
+mount targets when an image omits them, then remounts the snapshotter view
+read-only. The daemon caches opaque immutable handles and releases every
+activation on graceful shutdown. Registry credentials are scoped to one tenant
+and registry, live only in mode-`0700` temporary provider state, and never enter
+topology locks or snapshot manifests. Docker export and GNU tar remain available
+only through an explicitly named diagnostic command; neither is part of the
+production admission or execution path.
 
 ## gVisor execution
 

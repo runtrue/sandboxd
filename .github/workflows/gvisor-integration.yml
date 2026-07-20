@@ -27,14 +27,13 @@ jobs:
           test "$(id -u)" -eq 0
           test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
           command -v cargo
-          command -v docker
+          command -v ctr
           command -v ip
           command -v runsc
-          docker info >/dev/null
+          test -S /run/containerd/containerd.sock
+          ctr version >/dev/null
       - name: Run workspace tests
         run: cargo test --workspace --locked
-      - name: Build local fixture image
-        run: ./examples/python-compose/build-local.sh
       - name: Test lifecycle, networking, and resource limits
         run: ./examples/python-compose/run-local.sh
       - name: Test snapshot and restore

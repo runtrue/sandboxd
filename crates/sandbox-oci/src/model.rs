@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(crate) const LOCK_SCHEMA_VERSION: u32 = 1;
+pub(crate) const LOCK_SCHEMA_VERSION: u32 = 2;
 pub(crate) const MAX_SERVICES: usize = 32;
 pub(crate) const MAX_NETWORKS: usize = 8;
 pub(crate) const MAX_ENVIRONMENT: usize = 128;
@@ -123,8 +123,21 @@ pub struct LockedImage {
     pub source: String,
     pub exact_reference: String,
     pub image_id: String,
+    pub index: Option<LockedDescriptor>,
+    pub manifest: LockedDescriptor,
+    pub config: LockedDescriptor,
+    pub layers: Vec<LockedDescriptor>,
     pub operating_system: String,
     pub architecture: String,
+    pub variant: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedDescriptor {
+    pub media_type: String,
+    pub digest: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

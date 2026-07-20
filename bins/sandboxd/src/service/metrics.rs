@@ -22,9 +22,9 @@ fn collect_operator(daemon: &DaemonState) -> Result<Value, SandboxError> {
         .values()
         .map(|image| {
             serde_json::json!({
-                "image_id": image.image_id,
-                "exact_reference": image.exact_reference,
-                "rootfs_digest": image.rootfs_digest,
+                "image_id": image.image().image_id,
+                "exact_reference": image.image().exact_reference,
+                "rootfs_digest": image.rootfs_digest(),
             })
         })
         .collect::<Vec<_>>();

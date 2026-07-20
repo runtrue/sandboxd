@@ -2,9 +2,31 @@ name: sandbox-process-limit
 
 services:
   processes:
-    image: local/runtrue-sandbox-network-example:20260719
-    entrypoint: [/usr/bin/python3]
-    command: [/app/limits.py, processes]
+    image: docker.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import os, signal, time
+        children = []
+        bounded_at = None
+        try:
+            for index in range(100):
+                try:
+                    child = os.fork()
+                except OSError:
+                    bounded_at = index
+                    break
+                if child == 0:
+                    time.sleep(10)
+                    os._exit(0)
+                children.append(child)
+        finally:
+            for child in children:
+                os.kill(child, signal.SIGKILL)
+            for child in children:
+                os.waitpid(child, 0)
+        assert bounded_at is not None and bounded_at <= 32, bounded_at
+        print(f"process-limit-passed:{bounded_at}")
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
     read_only: true

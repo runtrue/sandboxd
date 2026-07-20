@@ -38,8 +38,11 @@ The worker verifies local peer credentials, work-order integrity and expiry,
 durable nonce replay state, resource ceilings, tenant/workspace ownership, and
 assignment epochs. Tenant-visible state is scoped before lookup. The signer and
 configured broker are trusted; this repository does not implement their
-tenant-facing identity or policy layer. Local Docker Engine and GNU tar
-participate in image preparation and belong to the trusted operator boundary.
+tenant-facing identity or policy layer. The local containerd daemon,
+snapshotter, and `ctr` client participate in image preparation and belong to
+the trusted operator boundary. OCI registries and their transport remain
+outside the worker boundary, so every admitted descriptor and blob is verified
+against the locked digest and size.
 
 The implemented snapshot portability is `same_worker`. Writable OCI layers,
 bind mounts, external volumes, artifact import, transferable snapshot fencing,

@@ -2,9 +2,16 @@ name: sandbox-output-limit
 
 services:
   output:
-    image: local/runtrue-sandbox-network-example:20260719
-    entrypoint: [/usr/bin/python3]
-    command: [/app/limits.py, output]
+    image: docker.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import os
+        remaining = 2 * 1024 * 1024
+        chunk = b"x" * 65536
+        while remaining:
+            written = os.write(1, chunk[:remaining])
+            remaining -= written
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
     read_only: true
