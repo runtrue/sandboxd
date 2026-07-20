@@ -106,7 +106,7 @@ The exact request and signing contract is documented in
 
 ## Topology admission
 
-`sandboxctl` accepts a deliberately restricted Compose subset. Unknown fields
+`sandboxctl` accepts a restricted Compose subset. Unknown fields
 are rejected. The compiler bounds service, network, argument, environment, and
 value counts; rejects privileged and ambient host features; requires internal
 networks; validates dependency order; resolves images to repository and image
@@ -214,8 +214,8 @@ The checkpoint contains process state, memory, sockets, and writable tmpfs
 contents. The read-only OCI roots are re-admitted from the local image store.
 Snapshot portability is `same_worker`; no artifact export, writable OCI layer,
 external volume, or cross-worker restore is exposed. Control operations are
-assignment-epoch fenced, but the local snapshot itself is not yet a
-transferable, worker-fenced artifact.
+assignment-epoch fenced, but the local snapshot is not a transferable,
+worker-fenced artifact.
 
 ## Backend-neutral snapshot types
 

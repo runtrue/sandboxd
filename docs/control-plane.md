@@ -3,7 +3,7 @@
 ## Deployment boundary
 
 `sandboxd` is a privileged worker component, not a tenant-facing API server.
-The intended request path is:
+The supported request path is:
 
 ```text
 tenant client -> identity/policy service -> work-order signer -> local broker
@@ -41,7 +41,7 @@ The key file contains exactly 32 bytes encoded as 64 lowercase or uppercase
 hexadecimal characters, optionally followed by one newline. It must be a
 root-owned regular file, must not be group-writable, and must have no world
 permissions. A symlink is rejected. The daemon supports one active HMAC key;
-rotation currently requires replacing the file and restarting the worker.
+rotation requires replacing the file and restarting the worker.
 
 The operator socket is mode `0600` and accepts UID 0. The workload socket is
 mode `0600`, is owned by the configured non-root broker UID, and accepts that
@@ -124,7 +124,7 @@ may execute.
 For operations containing a topology, the worker verifies the signed service,
 memory, CPU, PID, tmpfs, and captured-output ceilings before image admission or
 execution. Run, create, and restore deadlines must not exceed the signed
-maximum. The topology compiler and runtime continue to apply their stricter
+maximum. The topology compiler and runtime also apply their stricter
 absolute limits; a work order cannot widen them.
 
 ## Ownership and recovery
