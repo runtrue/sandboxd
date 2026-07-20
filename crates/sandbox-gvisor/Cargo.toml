@@ -1,0 +1,22 @@
+[package]
+name = "runtrue-sandbox-gvisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+runtrue-sandbox-oci.workspace = true
+runtrue-sandbox-core.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

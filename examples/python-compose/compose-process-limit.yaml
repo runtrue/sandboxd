@@ -1,0 +1,10 @@
+name: sandbox-process-limit
+
+services:
+  processes:
+    image: local/runtrue-sandbox-network-example:20260719
+    entrypoint: [/usr/bin/python3]
+    command: [/app/limits.py, processes]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    read_only: true

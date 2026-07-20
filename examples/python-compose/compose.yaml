@@ -1,0 +1,37 @@
+name: sandbox-network-example
+
+networks:
+  application:
+    internal: true
+    driver: bridge
+
+services:
+  server:
+    image: local/runtrue-sandbox-network-example:20260719
+    entrypoint: [/usr/bin/python3]
+    command: [/app/server.py]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      TOPOLOGY_NAME: sandbox-network-example
+    networks: [application]
+    healthcheck:
+      test: [CMD, /usr/bin/python3, /app/health.py]
+      interval_ms: 50
+      timeout_ms: 500
+      retries: 40
+    read_only: true
+
+  client:
+    image: local/runtrue-sandbox-network-example:20260719
+    entrypoint: [/usr/bin/python3]
+    command: [/app/client.py, "http://server:8080/from-client"]
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      TOPOLOGY_NAME: sandbox-network-example
+    networks: [application]
+    read_only: true

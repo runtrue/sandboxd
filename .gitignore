@@ -1,0 +1,4 @@
+/target/
+**/*topology.lock.json
+*.log
+.DS_Store

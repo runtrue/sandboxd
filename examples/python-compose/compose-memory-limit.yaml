@@ -1,0 +1,10 @@
+name: sandbox-memory-limit
+
+services:
+  memory:
+    image: local/runtrue-sandbox-network-example:20260719
+    entrypoint: [/usr/bin/python3]
+    command: [/app/limits.py, memory]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    read_only: true

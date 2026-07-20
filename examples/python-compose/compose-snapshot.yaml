@@ -1,0 +1,37 @@
+name: sandbox-snapshot-example
+
+networks:
+  sandbox:
+    internal: true
+    driver: bridge
+
+services:
+  server:
+    image: local/runtrue-sandbox-network-example:20260719
+    user: "65534:65534"
+    read_only: true
+    working_dir: /work
+    entrypoint: ["/usr/bin/python3"]
+    command: ["/app/server.py"]
+    environment:
+      TOPOLOGY_NAME: sandbox-snapshot-example
+    networks: [sandbox]
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "/app/health.py"]
+      interval_ms: 100
+      timeout_ms: 1000
+      retries: 50
+
+  client:
+    image: local/runtrue-sandbox-network-example:20260719
+    user: "65534:65534"
+    read_only: true
+    working_dir: /work
+    entrypoint: ["/usr/bin/python3"]
+    command: ["/app/snapshot_client.py"]
+    environment:
+      TOPOLOGY_NAME: sandbox-snapshot-example
+    networks: [sandbox]
+    depends_on:
+      server:
+        condition: service_healthy
