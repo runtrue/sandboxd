@@ -17,7 +17,11 @@ use nix::{
     poll::{poll, PollFd, PollFlags},
 };
 use runtrue_sandbox_gvisor::executor;
-use runtrue_sandbox_oci::{io_error, SandboxError};
+use runtrue_sandbox_oci::{
+    io_error,
+    provider::{ContainerdImageProvider, ContainerdProviderConfig, ImageLimits, ImagePlatform},
+    SandboxError,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -64,6 +68,15 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         .as_deref()
         .map(|path| WorkOrderVerifier::from_key_file(path, &control_root))
         .transpose()?;
+    let image_provider = Arc::new(ContainerdImageProvider::new(ContainerdProviderConfig {
+        ctr_program: config.ctr,
+        address: config.containerd_address,
+        namespace: config.containerd_namespace,
+        snapshotter: config.snapshotter,
+        mount_root: config.image_store,
+        platform: ImagePlatform::parse(&config.image_platform)?,
+        limits: ImageLimits::default(),
+    })?);
 
     let mut endpoints = vec![BoundEndpoint {
         listener: socket::bind_operator(&config.operator_socket)?,
@@ -81,7 +94,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
     let daemon = Arc::new(DaemonState {
         state_root: sandbox_root,
         snapshot_root,
-        image_store: config.image_store,
+        image_provider,
         runsc: config.runsc,
         ip: config.ip,
         assignments,
@@ -106,7 +119,30 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
             "shutdown raced with active sandboxes".to_owned(),
         ));
     }
+    release_image_cache(&daemon)?;
     Ok(())
+}
+
+fn release_image_cache(daemon: &DaemonState) -> Result<(), SandboxError> {
+    let images = std::mem::take(&mut *daemon.cache.lock().expect("cache lock"));
+    let mut first_error = None;
+    for (_, image) in images {
+        match Arc::try_unwrap(image) {
+            Ok(image) => {
+                if let Err(error) = daemon.image_provider.release(&image) {
+                    first_error.get_or_insert(error);
+                }
+            }
+            Err(_) => {
+                first_error.get_or_insert_with(|| {
+                    SandboxError::Runtime(
+                        "image admission handle remained borrowed during shutdown".to_owned(),
+                    )
+                });
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn accept_connections(

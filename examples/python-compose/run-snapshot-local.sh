@@ -26,11 +26,8 @@ cargo build --quiet --release --offline --manifest-path "$repo_dir/Cargo.toml" \
   --package runtrue-sandboxctl --package runtrue-sandboxd
 
 "$control" lock --compose "$example_dir/compose-snapshot.yaml" --output "$lock_path"
-image_ref=$(docker image inspect local/runtrue-sandbox-network-example:20260719 --format '{{index .RepoDigests 0}}')
-image_key=${image_ref##*@sha256:}
-if [[ ! -f "$image_store/$image_key/prepared-image.json" ]]; then
-  "$control" prepare-image --reference "$image_ref" --image-store "$image_store"
-fi
+"$control" prepare-image --reference docker.io/library/python:3.13-slim \
+  --image-store "$image_store" >/dev/null
 
 chmod 0700 "$run_root"
 "$daemon" serve --socket "$socket" --state-root "$state_root" \
@@ -95,6 +92,7 @@ runsc_common=(
   --network=sandbox
   --ignore-cgroups=true
   --platform=systrap
+  --overlay2=none
   --file-access=exclusive
   --file-access-mounts=exclusive
   --directfs=false
@@ -106,7 +104,9 @@ client_healthy=false
 for _ in $(seq 1 100); do
   if /usr/local/bin/runsc --root="$source_runsc_root" "${runsc_common[@]}" \
     exec --user=65534:65534 "rts-$source_runtime-client" \
-    /usr/bin/python3 /app/snapshot_health.py >/dev/null 2>&1; then
+    /usr/local/bin/python3 -c \
+    'import pathlib,sys; p=pathlib.Path("/tmp/snapshot-counter"); sys.exit(0 if p.exists() and int(p.read_text()) >= 1 else 1)' \
+    >/dev/null 2>&1; then
     client_healthy=true
     break
   fi

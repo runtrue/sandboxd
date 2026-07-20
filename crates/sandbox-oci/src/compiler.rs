@@ -4,7 +4,8 @@ use crate::{
         LockedNetwork, LockedService, SandboxPolicy, TopologyLock, LOCK_SCHEMA_VERSION,
         MAX_ARGUMENTS, MAX_ENVIRONMENT, MAX_NETWORKS, MAX_SERVICES, MAX_VALUE_BYTES,
     },
-    Docker, SandboxError,
+    provider::{ImageProvider, RegistryCredential},
+    SandboxError,
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -13,7 +14,11 @@ use std::{
     path::Path,
 };
 
-pub fn lock_compose(compose_path: &Path, docker: &Docker) -> Result<TopologyLock, SandboxError> {
+pub fn lock_compose(
+    compose_path: &Path,
+    provider: &dyn ImageProvider,
+    credential: Option<&RegistryCredential>,
+) -> Result<TopologyLock, SandboxError> {
     let bytes =
         fs::read(compose_path).map_err(|source| crate::error::io_error(compose_path, source))?;
     if bytes.len() > 1024 * 1024 {
@@ -23,7 +28,15 @@ pub fn lock_compose(compose_path: &Path, docker: &Docker) -> Result<TopologyLock
     }
     let input: ComposeInput =
         serde_yaml::from_slice(&bytes).map_err(|error| SandboxError::Compose(error.to_string()))?;
-    compile(input, |reference| resolve_image(docker, reference))
+    let mut resolved = BTreeMap::<String, LockedImage>::new();
+    compile(input, |reference| {
+        if let Some(image) = resolved.get(reference) {
+            return Ok(image.clone());
+        }
+        let image = provider.resolve(reference, credential)?;
+        resolved.insert(reference.to_owned(), image.clone());
+        Ok(image)
+    })
 }
 
 fn compile<F>(input: ComposeInput, mut resolve: F) -> Result<TopologyLock, SandboxError>
@@ -165,6 +178,7 @@ where
             None => None,
         };
 
+        validate_image_reference(&service.image)?;
         services.insert(
             service_name,
             LockedService {
@@ -221,87 +235,6 @@ pub fn verify_lock(lock: &TopologyLock) -> Result<(), SandboxError> {
         )));
     }
     Ok(())
-}
-
-fn resolve_image(docker: &Docker, source: &str) -> Result<LockedImage, SandboxError> {
-    validate_image_reference(source)?;
-    let inspected = docker.image_inspect(source)?;
-    if inspected.os != "linux" || !matches!(inspected.architecture.as_str(), "amd64" | "arm64") {
-        return Err(SandboxError::Unsupported(format!(
-            "image `{source}` platform {}/{}",
-            inspected.os, inspected.architecture
-        )));
-    }
-    if !valid_digest(&inspected.id) {
-        return Err(SandboxError::Docker(format!(
-            "image `{source}` has invalid image ID `{}`",
-            inspected.id
-        )));
-    }
-    let exact_reference = if source.contains("@sha256:") {
-        source.to_owned()
-    } else {
-        let repository = repository_name(source);
-        let matches = inspected
-            .repo_digests
-            .iter()
-            .filter(|digest| {
-                digest
-                    .split_once('@')
-                    .is_some_and(|(name, _)| name == repository)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [exact]
-                if exact
-                    .split_once('@')
-                    .is_some_and(|(_, digest)| valid_digest(digest)) =>
-            {
-                exact.clone()
-            }
-            _ => {
-                return Err(SandboxError::Docker(format!(
-                    "image `{source}` does not have one exact local repository digest"
-                )))
-            }
-        }
-    };
-    let exact = docker.image_inspect(&exact_reference)?;
-    if exact.id != inspected.id {
-        return Err(SandboxError::Docker(format!(
-            "image `{source}` changed while it was being locked"
-        )));
-    }
-    Ok(LockedImage {
-        source: source.to_owned(),
-        exact_reference,
-        image_id: inspected.id,
-        operating_system: inspected.os,
-        architecture: inspected.architecture,
-    })
-}
-
-fn repository_name(reference: &str) -> &str {
-    let without_digest = reference
-        .split_once('@')
-        .map_or(reference, |(name, _)| name);
-    let slash = without_digest.rfind('/');
-    let colon = without_digest.rfind(':');
-    if colon.is_some_and(|colon| slash.is_none_or(|slash| colon > slash)) {
-        &without_digest[..colon.expect("colon was checked")]
-    } else {
-        without_digest
-    }
-}
-
-fn valid_digest(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
 }
 
 fn startup_order(services: &BTreeMap<String, LockedService>) -> Result<Vec<String>, SandboxError> {
@@ -410,12 +343,31 @@ mod tests {
     use super::*;
 
     fn image(reference: &str) -> LockedImage {
+        let manifest = crate::LockedDescriptor {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            digest: format!("sha256:{}", "1".repeat(64)),
+            size: 1_024,
+        };
+        let config = crate::LockedDescriptor {
+            media_type: "application/vnd.oci.image.config.v1+json".to_owned(),
+            digest: format!("sha256:{}", "2".repeat(64)),
+            size: 512,
+        };
         LockedImage {
             source: reference.to_owned(),
-            exact_reference: format!("example/test@sha256:{}", "1".repeat(64)),
-            image_id: format!("sha256:{}", "2".repeat(64)),
+            exact_reference: format!("example/test@{}", manifest.digest),
+            image_id: config.digest.clone(),
+            index: None,
+            manifest,
+            config,
+            layers: vec![crate::LockedDescriptor {
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_owned(),
+                digest: format!("sha256:{}", "3".repeat(64)),
+                size: 4_096,
+            }],
             operating_system: "linux".to_owned(),
             architecture: "amd64".to_owned(),
+            variant: None,
         }
     }
 

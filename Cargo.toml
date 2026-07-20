@@ -16,17 +16,22 @@ license = "Apache-2.0"
 rust-version = "1.94"
 
 [workspace.dependencies]
+base64 = "=0.22.1"
 clap = { version = "=4.5.4", features = ["derive"] }
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 hex = "=0.4.3"
 hmac = "=0.12.1"
 libc = "=0.2.186"
-nix = { version = "=0.31.3", features = ["fs", "poll", "socket", "user"] }
+nix = { version = "=0.31.3", features = ["fs", "mount", "poll", "socket", "user"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 serde_yaml = "=0.9.34"
 sha2 = "=0.10.8"
 tempfile = "=3.10.1"
+tar = "=0.4.46"
 thiserror = "=1.0.61"
+xattr = { version = "=1.6.1", default-features = false }
+zstd = { version = "=0.13.3", default-features = false }
 runtrue-sandbox-core = { version = "=0.1.0", path = "crates/sandbox-core" }
 runtrue-sandbox-gvisor = { version = "=0.1.0", path = "crates/sandbox-gvisor" }
 runtrue-sandbox-oci = { version = "=0.1.0", path = "crates/sandbox-oci" }

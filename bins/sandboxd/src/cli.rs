@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 pub(crate) const DEFAULT_SOCKET: &str = "/run/runtrue-sandboxd/control.sock";
@@ -12,28 +12,7 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    Serve {
-        #[arg(long, default_value = DEFAULT_SOCKET)]
-        socket: PathBuf,
-        #[arg(long)]
-        workload_socket: Option<PathBuf>,
-        #[arg(long)]
-        broker_uid: Option<u32>,
-        #[arg(long)]
-        work_order_key: Option<PathBuf>,
-        #[arg(long, default_value_t = 64)]
-        maximum_connections: usize,
-        #[arg(long, default_value_t = 5)]
-        io_timeout_seconds: u64,
-        #[arg(long, default_value = "/var/lib/runtrue-sandboxd/state")]
-        state_root: PathBuf,
-        #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]
-        image_store: PathBuf,
-        #[arg(long, default_value = "/usr/local/bin/runsc")]
-        runsc: PathBuf,
-        #[arg(long, default_value = "/usr/sbin/ip")]
-        ip: PathBuf,
-    },
+    Serve(Box<ServeArgs>),
     Ping {
         #[arg(long, default_value = DEFAULT_SOCKET)]
         socket: PathBuf,
@@ -128,4 +107,38 @@ pub(crate) enum Command {
         #[arg(long, default_value = DEFAULT_SOCKET)]
         socket: PathBuf,
     },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServeArgs {
+    #[arg(long, default_value = DEFAULT_SOCKET)]
+    pub(crate) socket: PathBuf,
+    #[arg(long)]
+    pub(crate) workload_socket: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) broker_uid: Option<u32>,
+    #[arg(long)]
+    pub(crate) work_order_key: Option<PathBuf>,
+    #[arg(long, default_value_t = 64)]
+    pub(crate) maximum_connections: usize,
+    #[arg(long, default_value_t = 5)]
+    pub(crate) io_timeout_seconds: u64,
+    #[arg(long, default_value = "/var/lib/runtrue-sandboxd/state")]
+    pub(crate) state_root: PathBuf,
+    #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]
+    pub(crate) image_store: PathBuf,
+    #[arg(long, default_value = "/usr/bin/ctr")]
+    pub(crate) ctr: PathBuf,
+    #[arg(long, default_value = "/run/containerd/containerd.sock")]
+    pub(crate) containerd_address: PathBuf,
+    #[arg(long, default_value = "runtrue-sandboxd")]
+    pub(crate) containerd_namespace: String,
+    #[arg(long, default_value = "overlayfs")]
+    pub(crate) snapshotter: String,
+    #[arg(long, default_value = "linux/amd64")]
+    pub(crate) image_platform: String,
+    #[arg(long, default_value = "/usr/local/bin/runsc")]
+    pub(crate) runsc: PathBuf,
+    #[arg(long, default_value = "/usr/sbin/ip")]
+    pub(crate) ip: PathBuf,
 }

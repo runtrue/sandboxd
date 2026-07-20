@@ -308,7 +308,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         let topology = TopologyLock {
-            schema_version: 1,
+            schema_version: 2,
             topology_digest: format!("sha256:{}", "a".repeat(64)),
             name: "example".to_owned(),
             services: BTreeMap::from([(
@@ -318,8 +318,25 @@ mod tests {
                         source: "example".to_owned(),
                         exact_reference: format!("example@sha256:{}", "b".repeat(64)),
                         image_id: format!("sha256:{}", "c".repeat(64)),
+                        index: None,
+                        manifest: runtrue_sandbox_oci::LockedDescriptor {
+                            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                            digest: format!("sha256:{}", "b".repeat(64)),
+                            size: 1_024,
+                        },
+                        config: runtrue_sandbox_oci::LockedDescriptor {
+                            media_type: "application/vnd.oci.image.config.v1+json".to_owned(),
+                            digest: format!("sha256:{}", "c".repeat(64)),
+                            size: 512,
+                        },
+                        layers: vec![runtrue_sandbox_oci::LockedDescriptor {
+                            media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_owned(),
+                            digest: format!("sha256:{}", "d".repeat(64)),
+                            size: 4_096,
+                        }],
                         operating_system: "linux".to_owned(),
                         architecture: "amd64".to_owned(),
+                        variant: None,
                     },
                     command: Vec::new(),
                     entrypoint: vec!["/bin/true".to_owned()],

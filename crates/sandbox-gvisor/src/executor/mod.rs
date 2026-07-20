@@ -7,12 +7,12 @@ mod recovery;
 
 pub use checkpoint::restore_admitted;
 pub use recovery::{recover, RecoveryReport};
+pub use runtrue_sandbox_oci::provider::ImmutableRootfs;
 
 use crate::{
     compiler::verify_lock,
     error::io_error,
-    model::{DependencyCondition, LockedImage, TopologyLock},
-    prepared::load_prepared,
+    model::{DependencyCondition, TopologyLock},
     snapshot::SnapshotSummary,
     SandboxError,
 };
@@ -107,70 +107,6 @@ struct ExecutionOutput {
     truncated: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct AdmittedRootfs {
-    pub image_id: String,
-    pub exact_reference: String,
-    pub rootfs: PathBuf,
-    pub rootfs_digest: String,
-}
-
-pub fn admit_image(
-    image_store: &Path,
-    image: &LockedImage,
-) -> Result<AdmittedRootfs, SandboxError> {
-    let (rootfs, metadata) = load_prepared(image_store, &image.image_id, &image.exact_reference)?;
-    Ok(AdmittedRootfs {
-        image_id: metadata.image_id,
-        exact_reference: metadata.exact_reference,
-        rootfs,
-        rootfs_digest: metadata.rootfs_digest,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    lock: &TopologyLock,
-    project: &str,
-    wait_for: &str,
-    timeout: Duration,
-    state_root: &Path,
-    image_store: &Path,
-    runsc_program: &Path,
-    ip_program: &Path,
-) -> Result<GvisorRunResult, SandboxError> {
-    let overall_started = Instant::now();
-    verify_lock(lock)?;
-    validate_project(project)?;
-    if !lock.services.contains_key(wait_for) {
-        return Err(SandboxError::Lock(format!(
-            "wait service `{wait_for}` is absent"
-        )));
-    }
-    let mut admitted = BTreeMap::new();
-    for service in lock.services.values() {
-        if !admitted.contains_key(&service.image.image_id) {
-            admitted.insert(
-                service.image.image_id.clone(),
-                admit_image(image_store, &service.image)?,
-            );
-        }
-    }
-    let preflight_ms = overall_started.elapsed().as_millis();
-    run_admitted_inner(
-        lock,
-        project,
-        wait_for,
-        timeout,
-        state_root,
-        runsc_program,
-        ip_program,
-        &admitted,
-        preflight_ms,
-        overall_started,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn run_admitted(
     lock: &TopologyLock,
@@ -180,7 +116,7 @@ pub fn run_admitted(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
-    admitted: &BTreeMap<String, AdmittedRootfs>,
+    admitted: &BTreeMap<String, ImmutableRootfs>,
 ) -> Result<GvisorRunResult, SandboxError> {
     let overall_started = Instant::now();
     verify_lock(lock)?;
@@ -215,13 +151,13 @@ fn run_admitted_inner(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
-    admitted: &BTreeMap<String, AdmittedRootfs>,
+    admitted: &BTreeMap<String, ImmutableRootfs>,
     preflight_ms: u128,
     overall_started: Instant,
 ) -> Result<GvisorRunResult, SandboxError> {
     let rootfs_by_image = admitted
         .iter()
-        .map(|(id, image)| (id.clone(), image.rootfs.clone()))
+        .map(|(id, image)| (id.clone(), image.rootfs().to_owned()))
         .collect::<BTreeMap<_, _>>();
     let infrastructure_started = Instant::now();
     let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
@@ -281,14 +217,14 @@ pub fn start_admitted(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
-    admitted: &BTreeMap<String, AdmittedRootfs>,
+    admitted: &BTreeMap<String, ImmutableRootfs>,
 ) -> Result<GvisorSandbox, SandboxError> {
     verify_lock(lock)?;
     validate_project(project)?;
     validate_admitted(lock, admitted)?;
     let rootfs_by_image = admitted
         .iter()
-        .map(|(id, image)| (id.clone(), image.rootfs.clone()))
+        .map(|(id, image)| (id.clone(), image.rootfs().to_owned()))
         .collect::<BTreeMap<_, _>>();
     let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
     let deadline = Instant::now() + timeout;
@@ -312,7 +248,7 @@ pub fn start_admitted(
 
 fn validate_admitted(
     lock: &TopologyLock,
-    admitted: &BTreeMap<String, AdmittedRootfs>,
+    admitted: &BTreeMap<String, ImmutableRootfs>,
 ) -> Result<(), SandboxError> {
     for service in lock.services.values() {
         let image = admitted.get(&service.image.image_id).ok_or_else(|| {
@@ -321,9 +257,9 @@ fn validate_admitted(
                 service.image.image_id
             ))
         })?;
-        if image.exact_reference != service.image.exact_reference
-            || image.image_id != service.image.image_id
-            || !image.rootfs.is_dir()
+        if image.image().exact_reference != service.image.exact_reference
+            || image.image().image_id != service.image.image_id
+            || !image.rootfs().is_dir()
         {
             return Err(SandboxError::Lock(
                 "cached image handle does not match the topology".to_owned(),
@@ -501,6 +437,18 @@ fn start_services(
                 )? {
                     healthy = true;
                     break;
+                }
+                let process = resources
+                    .processes
+                    .get_mut(service_name)
+                    .expect("service process exists");
+                if let Some(status) = process.poll()? {
+                    let output = process.finish_capture()?;
+                    return Err(SandboxError::Runtime(format!(
+                        "service `{service_name}` exited {:?} before becoming healthy: {}",
+                        status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
                 }
                 std::thread::sleep(
                     deadline

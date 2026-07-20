@@ -59,7 +59,8 @@ independent guest CPU or memory guarantees.
 - outbound networking and external DNS are disabled;
 - Compose port publishing, privileged containers, ambient capabilities, and
   host namespace access are rejected;
-- image preparation uses local Docker Engine and GNU tar tooling; and
+- OCI registry trust, availability, and credential distribution remain operator
+  responsibilities; and
 - only the pinned x86-64 Linux cohort described below is exercised regularly.
 
 ## Workspace
@@ -71,7 +72,8 @@ independent guest CPU or memory guarantees.
 - `sandbox-core` contains backend-neutral identities, lifecycle states,
   capability records, and snapshot contracts.
 - `sandbox-runtime` defines backend and live-instance interfaces.
-- `sandbox-oci` owns Compose validation, topology locks, and image preparation.
+- `sandbox-oci` owns Compose validation, topology locks, the backend-neutral
+  image-provider contract, and the containerd provider.
 - `sandbox-gvisor` owns runsc execution, OCI bundles, host resources, local
   snapshots, recovery, and cleanup.
 
@@ -84,18 +86,13 @@ Detailed documentation covers [architecture and isolation](docs/architecture.md)
 - Linux x86-64 with cgroup v2 and the `cpu`, `memory`, and `pids` controllers;
 - Rust 1.94;
 - gVisor `runsc` release `20260714.0` using the systrap platform;
+- containerd 2.2.2 with the overlayfs snapshotter and `ctr` client;
 - iproute2; and
-- Docker Engine plus GNU tar for local image preparation.
+- outbound HTTPS access to the OCI registries used during preparation.
 
 The worker requires root for cgroup and network namespace management.
 
 ## Run locally
-
-Build the pinned example image:
-
-```bash
-./examples/python-compose/build-local.sh
-```
 
 Run the networking, lifecycle, and resource-limit scenario:
 
@@ -110,8 +107,9 @@ continuity, tmpfs continuity, pause/resume, and cleanup checks:
 sudo ./examples/python-compose/run-snapshot-local.sh
 ```
 
-The scripts build the Rust binaries locally and do not use hosted workers or an
-artifact registry.
+The scripts build the Rust binaries locally and resolve the official Python
+image directly through the OCI provider. They do not require Docker Engine,
+GNU tar, hosted workers, or a project-specific artifact registry.
 
 ## Local validation
 
