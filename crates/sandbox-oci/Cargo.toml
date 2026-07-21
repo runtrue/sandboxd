@@ -21,6 +21,7 @@ tempfile.workspace = true
 tar.workspace = true
 xattr.workspace = true
 zstd.workspace = true
+runtrue-sandbox-core.workspace = true
 
 [lints]
 workspace = true

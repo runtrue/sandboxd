@@ -98,6 +98,7 @@ fn publish_on_worker_a_and_materialize_on_worker_b() {
         worker_id: WorkerId::parse("worker-b").expect("destination worker"),
         assignment_epoch: AssignmentEpoch::new(8).expect("destination epoch"),
         artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+        guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
     };
     let claim = worker_b
         .claim_transfer(
@@ -199,6 +200,7 @@ fn fixture() -> Fixture {
             required_cpu_features: Vec::new(),
             cpu_features_digest: format!("sha256:{}", "c".repeat(64)),
             preserves_internal_connections: true,
+            guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
         },
         containers: BTreeMap::new(),
         sandbox_objects: Vec::new(),

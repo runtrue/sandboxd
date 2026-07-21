@@ -125,6 +125,9 @@ pub(crate) struct ServeArgs {
     pub(crate) io_timeout_seconds: u64,
     #[arg(long, default_value = "worker-local")]
     pub(crate) worker_id: String,
+    /// Enable an additional reviewed guest profile (root-in-sandbox-v1 or oci-compat-v1).
+    #[arg(long = "guest-profile")]
+    pub(crate) guest_profiles: Vec<String>,
     #[arg(long)]
     pub(crate) artifact_master_key: Option<PathBuf>,
     #[arg(long)]

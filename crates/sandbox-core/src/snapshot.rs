@@ -1,11 +1,12 @@
 use crate::{
-    specification::validate_digest, BackendDescriptor, ContainerId, CoreError, LifecycleState,
-    SandboxId, SnapshotId, SnapshotPortability, TenantId, WorkerId, WorkspaceId,
+    specification::validate_digest, BackendDescriptor, ContainerId, CoreError,
+    GuestProfileIdentity, LifecycleState, SandboxId, SnapshotId, SnapshotPortability, TenantId,
+    WorkerId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SNAPSHOT_MANIFEST_VERSION: u32 = 2;
+pub const SNAPSHOT_MANIFEST_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +46,7 @@ pub struct RestoreRequirements {
     pub required_cpu_features: Vec<String>,
     pub cpu_features_digest: String,
     pub preserves_internal_connections: bool,
+    pub guest_profile: GuestProfileIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub struct RestoreTarget {
     pub worker_id: WorkerId,
     pub assignment_epoch: crate::AssignmentEpoch,
     pub artifact_portability: SnapshotPortability,
+    pub guest_profile: GuestProfileIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +106,14 @@ impl SnapshotManifest {
             &self.restore_requirements.cpu_features_digest,
         )
         .map_err(|error| CoreError::InvalidSnapshot(error.to_string()))?;
+        if GuestProfileIdentity::parse(&self.restore_requirements.guest_profile.canonical())
+            .as_ref()
+            != Ok(&self.restore_requirements.guest_profile)
+        {
+            return Err(CoreError::InvalidSnapshot(
+                "guest profile identity is invalid".to_owned(),
+            ));
+        }
         if !matches!(
             self.captured_from,
             LifecycleState::Running | LifecycleState::Paused
@@ -170,6 +181,11 @@ impl SnapshotManifest {
                 "restore target belongs to another tenant scope".to_owned(),
             ));
         }
+        if self.restore_requirements.guest_profile != target.guest_profile {
+            return Err(CoreError::InvalidSnapshot(
+                "restore target does not install the snapshot guest profile".to_owned(),
+            ));
+        }
         let moves_worker = self.source_worker != target.worker_id;
         let reuses_identity = self.sandbox_id == target.sandbox_id;
         if moves_worker {
@@ -203,7 +219,7 @@ impl SnapshotManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BackendKind, SnapshotPortability};
+    use crate::{BackendKind, GuestProfile, SnapshotPortability};
 
     fn object(role: ArtifactRole, byte: char) -> SnapshotObject {
         SnapshotObject {
@@ -246,6 +262,7 @@ mod tests {
                 required_cpu_features: Vec::new(),
                 cpu_features_digest: format!("sha256:{}", "e".repeat(64)),
                 preserves_internal_connections: true,
+                guest_profile: GuestProfile::strict().identity,
             },
             containers: BTreeMap::from([(
                 ContainerId::parse("server").expect("container id"),
@@ -287,6 +304,7 @@ mod tests {
             worker_id: WorkerId::parse("worker-b").expect("worker"),
             assignment_epoch: crate::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+            guest_profile: manifest.restore_requirements.guest_profile.clone(),
         };
         manifest
             .validate_restore_target(&target)
@@ -314,9 +332,27 @@ mod tests {
             worker_id: manifest.source_worker.clone(),
             assignment_epoch: crate::AssignmentEpoch::new(1).expect("epoch"),
             artifact_portability: SnapshotPortability::SameWorker,
+            guest_profile: manifest.restore_requirements.guest_profile.clone(),
         };
         manifest
             .validate_restore_target(&target)
             .expect("same-worker copy target");
+    }
+
+    #[test]
+    fn restore_rejects_a_guest_profile_change() {
+        let manifest = manifest();
+        let target = RestoreTarget {
+            tenant_id: manifest.tenant_id.clone(),
+            workspace_id: manifest.workspace_id.clone(),
+            sandbox_id: SandboxId::parse("sandbox-copy").expect("sandbox"),
+            worker_id: manifest.source_worker.clone(),
+            assignment_epoch: crate::AssignmentEpoch::new(1).expect("epoch"),
+            artifact_portability: SnapshotPortability::SameWorker,
+            guest_profile: GuestProfile::reviewed_named(crate::ROOT_GUEST_PROFILE)
+                .expect("root profile")
+                .identity,
+        };
+        assert!(manifest.validate_restore_target(&target).is_err());
     }
 }

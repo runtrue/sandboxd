@@ -33,9 +33,16 @@ sudo runtrue-sandboxd serve \
   --workload-socket /run/runtrue-sandboxd/workload.sock \
   --broker-uid 991 \
   --work-order-key /etc/runtrue-sandboxd/work-order.key \
+  --guest-profile root-in-sandbox-v1 \
   --maximum-connections 64 \
   --io-timeout-seconds 5
 ```
+
+`strict-v1` is always installed. Repeat `--guest-profile` to enable the
+reviewed `root-in-sandbox-v1` and/or `oci-compat-v1` profiles. The flag accepts
+only those versioned built-ins; it does not accept raw UIDs or capabilities.
+The selected set is worker policy and is returned, with exact restrictions, by
+the ping capability response.
 
 The key file contains exactly 32 bytes encoded as 64 lowercase or uppercase
 hexadecimal characters, optionally followed by one newline. It must be a
@@ -64,7 +71,7 @@ A workload request has this outer form:
     "kind": "work_order",
     "work_order": {
       "claims": {
-        "schema_version": 2,
+        "schema_version": 3,
         "tenant_id": "tenant-a",
         "workspace_id": "team-a",
         "subject_id": "agent-service",
@@ -77,6 +84,7 @@ A workload request has this outer form:
         "nonce": "nonce-42",
         "operation_digest": "sha256:<64 lowercase hex characters>",
         "resource_ceilings": {
+          "allowed_guest_profiles": [{"name": "strict", "version": 1}],
           "maximum_services": 4,
           "maximum_timeout_ms": 30000,
           "memory_bytes_per_service": 268435456,
@@ -122,10 +130,11 @@ at most once. Only the nonce digest is persisted, and replay rejection survives
 a daemon restart. The nonce record reaches durable storage before its operation
 may execute.
 
-For operations containing a topology, the worker verifies the signed service,
-memory, CPU, PID, tmpfs, writable-root, and captured-output ceilings before
-image admission or execution. Run, create, and restore deadlines must not
-exceed the signed maximum. The topology compiler and runtime also apply their
+For operations containing a topology, the worker verifies the signed guest
+profile allowlist plus service, memory, CPU, PID, tmpfs, writable-root, and
+captured-output ceilings before image admission or execution. Run, create, and
+restore deadlines must not exceed the signed maximum. The topology compiler
+and runtime also apply their
 stricter absolute limits; a work order cannot widen them.
 
 ## Ownership and recovery
@@ -172,8 +181,8 @@ not expose shared image-cache contents or global counters.
 ## Compatibility
 
 Protocol v2 is used by current local commands and is required on the workload
-socket. Signed requests use work-order schema 2, which adds the
-`writable_root_bytes_per_service` ceiling to the canonical HMAC payload.
+socket. Signed requests use work-order schema 3, which adds the versioned
+`allowed_guest_profiles` ceiling to the canonical HMAC payload.
 Protocol v1 requests without an authorization object remain accepted only from
 UID 0 on the operator socket. This is an explicit migration path, not a
 workload compatibility mode.

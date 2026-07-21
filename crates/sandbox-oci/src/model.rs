@@ -1,7 +1,8 @@
+use runtrue_sandbox_core::GuestProfileIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(crate) const LOCK_SCHEMA_VERSION: u32 = 3;
+pub(crate) const LOCK_SCHEMA_VERSION: u32 = 4;
 pub(crate) const MAX_SERVICES: usize = 32;
 pub(crate) const MAX_NETWORKS: usize = 8;
 pub(crate) const MAX_ENVIRONMENT: usize = 128;
@@ -16,6 +17,8 @@ pub(crate) struct ComposeInput {
     pub(crate) services: BTreeMap<String, ServiceInput>,
     #[serde(default)]
     pub(crate) networks: BTreeMap<String, NetworkInput>,
+    #[serde(default, rename = "x-runtrue-guest-profile")]
+    pub(crate) guest_profile: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -43,8 +46,6 @@ pub(crate) struct ServiceInput {
     pub(crate) healthcheck: Option<HealthcheckInput>,
     #[serde(default)]
     pub(crate) networks: Vec<String>,
-    #[serde(default)]
-    pub(crate) user: Option<String>,
     #[serde(default)]
     pub(crate) working_dir: Option<String>,
     #[serde(default)]
@@ -113,7 +114,6 @@ pub struct LockedService {
     pub depends_on: BTreeMap<String, DependencyCondition>,
     pub healthcheck: Option<LockedHealthcheck>,
     pub networks: Vec<String>,
-    pub user: String,
     pub working_dir: String,
     pub root_filesystem: RootFilesystemMode,
 }
@@ -167,6 +167,7 @@ pub struct LockedHealthcheck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxPolicy {
+    pub guest_profile: GuestProfileIdentity,
     pub runtime: String,
     pub memory_bytes_per_service: u64,
     pub cpu_per_service_millis: u32,
@@ -179,6 +180,7 @@ pub struct SandboxPolicy {
 impl Default for SandboxPolicy {
     fn default() -> Self {
         Self {
+            guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
             runtime: "runsc".to_owned(),
             memory_bytes_per_service: 128 * 1024 * 1024,
             cpu_per_service_millis: 500,

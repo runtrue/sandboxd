@@ -117,6 +117,13 @@ value counts; rejects privileged and ambient host features; requires internal
 networks; validates dependency order; resolves images to repository and image
 digests; and writes a canonical topology digest.
 
+The topology contains one versioned guest-profile identity for the complete
+sandbox. `strict-v1` is the default. Tenants can request another reviewed name
+through the top-level `x-runtrue-guest-profile` extension, but cannot provide a
+UID, capability list, device, namespace, or runtime annotation. Admission
+fails unless that exact profile is installed by the operator, and its identity
+is covered by the topology digest.
+
 The daemon re-verifies the topology digest before execution. The containerd
 provider resolves metadata through containerd and verifies the locked index,
 platform manifest, configuration, and every layer by digest and byte count. It
@@ -157,8 +164,8 @@ sandbox, consistent with gVisor's
 
 Generated OCI specifications provide:
 
-- numeric unprivileged guest users;
-- no capabilities and `noNewPrivileges`;
+- the selected profile's fixed numeric guest UID/GID;
+- `noNewPrivileges` and an empty ambient and inheritable capability set;
 - read-only OCI roots unless the topology explicitly requests an authorized
   quota-backed writable root;
 - bounded tmpfs mounts for `/dev`, `/tmp`, and `/work`;
@@ -166,6 +173,16 @@ Generated OCI specifications provide:
 - isolated PID, network, IPC, UTS, and mount namespaces;
 - masked sensitive proc/sys paths; and
 - no raw networking, host Unix sockets, host FIFOs, or directfs.
+
+The worker always installs `strict-v1` (UID/GID 65534, no capabilities).
+Operators may additionally install `root-in-sandbox-v1` (guest UID/GID 0, no
+capabilities) and `oci-compat-v1`. The compatibility profile grants only
+`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_SETGID`, and
+`CAP_SETUID` inside gVisor. It never grants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
+`CAP_NET_RAW`, module loading, process tracing, host mount administration, or
+host namespace access. Every CRI child uses the same sandbox-wide profile, so
+a child cannot exceed its parent sandbox. Ping capability responses report the
+installed identities and these exact restrictions.
 
 Every runsc control command has a subprocess deadline. A wedged state, pause,
 resume, checkpoint, kill, or delete command cannot hold a daemon request

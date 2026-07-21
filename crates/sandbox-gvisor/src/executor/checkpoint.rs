@@ -53,6 +53,7 @@ pub fn restore_admitted(
         .filter(|(_, service)| service.root_filesystem == RootFilesystemMode::Writable)
         .map(|(service, _)| (service.clone(), lock.policy.writable_root_bytes_per_service))
         .collect::<BTreeMap<_, _>>();
+    let expected_guest_profile = lock.policy.guest_profile.clone();
     let cohort_started = Instant::now();
     manifest
         .validate_restore_target(restore_target)
@@ -70,6 +71,7 @@ pub fn restore_admitted(
             .required_cpu_features
             .is_empty()
         || !manifest.restore_requirements.preserves_internal_connections
+        || manifest.restore_requirements.guest_profile != expected_guest_profile
         || manifest.mode != metadata.mode
         || manifest.created_unix_millis != metadata.created_unix_millis
         || manifest.restore_requirements.architecture != std::env::consts::ARCH
@@ -79,6 +81,7 @@ pub fn restore_admitted(
         || metadata.root_service != lock.startup_order[0]
         || metadata.service_states.keys().ne(lock.services.keys())
         || metadata.writable_services != expected_writable_services
+        || metadata.guest_profile != lock.policy.guest_profile
         || metadata
             .service_states
             .values()
@@ -169,6 +172,7 @@ pub fn restore_admitted(
     Ok(GvisorSandbox {
         project: project.to_owned(),
         topology_digest: lock.topology_digest.clone(),
+        guest_profile: lock.policy.guest_profile.clone(),
         state: GvisorSandboxState::Running,
         paused_runtime_ids: BTreeSet::new(),
         resources: Some(resources),
@@ -291,6 +295,7 @@ pub(super) fn snapshot(
             cpu_features_digest,
             root_service,
             ordered_services,
+            sandbox.guest_profile.clone(),
             service_states,
             writable_services,
             writable_objects,
@@ -352,6 +357,7 @@ fn restore_services(
     image_path: &Path,
     selected_services: &BTreeSet<String>,
 ) -> Result<(), SandboxError> {
+    let guest_profile = super::reviewed_guest_profile(lock)?;
     let sandbox_runtime_id = resources.sandbox_runtime_id.clone();
     for service_name in &lock.startup_order {
         if !selected_services.contains(service_name) {
@@ -384,6 +390,7 @@ fn restore_services(
             resources.service_rootfs[service_name].read_only,
             service_name,
             service,
+            &guest_profile,
             &sandbox_network.namespace,
             &sandbox_network.hosts_path,
             &sandbox_network.resolv_path,

@@ -8,6 +8,16 @@ pub(super) fn admit_topology(
     topology: &TopologyLock,
 ) -> Result<BTreeMap<String, ImmutableRootfs>, SandboxError> {
     compiler::verify_lock(topology)?;
+    if !daemon
+        .guest_profiles
+        .iter()
+        .any(|profile| profile.identity == topology.policy.guest_profile)
+    {
+        return Err(SandboxError::Unsupported(format!(
+            "guest profile `{}` is not installed on this worker",
+            topology.policy.guest_profile.canonical()
+        )));
+    }
     let mut result = BTreeMap::new();
     for service in topology.services.values() {
         if result.contains_key(&service.image.image_id) {

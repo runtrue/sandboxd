@@ -1,14 +1,15 @@
-use crate::{ContainerId, CoreError, NetworkId};
+use crate::{ContainerId, CoreError, GuestProfileIdentity, NetworkId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SANDBOX_SPEC_VERSION: u32 = 1;
+pub const SANDBOX_SPEC_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxSpec {
     pub schema_version: u32,
     pub spec_digest: String,
+    pub guest_profile: GuestProfileIdentity,
     pub containers: BTreeMap<ContainerId, ContainerSpec>,
     pub networks: BTreeMap<NetworkId, NetworkSpec>,
     pub startup_order: Vec<ContainerId>,
@@ -65,6 +66,13 @@ impl SandboxSpec {
             ));
         }
         validate_digest("spec", &self.spec_digest)?;
+        if GuestProfileIdentity::parse(&self.guest_profile.canonical()).as_ref()
+            != Ok(&self.guest_profile)
+        {
+            return Err(CoreError::InvalidSpecification(
+                "sandbox has an invalid guest profile identity".to_owned(),
+            ));
+        }
         if self.containers.is_empty() || self.containers.len() > 64 {
             return Err(CoreError::InvalidSpecification(
                 "sandbox must contain between 1 and 64 containers".to_owned(),

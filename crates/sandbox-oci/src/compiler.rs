@@ -8,6 +8,7 @@ use crate::{
     provider::{ImageProvider, RegistryCredential},
     SandboxError,
 };
+use runtrue_sandbox_core::{GuestProfile, GuestProfileIdentity, STRICT_GUEST_PROFILE};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -109,8 +110,6 @@ where
         } else {
             RootFilesystemMode::ReadOnly
         };
-        let user = service.user.unwrap_or_else(|| "65534:65534".to_owned());
-        validate_value("user", &user)?;
         let working_dir = service.working_dir.unwrap_or_else(|| "/work".to_owned());
         if !working_dir.starts_with('/') || working_dir.contains("..") {
             return Err(SandboxError::Compose(format!(
@@ -190,7 +189,6 @@ where
                 depends_on: dependencies,
                 healthcheck,
                 networks: selected_networks,
-                user,
                 working_dir,
                 root_filesystem,
             },
@@ -209,6 +207,23 @@ where
         }
     }
     let startup_order = startup_order(&services)?;
+    let guest_profile = GuestProfileIdentity::parse(
+        input
+            .guest_profile
+            .as_deref()
+            .unwrap_or(STRICT_GUEST_PROFILE),
+    )
+    .map_err(|error| SandboxError::Compose(error.to_string()))?;
+    if GuestProfile::reviewed(&guest_profile).is_none() {
+        return Err(SandboxError::Unsupported(format!(
+            "guest profile `{}` is not supported by this topology schema",
+            guest_profile.canonical()
+        )));
+    }
+    let policy = SandboxPolicy {
+        guest_profile,
+        ..SandboxPolicy::default()
+    };
     let mut lock = TopologyLock {
         schema_version: LOCK_SCHEMA_VERSION,
         topology_digest: String::new(),
@@ -216,7 +231,7 @@ where
         services,
         networks,
         startup_order,
-        policy: SandboxPolicy::default(),
+        policy,
     };
     lock.topology_digest = digest(&lock.digest_input())?;
     Ok(lock)
@@ -401,6 +416,7 @@ services:
             .services
             .values()
             .all(|service| service.root_filesystem == RootFilesystemMode::ReadOnly));
+        assert_eq!(lock.policy.guest_profile.canonical(), STRICT_GUEST_PROFILE);
         verify_lock(&lock).unwrap();
         assert_eq!(lock.topology_digest, digest(&lock.digest_input()).unwrap());
     }
@@ -428,9 +444,63 @@ services:
             "name: x\nservices:\n  app:\n    image: x\n    privileged: true\n",
             "name: x\nservices:\n  app:\n    image: x\n    volumes: [/host:/guest]\n",
             "name: x\nservices:\n  app:\n    image: x\n    network_mode: host\n",
+            "name: x\nservices:\n  app:\n    image: x\n    user: 0:0\n",
+            "name: x\nservices:\n  app:\n    image: x\n    cap_add: [SYS_ADMIN]\n",
+            "name: x\nservices:\n  app:\n    image: x\n    cap_drop: [ALL]\n",
+            "name: x\nservices:\n  app:\n    image: x\n    devices: [/dev/kvm]\n",
+            "name: x\nservices:\n  app:\n    image: x\n    pid: host\n",
+            "name: x\nservices:\n  app:\n    image: x\n    ipc: host\n",
         ] {
             assert!(serde_yaml::from_str::<ComposeInput>(source).is_err());
         }
+    }
+
+    #[test]
+    fn selects_only_named_reviewed_guest_profiles() {
+        let input: ComposeInput = serde_yaml::from_str(
+            "name: x\nx-runtrue-guest-profile: root-in-sandbox-v1\nservices:\n  app:\n    image: x\n",
+        )
+        .unwrap();
+        let root = compile(input, |reference| Ok(image(reference))).unwrap();
+        assert_eq!(
+            root.policy.guest_profile.canonical(),
+            runtrue_sandbox_core::ROOT_GUEST_PROFILE
+        );
+
+        let unknown: ComposeInput = serde_yaml::from_str(
+            "name: x\nx-runtrue-guest-profile: custom-v1\nservices:\n  app:\n    image: x\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            compile(unknown, |reference| Ok(image(reference))),
+            Err(SandboxError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn guest_profile_identity_is_bound_into_the_topology_digest() {
+        let strict: ComposeInput =
+            serde_yaml::from_str("name: x\nservices:\n  app:\n    image: x\n").unwrap();
+        let root: ComposeInput = serde_yaml::from_str(
+            "name: x\nx-runtrue-guest-profile: root-in-sandbox-v1\nservices:\n  app:\n    image: x\n",
+        )
+        .unwrap();
+        let strict = compile(strict, |reference| Ok(image(reference))).unwrap();
+        let root = compile(root, |reference| Ok(image(reference))).unwrap();
+        assert_ne!(strict.topology_digest, root.topology_digest);
+    }
+
+    #[test]
+    fn oci_compatibility_integration_fixture_compiles_to_the_reviewed_profile() {
+        let input: ComposeInput = serde_yaml::from_str(include_str!(
+            "../../../examples/python-compose/compose-oci-compat.yaml"
+        ))
+        .expect("compatibility fixture");
+        let lock = compile(input, |reference| Ok(image(reference))).expect("compile fixture");
+        assert_eq!(
+            lock.policy.guest_profile.canonical(),
+            runtrue_sandbox_core::OCI_COMPAT_GUEST_PROFILE
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::GuestProfile;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,7 @@ pub struct BackendCapabilities {
     pub snapshot_portability: SnapshotPortability,
     pub maximum_containers: u16,
     pub maximum_writable_root_bytes: u64,
+    pub guest_profiles: Vec<GuestProfile>,
 }
 
 impl BackendCapabilities {
@@ -38,6 +40,7 @@ impl BackendCapabilities {
         maximum_containers: u16,
         maximum_writable_root_bytes: u64,
         snapshot_portability: SnapshotPortability,
+        guest_profiles: Vec<GuestProfile>,
     ) -> Self {
         Self {
             multi_container: true,
@@ -50,6 +53,7 @@ impl BackendCapabilities {
             snapshot_portability,
             maximum_containers,
             maximum_writable_root_bytes,
+            guest_profiles,
         }
     }
 }
@@ -64,6 +68,7 @@ mod tests {
             64,
             16 * 1024 * 1024 * 1024,
             SnapshotPortability::SameWorker,
+            vec![GuestProfile::strict()],
         );
         assert_eq!(
             capabilities.snapshot_portability,
