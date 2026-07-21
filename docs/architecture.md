@@ -93,7 +93,9 @@ directory. Their bounded append queues preserve ordering and group concurrent
 writes into durable commits. Assignment and replay acknowledgements are issued
 only after persistence; ordered compaction bounds recovery work. A restart
 repairs an incomplete final journal record, rejects complete malformed state,
-and fences active assignments before accepting new work.
+and fences provisioning, restoring, active, and in-progress source assignments
+before accepting new work. Completed transferable records remain fenced across
+restart.
 
 Each tenant/workspace/sandbox identity is reserved while create, run, or restore
 materializes host resources. Persistent instances are stored behind a
@@ -227,22 +229,35 @@ so it cannot reclaim an active staging publication. The provider interface is
 backend-neutral, but no remote artifact provider is implemented; snapshots
 therefore remain on the worker that created them.
 
+For stop-and-move, the assignment journal records `fencing` before runsc starts
+the checkpoint. The source remains inaccessible to later lifecycle operations
+until the attempt either returns to `active` with intact runtime resources or
+advances to `transferable` after checkpoint publication and source cleanup. An
+encrypted transfer grant is published only after cleanup. A destination claim
+is immutable, idempotent for the same worker and epoch, and rejects a competing
+worker. A remote provider must implement the claim with a strong conditional
+create before the daemon can advertise cross-worker portability.
+
 Restore bounds the pointer, encrypted object, object count, individual object,
 and total snapshot sizes before publication into an empty read-only directory.
 It authenticates every encrypted chunk, re-hashes every plaintext file, and
-requires an exact compatibility match before creating destination resources.
-The root restore starts first; active child
+checks tenant scope, sandbox identity, source and destination workers,
+monotonically increasing assignment epoch, stop-and-move mode, provider
+portability, topology, runsc state format and version, runtime configuration,
+CPU features, architecture, and operating system. These checks finish before
+destination cgroups, namespaces, or runsc state are allocated. The root restore
+starts first; active child
 containers then restore against the same checkpoint. A child that had already
 exited is represented as stopped and is not passed to runsc restore.
 
 The checkpoint contains process state, memory, sockets, and writable tmpfs
 contents. The read-only OCI roots are re-admitted from the destination image
-store. The manifest declares `cross_worker_same_backend`, but the current local
-artifact provider cannot transfer it to another worker. A future destination
-would still need the exact runsc configuration, CPU profile, architecture,
-topology, artifact key, and OCI images. Assignment operations are fenced
-locally, but a distributed source-to-destination ownership transfer protocol is
-not included.
+store. The manifest declares `cross_worker_same_backend`, but the daemon reports
+the lower portability of its configured artifact provider. The current local
+provider therefore reports `same_worker` and rejects cross-worker restore before
+runtime allocation. A remote provider must preserve the same conditional grant
+and claim semantics and pass the migration fault gates before that capability
+can be enabled.
 
 ## Backend-neutral snapshot types
 

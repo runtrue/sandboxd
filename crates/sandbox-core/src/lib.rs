@@ -17,8 +17,8 @@ pub use identity::{
 };
 pub use lifecycle::{Lifecycle, LifecycleState};
 pub use snapshot::{
-    ArtifactDescriptor, ArtifactRole, RestoreRequirements, SnapshotManifest, SnapshotMode,
-    SnapshotObject, SNAPSHOT_MANIFEST_VERSION,
+    ArtifactDescriptor, ArtifactRole, RestoreRequirements, RestoreTarget, SnapshotManifest,
+    SnapshotMode, SnapshotObject, SNAPSHOT_MANIFEST_VERSION,
 };
 pub use specification::{
     ContainerDependency, ContainerImage, ContainerSpec, NetworkSpec, ResourceSpec, SandboxSpec,

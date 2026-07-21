@@ -47,6 +47,16 @@ pub struct RestoreRequirements {
     pub preserves_internal_connections: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreTarget {
+    pub tenant_id: TenantId,
+    pub workspace_id: WorkspaceId,
+    pub sandbox_id: SandboxId,
+    pub worker_id: WorkerId,
+    pub assignment_epoch: crate::AssignmentEpoch,
+    pub artifact_portability: SnapshotPortability,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotObject {
@@ -153,6 +163,41 @@ impl SnapshotManifest {
         }
         Ok(())
     }
+
+    pub fn validate_restore_target(&self, target: &RestoreTarget) -> Result<(), CoreError> {
+        if self.tenant_id != target.tenant_id || self.workspace_id != target.workspace_id {
+            return Err(CoreError::InvalidSnapshot(
+                "restore target belongs to another tenant scope".to_owned(),
+            ));
+        }
+        let moves_worker = self.source_worker != target.worker_id;
+        let reuses_identity = self.sandbox_id == target.sandbox_id;
+        if moves_worker {
+            if self.mode != SnapshotMode::StopAndMove {
+                return Err(CoreError::InvalidSnapshot(
+                    "cross-worker restore requires a stop-and-move snapshot".to_owned(),
+                ));
+            }
+            if !reuses_identity {
+                return Err(CoreError::InvalidSnapshot(
+                    "cross-worker restore must preserve the sandbox identity".to_owned(),
+                ));
+            }
+            if !self.restore_requirements.portability.permits_cross_worker()
+                || !target.artifact_portability.permits_cross_worker()
+            {
+                return Err(CoreError::InvalidSnapshot(
+                    "snapshot or artifact provider does not permit cross-worker restore".to_owned(),
+                ));
+            }
+        }
+        if reuses_identity && target.assignment_epoch.get() <= self.source_assignment_epoch {
+            return Err(CoreError::InvalidSnapshot(
+                "restore must advance the source assignment epoch".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -230,5 +275,48 @@ mod tests {
             .expect("container")
             .clear();
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn cross_worker_restore_requires_fenced_identity_and_newer_epoch() {
+        let manifest = manifest();
+        let mut target = RestoreTarget {
+            tenant_id: manifest.tenant_id.clone(),
+            workspace_id: manifest.workspace_id.clone(),
+            sandbox_id: manifest.sandbox_id.clone(),
+            worker_id: WorkerId::parse("worker-b").expect("worker"),
+            assignment_epoch: crate::AssignmentEpoch::new(8).expect("epoch"),
+            artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+        };
+        manifest
+            .validate_restore_target(&target)
+            .expect("fenced migration target");
+
+        target.assignment_epoch = crate::AssignmentEpoch::new(7).expect("epoch");
+        assert!(manifest.validate_restore_target(&target).is_err());
+        target.assignment_epoch = crate::AssignmentEpoch::new(8).expect("epoch");
+        target.artifact_portability = SnapshotPortability::SameWorker;
+        assert!(manifest.validate_restore_target(&target).is_err());
+
+        let mut live = manifest;
+        live.mode = SnapshotMode::Live;
+        target.artifact_portability = SnapshotPortability::CrossWorkerSameBackend;
+        assert!(live.validate_restore_target(&target).is_err());
+    }
+
+    #[test]
+    fn same_worker_copy_can_use_a_new_sandbox_identity() {
+        let manifest = manifest();
+        let target = RestoreTarget {
+            tenant_id: manifest.tenant_id.clone(),
+            workspace_id: manifest.workspace_id.clone(),
+            sandbox_id: SandboxId::parse("sandbox-copy").expect("sandbox"),
+            worker_id: manifest.source_worker.clone(),
+            assignment_epoch: crate::AssignmentEpoch::new(1).expect("epoch"),
+            artifact_portability: SnapshotPortability::SameWorker,
+        };
+        manifest
+            .validate_restore_target(&target)
+            .expect("same-worker copy target");
     }
 }

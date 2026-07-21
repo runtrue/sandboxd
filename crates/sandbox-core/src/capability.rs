@@ -10,6 +10,13 @@ pub enum SnapshotPortability {
     CrossBackend,
 }
 
+impl SnapshotPortability {
+    #[must_use]
+    pub const fn permits_cross_worker(self) -> bool {
+        matches!(self, Self::CrossWorkerSameBackend | Self::CrossBackend)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendCapabilities {
@@ -24,14 +31,17 @@ pub struct BackendCapabilities {
 
 impl BackendCapabilities {
     #[must_use]
-    pub const fn gvisor_portable_snapshot(maximum_containers: u16) -> Self {
+    pub const fn gvisor_snapshot(
+        maximum_containers: u16,
+        snapshot_portability: SnapshotPortability,
+    ) -> Self {
         Self {
             multi_container: true,
             pause_resume: true,
             live_snapshot: true,
             stop_and_snapshot: true,
             preserves_internal_connections: true,
-            snapshot_portability: SnapshotPortability::CrossWorkerSameBackend,
+            snapshot_portability,
             maximum_containers,
         }
     }
@@ -42,11 +52,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gvisor_snapshot_capability_matches_portable_manifest_contract() {
-        let capabilities = BackendCapabilities::gvisor_portable_snapshot(64);
+    fn gvisor_snapshot_capability_is_limited_by_the_artifact_provider() {
+        let capabilities =
+            BackendCapabilities::gvisor_snapshot(64, SnapshotPortability::SameWorker);
         assert_eq!(
             capabilities.snapshot_portability,
-            SnapshotPortability::CrossWorkerSameBackend
+            SnapshotPortability::SameWorker
         );
         assert!(capabilities.live_snapshot);
         assert!(capabilities.stop_and_snapshot);

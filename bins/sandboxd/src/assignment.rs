@@ -2,7 +2,7 @@ use crate::{
     authorization::SandboxKey,
     journal::{read_records, DurableJournal, JournalReceipt},
 };
-use runtrue_sandbox_core::AssignmentEpoch;
+use runtrue_sandbox_core::{AssignmentEpoch, SnapshotId};
 use runtrue_sandbox_oci::{io_error, SandboxError};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,7 +23,10 @@ const MAXIMUM_WAL_BYTES: u64 = 64 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AssignmentState {
     Provisioning,
+    Restoring,
     Active,
+    Fencing,
+    Transferable,
     Stopped,
     Failed,
 }
@@ -35,6 +38,8 @@ struct AssignmentRecord {
     key: SandboxKey,
     epoch: AssignmentEpoch,
     state: AssignmentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<SnapshotId>,
 }
 
 struct AssignmentLedgerState {
@@ -80,6 +85,30 @@ impl AssignmentLedger {
         key: &SandboxKey,
         requested_epoch: Option<AssignmentEpoch>,
     ) -> Result<AssignmentEpoch, SandboxError> {
+        self.begin_operation(key, requested_epoch, AssignmentState::Provisioning, None)
+    }
+
+    pub(crate) fn begin_restore(
+        &self,
+        key: &SandboxKey,
+        requested_epoch: Option<AssignmentEpoch>,
+        snapshot_id: &SnapshotId,
+    ) -> Result<AssignmentEpoch, SandboxError> {
+        self.begin_operation(
+            key,
+            requested_epoch,
+            AssignmentState::Restoring,
+            Some(snapshot_id.clone()),
+        )
+    }
+
+    fn begin_operation(
+        &self,
+        key: &SandboxKey,
+        requested_epoch: Option<AssignmentEpoch>,
+        assignment_state: AssignmentState,
+        snapshot_id: Option<SnapshotId>,
+    ) -> Result<AssignmentEpoch, SandboxError> {
         let (epoch, record, previous, append, replacement) = {
             let mut state = self.state.lock().expect("assignment lock");
             if state.entries.len() >= MAXIMUM_ASSIGNMENTS && !state.entries.contains_key(key) {
@@ -91,7 +120,10 @@ impl AssignmentLedger {
             if current.is_some_and(|record| {
                 matches!(
                     record.state,
-                    AssignmentState::Provisioning | AssignmentState::Active
+                    AssignmentState::Provisioning
+                        | AssignmentState::Restoring
+                        | AssignmentState::Active
+                        | AssignmentState::Fencing
                 )
             }) {
                 return Err(SandboxError::Runtime(
@@ -112,11 +144,18 @@ impl AssignmentLedger {
                 .map_err(|error| SandboxError::Runtime(error.to_string()))?,
             };
             if let Some(current) = current {
-                if epoch < current.epoch
-                    || (epoch == current.epoch && !matches!(current.state, AssignmentState::Failed))
-                {
+                if epoch <= current.epoch {
                     return Err(SandboxError::Runtime(
                         "assignment epoch is stale or already consumed".to_owned(),
+                    ));
+                }
+                if current.state == AssignmentState::Transferable
+                    && (assignment_state != AssignmentState::Restoring
+                        || current.snapshot_id.as_ref() != snapshot_id.as_ref())
+                {
+                    return Err(SandboxError::Runtime(
+                        "transferable assignment must be restored from its fenced snapshot"
+                            .to_owned(),
                     ));
                 }
             }
@@ -125,7 +164,8 @@ impl AssignmentLedger {
                 schema_version: ASSIGNMENT_SCHEMA_VERSION,
                 key: key.clone(),
                 epoch,
-                state: AssignmentState::Provisioning,
+                state: assignment_state,
+                snapshot_id,
             };
             state.entries.insert(key.clone(), record.clone());
             let append = self.journal.enqueue_append(encode_record(&record)?)?;
@@ -141,6 +181,34 @@ impl AssignmentLedger {
             receipt.wait()?;
         }
         Ok(epoch)
+    }
+
+    pub(crate) fn begin_fencing(
+        &self,
+        key: &SandboxKey,
+        epoch: AssignmentEpoch,
+        snapshot_id: &SnapshotId,
+    ) -> Result<(), SandboxError> {
+        self.transition(
+            key,
+            epoch,
+            AssignmentState::Fencing,
+            Some(snapshot_id.clone()),
+        )
+    }
+
+    pub(crate) fn mark_transferable(
+        &self,
+        key: &SandboxKey,
+        epoch: AssignmentEpoch,
+        snapshot_id: &SnapshotId,
+    ) -> Result<(), SandboxError> {
+        self.transition(
+            key,
+            epoch,
+            AssignmentState::Transferable,
+            Some(snapshot_id.clone()),
+        )
     }
 
     pub(crate) fn require_current(
@@ -171,6 +239,16 @@ impl AssignmentLedger {
         epoch: AssignmentEpoch,
         assignment_state: AssignmentState,
     ) -> Result<(), SandboxError> {
+        self.transition(key, epoch, assignment_state, None)
+    }
+
+    fn transition(
+        &self,
+        key: &SandboxKey,
+        epoch: AssignmentEpoch,
+        assignment_state: AssignmentState,
+        snapshot_id: Option<SnapshotId>,
+    ) -> Result<(), SandboxError> {
         let (record, previous, append, replacement) = {
             let mut state = self.state.lock().expect("assignment lock");
             let previous = state.entries.get(key).cloned().ok_or_else(|| {
@@ -181,8 +259,39 @@ impl AssignmentLedger {
                     "assignment epoch changed during operation".to_owned(),
                 ));
             }
+            if !valid_transition(previous.state, assignment_state) {
+                return Err(SandboxError::Runtime(format!(
+                    "invalid assignment transition from {:?} to {:?}",
+                    previous.state, assignment_state
+                )));
+            }
+            if matches!(
+                assignment_state,
+                AssignmentState::Fencing | AssignmentState::Transferable
+            ) && snapshot_id.is_none()
+            {
+                return Err(SandboxError::Runtime(
+                    "snapshot fencing transition requires a snapshot identity".to_owned(),
+                ));
+            }
+            if previous.state == AssignmentState::Fencing
+                && assignment_state == AssignmentState::Transferable
+                && previous.snapshot_id != snapshot_id
+            {
+                return Err(SandboxError::Runtime(
+                    "transferable snapshot does not match the fencing record".to_owned(),
+                ));
+            }
             let mut record = previous.clone();
             record.state = assignment_state;
+            if snapshot_id.is_some() {
+                record.snapshot_id = snapshot_id;
+            } else if matches!(
+                assignment_state,
+                AssignmentState::Active | AssignmentState::Stopped
+            ) {
+                record.snapshot_id = None;
+            }
             state.entries.insert(key.clone(), record.clone());
             let append = self.journal.enqueue_append(encode_record(&record)?)?;
             state.appends_since_compaction += 1;
@@ -206,7 +315,10 @@ impl AssignmentLedger {
             for record in state.entries.values_mut() {
                 if matches!(
                     record.state,
-                    AssignmentState::Provisioning | AssignmentState::Active
+                    AssignmentState::Provisioning
+                        | AssignmentState::Restoring
+                        | AssignmentState::Active
+                        | AssignmentState::Fencing
                 ) {
                     record.state = AssignmentState::Failed;
                     modified = true;
@@ -255,6 +367,23 @@ impl AssignmentLedger {
             }
         }
     }
+}
+
+const fn valid_transition(from: AssignmentState, to: AssignmentState) -> bool {
+    matches!(
+        (from, to),
+        (AssignmentState::Provisioning, AssignmentState::Active)
+            | (AssignmentState::Provisioning, AssignmentState::Stopped)
+            | (AssignmentState::Provisioning, AssignmentState::Failed)
+            | (AssignmentState::Restoring, AssignmentState::Active)
+            | (AssignmentState::Restoring, AssignmentState::Failed)
+            | (AssignmentState::Active, AssignmentState::Fencing)
+            | (AssignmentState::Active, AssignmentState::Stopped)
+            | (AssignmentState::Active, AssignmentState::Failed)
+            | (AssignmentState::Fencing, AssignmentState::Active)
+            | (AssignmentState::Fencing, AssignmentState::Transferable)
+            | (AssignmentState::Fencing, AssignmentState::Failed)
+    )
 }
 
 fn load(path: &Path) -> Result<BTreeMap<SandboxKey, AssignmentRecord>, SandboxError> {
@@ -310,6 +439,10 @@ mod tests {
             },
             sandbox_id: SandboxId::parse("sandbox-a").expect("sandbox"),
         }
+    }
+
+    fn snapshot(value: &str) -> SnapshotId {
+        SnapshotId::parse(value).expect("snapshot")
     }
 
     #[test]
@@ -397,6 +530,83 @@ mod tests {
             .is_err());
         let next = ledger.begin(&key("tenant-a"), None).expect("new epoch");
         assert_eq!(next.get(), epoch.get() + 1);
+    }
+
+    #[test]
+    fn stop_and_move_fences_source_before_transfer_and_restore() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let ledger = AssignmentLedger::open(directory.path()).expect("ledger");
+        let key = key("tenant-a");
+        let snapshot_id = snapshot("snapshot-transfer");
+        let source = ledger.begin(&key, None).expect("source assignment");
+        ledger
+            .mark(&key, source, AssignmentState::Active)
+            .expect("active source");
+        ledger
+            .begin_fencing(&key, source, &snapshot_id)
+            .expect("durable source fence");
+        assert!(ledger.require_current(&key, Some(source)).is_err());
+        ledger
+            .mark_transferable(&key, source, &snapshot_id)
+            .expect("transferable snapshot");
+        drop(ledger);
+        let ledger = AssignmentLedger::open(directory.path()).expect("reloaded ledger");
+        ledger
+            .reconcile_after_recovery()
+            .expect("reconcile transferable assignment");
+
+        let destination = ledger
+            .begin_restore(
+                &key,
+                Some(AssignmentEpoch::new(source.get() + 1).expect("destination epoch")),
+                &snapshot_id,
+            )
+            .expect("destination assignment");
+        assert!(ledger.require_current(&key, Some(source)).is_err());
+        ledger
+            .mark(&key, destination, AssignmentState::Active)
+            .expect("active destination");
+        assert_eq!(
+            ledger
+                .require_current(&key, Some(destination))
+                .expect("destination owns sandbox"),
+            destination
+        );
+    }
+
+    #[test]
+    fn transferable_assignment_rejects_wrong_snapshot_and_reused_epoch() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let ledger = AssignmentLedger::open(directory.path()).expect("ledger");
+        let key = key("tenant-a");
+        let snapshot_id = snapshot("snapshot-transfer");
+        let epoch = ledger.begin(&key, None).expect("source assignment");
+        ledger
+            .mark(&key, epoch, AssignmentState::Active)
+            .expect("active source");
+        ledger
+            .begin_fencing(&key, epoch, &snapshot_id)
+            .expect("durable source fence");
+        ledger
+            .mark_transferable(&key, epoch, &snapshot_id)
+            .expect("transferable snapshot");
+
+        assert!(ledger
+            .begin_restore(&key, Some(epoch), &snapshot_id)
+            .is_err());
+        assert!(ledger
+            .begin_restore(
+                &key,
+                Some(AssignmentEpoch::new(epoch.get() + 1).expect("epoch")),
+                &snapshot("different-snapshot"),
+            )
+            .is_err());
+        assert!(ledger
+            .begin(
+                &key,
+                Some(AssignmentEpoch::new(epoch.get() + 1).expect("epoch")),
+            )
+            .is_err());
     }
 
     #[test]

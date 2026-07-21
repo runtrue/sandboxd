@@ -1,8 +1,9 @@
 use crate::ArtifactError;
 use runtrue_sandbox_core::{
-    ArtifactRole, ContainerId, SnapshotId, SnapshotManifest, TenantId, WorkspaceId,
+    ArtifactRole, AssignmentEpoch, ContainerId, SandboxId, SnapshotId, SnapshotManifest, TenantId,
+    WorkerId, WorkspaceId,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -134,6 +135,33 @@ pub struct MaterializedSnapshot {
     pub directory: PathBuf,
     pub transferred_bytes: u64,
     pub materialization_millis: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotTransferGrant {
+    pub schema_version: u32,
+    pub tenant_id: TenantId,
+    pub workspace_id: WorkspaceId,
+    pub sandbox_id: SandboxId,
+    pub snapshot_id: SnapshotId,
+    pub source_worker: WorkerId,
+    pub source_assignment_epoch: AssignmentEpoch,
+    pub created_unix_millis: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotTransferClaim {
+    pub schema_version: u32,
+    pub tenant_id: TenantId,
+    pub workspace_id: WorkspaceId,
+    pub sandbox_id: SandboxId,
+    pub snapshot_id: SnapshotId,
+    pub source_worker: WorkerId,
+    pub source_assignment_epoch: AssignmentEpoch,
+    pub destination_worker: WorkerId,
+    pub destination_assignment_epoch: AssignmentEpoch,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

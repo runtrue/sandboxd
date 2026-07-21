@@ -135,11 +135,16 @@ workspace identity. A caller-supplied sandbox string is never used as a global
 lookup key. The gVisor project name is an opaque digest of tenant, workspace,
 sandbox, and assignment epoch.
 
-Create, run, and restore consume an assignment epoch. Follow-up lifecycle
-operations must carry the current epoch. Stopped epochs cannot be reused. If
-the daemon restarts while an assignment is provisioning or active, recovery
-marks it failed and a later assignment must be explicitly retried or advanced;
-the previous active epoch cannot be used for lifecycle access.
+Create, run, and restore consume a monotonically increasing assignment epoch.
+Follow-up lifecycle operations must carry the current active epoch, and the
+worker rechecks it after acquiring the sandbox lock so an operation queued
+before a fence cannot run afterward. Stop-and-move persists `fencing` before
+checkpoint work and `transferable` only after the source is no longer
+executable. Restore persists `restoring` and must advance the source epoch when
+it preserves the sandbox identity. Consumed epochs cannot be reused. If the
+daemon restarts while an assignment is provisioning, restoring, active, or
+fencing, recovery marks it failed; a completed transferable assignment remains
+fenced and bound to its snapshot.
 
 The private control directory contains:
 

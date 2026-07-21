@@ -46,13 +46,16 @@ against the locked digest and size.
 
 Snapshot objects are tenant/workspace-scoped, content-addressed, encrypted with
 tenant-derived envelope keys, and published before their immutable manifest
-reference. The current local provider supports one worker only. The artifact
-master key remains an operator-managed secret.
+reference. Stop-and-move records a durable local fence before checkpointing,
+publishes a transfer grant only after source cleanup, and binds a destination
+claim to one worker and a newer assignment epoch. The current local provider
+still supports one worker only, so these records do not establish a distributed
+lease. The artifact master key remains an operator-managed secret.
 
-Writable OCI layers, bind mounts, external volumes, key rotation, coordinated
-source-to-destination migration fencing, and cross-backend restore remain
-outside the supported boundary. An artifact being portable does not by itself
-prove that a distributed control plane transferred ownership safely.
+Writable OCI layers, bind mounts, external volumes, key rotation, a remote
+conditional artifact provider, and cross-backend restore remain outside the
+supported boundary. An artifact being portable does not by itself prove that a
+distributed control plane transferred ownership safely.
 
 ## Security-relevant local checks
 

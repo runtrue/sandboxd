@@ -25,12 +25,14 @@ restore.
 - bounded local control transport with peer credentials, signed work orders,
   replay protection, and structured audit records;
 - live and stop-and-move gVisor checkpoints;
-- tenant-scoped, encrypted, content-addressed snapshot artifacts; and
+- tenant-scoped, encrypted, content-addressed snapshot artifacts with fenced
+  transfer grants and one-winner destination claims; and
 - local restore under a new sandbox identity.
 
-The daemon reports only installed backend implementations. The backend-neutral
-contracts reserve stable identities for both `gvisor` and `marcovm`; this
-repository contains a gVisor executor only.
+The daemon derives snapshot portability from the configured artifact provider;
+the current local provider reports `same_worker`. The backend-neutral contracts
+reserve stable identities for both `gvisor` and `marcovm`; this repository
+contains a gVisor executor only.
 
 ## Execution model
 
