@@ -16,6 +16,13 @@ sudo ./examples/python-compose/run-snapshot-local.sh
 The three limit Compose files exercise memory OOM, bounded output, and host PID
 enforcement.
 
+The local lifecycle script also runs `compose-oci-compat.yaml` under the
+operator-enabled `oci-compat-v1` profile. That fixture exercises `CAP_CHOWN`,
+`CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_SETGID`, and `CAP_SETUID`,
+then verifies the exact capability masks, empty ambient/inheritable sets,
+`noNewPrivileges`, blocked raw sockets, masked proc paths, and read-only sysctl
+paths.
+
 The snapshot example keeps both containers running, creates and restores a live
 copy while the source continues, then performs a stop-and-move restore under a
 second sandbox identity. The client opts into a quota-backed writable OCI root

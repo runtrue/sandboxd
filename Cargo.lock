@@ -939,6 +939,7 @@ dependencies = [
  "hex",
  "libc",
  "nix",
+ "runtrue-sandbox-core",
  "serde",
  "serde_json",
  "serde_yaml",

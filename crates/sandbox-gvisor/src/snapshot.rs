@@ -3,9 +3,10 @@ use runtrue_sandbox_artifact::{
     ArtifactScope, ArtifactStore, MaterializedSnapshot, SnapshotPublication, StagedSnapshotObject,
 };
 use runtrue_sandbox_core::{
-    ArtifactRole, AssignmentEpoch, BackendDescriptor, BackendKind, ContainerId, LifecycleState,
-    RestoreRequirements, SandboxId, SnapshotId, SnapshotManifest, SnapshotMode,
-    SnapshotPortability, TenantId, WorkerId, WorkspaceId, SNAPSHOT_MANIFEST_VERSION,
+    ArtifactRole, AssignmentEpoch, BackendDescriptor, BackendKind, ContainerId,
+    GuestProfileIdentity, LifecycleState, RestoreRequirements, SandboxId, SnapshotId,
+    SnapshotManifest, SnapshotMode, SnapshotPortability, TenantId, WorkerId, WorkspaceId,
+    SNAPSHOT_MANIFEST_VERSION,
 };
 use runtrue_sandbox_oci::provider::{ImageProvider, WritableRootfs, WritableRootfsExport};
 use serde::{Deserialize, Serialize};
@@ -18,9 +19,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const METADATA_VERSION: u32 = 2;
+const METADATA_VERSION: u32 = 3;
 const CHECKPOINT_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.checkpoint";
-const METADATA_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.metadata.v2+json";
+const METADATA_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.metadata.v3+json";
 const WRITABLE_DIFF_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 
 #[derive(Debug, Clone)]
@@ -52,6 +53,7 @@ pub(super) struct GvisorSnapshotMetadata {
     pub(super) services: Vec<String>,
     pub(super) service_states: BTreeMap<String, String>,
     pub(super) writable_services: BTreeMap<String, u64>,
+    pub(super) guest_profile: GuestProfileIdentity,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +122,7 @@ impl SnapshotStaging {
         cpu_features_digest: String,
         root_service: String,
         services: Vec<String>,
+        guest_profile: GuestProfileIdentity,
         service_states: BTreeMap<String, String>,
         writable_services: BTreeMap<String, u64>,
         mut writable_objects: Vec<StagedSnapshotObject>,
@@ -137,6 +140,7 @@ impl SnapshotStaging {
             services,
             service_states,
             writable_services,
+            guest_profile: guest_profile.clone(),
         };
         validate_metadata(&metadata)?;
         let mut objects = checkpoint_objects(&self.image_path)?;
@@ -183,6 +187,7 @@ impl SnapshotStaging {
                 required_cpu_features: Vec::new(),
                 cpu_features_digest,
                 preserves_internal_connections: true,
+                guest_profile,
             },
             containers: BTreeMap::new(),
             sandbox_objects: Vec::new(),
@@ -585,6 +590,7 @@ mod tests {
             services: vec!["server".to_owned()],
             service_states: BTreeMap::new(),
             writable_services: BTreeMap::new(),
+            guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
         };
         assert!(validate_metadata(&metadata).is_err());
     }

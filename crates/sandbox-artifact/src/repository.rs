@@ -863,6 +863,7 @@ mod tests {
                 required_cpu_features: Vec::new(),
                 cpu_features_digest: format!("sha256:{}", "c".repeat(64)),
                 preserves_internal_connections: true,
+                guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
             },
             containers: BTreeMap::new(),
             sandbox_objects: Vec::new(),
@@ -976,6 +977,7 @@ mod tests {
                     worker_id: WorkerId::parse("worker-b").expect("worker"),
                     assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
                     artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+                    guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
                 },
             )
             .expect("local transfer claim contract");
@@ -1142,6 +1144,7 @@ mod tests {
                     worker_id: WorkerId::parse("worker-b").expect("worker"),
                     assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
                     artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+                    guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
                 },
             )
             .expect("claim transfer");
@@ -1230,6 +1233,7 @@ mod tests {
             worker_id: WorkerId::parse("worker-b").expect("worker"),
             assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+            guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
         };
         let claim = repository
             .claim_transfer(
@@ -1306,6 +1310,7 @@ mod tests {
             worker_id: WorkerId::parse("worker-b").expect("worker"),
             assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+            guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
         };
         assert!(repository
             .claim_transfer(

@@ -162,6 +162,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         snapshot_staging_root,
         artifact_store,
         worker_id: config.worker_id,
+        guest_profiles: config.guest_profiles,
         image_provider,
         runsc: config.runsc,
         ip: config.ip,

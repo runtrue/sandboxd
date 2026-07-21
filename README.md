@@ -18,6 +18,7 @@ restore.
 - restricted Docker Compose compilation into an immutable topology lock;
 - digest-pinned OCI image admission with immutable shared image roots;
 - opt-in, quota-backed writable OCI roots with portable snapshot deltas;
+- versioned, operator-enabled guest compatibility profiles;
 - one gVisor Sentry containing a root sandbox and child containers;
 - private sandbox networking with service-name resolution;
 - create, inspect, logs, pause, resume, stop, and crash recovery;
@@ -49,8 +50,17 @@ quota; immutable image layers remain shared and read-only. Each container also
 receives writable `/tmp` and `/work` tmpfs mounts. A snapshot captures guest
 processes, memory, internal sockets, tmpfs contents, and an OCI-compatible diff
 for each writable root. Restore requires an exact topology, writable-root
-policy, runsc version, runtime configuration, CPU feature, architecture, and
-operating-system match.
+policy, guest profile identity, runsc version, runtime configuration, CPU
+feature, architecture, and operating-system match.
+
+The default `strict-v1` guest profile runs every process as UID/GID 65534 with
+no capabilities. A topology may explicitly select `root-in-sandbox-v1` or
+`oci-compat-v1` with the top-level Compose extension
+`x-runtrue-guest-profile`, but the worker accepts it only when the operator
+enabled that reviewed profile at startup. Raw Compose `user`, `cap_add`,
+`cap_drop`, `privileged`, device, namespace, and runtime-annotation fields are
+rejected; profiles are operator policy, not a route for tenant-supplied OCI
+privilege fields.
 
 Host cgroups contain the Sentry, gofers, and runsc processes. Because guest work
 is executed by a shared Sentry, the host accounting boundary is the

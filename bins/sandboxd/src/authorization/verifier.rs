@@ -139,6 +139,9 @@ fn enforce_resource_ceilings(
             SandboxError::Runtime("topology output limit cannot be represented".to_owned())
         })?;
         if topology.services.len() > usize::from(ceilings.maximum_services)
+            || !ceilings
+                .allowed_guest_profiles
+                .contains(&topology.policy.guest_profile)
             || topology.policy.memory_bytes_per_service > ceilings.memory_bytes_per_service
             || topology.policy.cpu_per_service_millis > ceilings.cpu_per_service_millis
             || topology.policy.pids_per_service > ceilings.pids_per_service
@@ -232,6 +235,7 @@ mod tests {
             nonce: "nonce-1".to_owned(),
             operation_digest: operation.digest().expect("digest"),
             resource_ceilings: ResourceCeilings {
+                allowed_guest_profiles: vec![runtrue_sandbox_core::GuestProfile::strict().identity],
                 maximum_services: 4,
                 maximum_timeout_ms: 10_000,
                 memory_bytes_per_service: 1024,
@@ -277,7 +281,7 @@ mod tests {
         );
         assert_eq!(
             signed_order(&operation).signature,
-            "54af2f73b53f6d2c009ca52a06b3b086d35a6f277c985f204ecd45c2459b6273"
+            "af648cf0a0ea399ea02d60c02c6293a0437d3ef1b9ac6f996994a3f867904bbe"
         );
     }
 
@@ -311,7 +315,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         let topology = TopologyLock {
-            schema_version: 3,
+            schema_version: 4,
             topology_digest: format!("sha256:{}", "a".repeat(64)),
             name: "example".to_owned(),
             services: BTreeMap::from([(
@@ -347,7 +351,6 @@ mod tests {
                     depends_on: BTreeMap::new(),
                     healthcheck: None,
                     networks: vec!["default".to_owned()],
-                    user: "65534:65534".to_owned(),
                     working_dir: "/work".to_owned(),
                     root_filesystem: RootFilesystemMode::ReadOnly,
                 },
@@ -362,6 +365,28 @@ mod tests {
             startup_order: vec!["app".to_owned()],
             policy: SandboxPolicy::default(),
         };
+        let mut profile_topology = topology.clone();
+        profile_topology.policy.memory_bytes_per_service = 1024;
+        profile_topology.policy.cpu_per_service_millis = 100;
+        profile_topology.policy.pids_per_service = 16;
+        profile_topology.policy.tmpfs_bytes = 1024;
+        profile_topology.policy.writable_root_bytes_per_service = 1024;
+        profile_topology.policy.maximum_output_bytes = 1024;
+        profile_topology.policy.guest_profile = runtrue_sandbox_core::GuestProfile::reviewed_named(
+            runtrue_sandbox_core::ROOT_GUEST_PROFILE,
+        )
+        .expect("root profile")
+        .identity;
+        let profile_operation = Operation::Create {
+            topology: profile_topology,
+            sandbox: "sandbox-a".to_owned(),
+            timeout_ms: 1_000,
+        };
+        assert!(enforce_resource_ceilings(
+            &profile_operation,
+            &signed_order(&profile_operation).claims
+        )
+        .is_err());
         let operation = Operation::Create {
             topology,
             sandbox: "sandbox-a".to_owned(),

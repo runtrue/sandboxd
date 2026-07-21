@@ -1,10 +1,10 @@
 use crate::{
-    specification::validate_digest, AssignmentEpoch, CoreError, SandboxId, SubjectId, TenantId,
-    WorkspaceId,
+    specification::validate_digest, AssignmentEpoch, CoreError, GuestProfileIdentity, SandboxId,
+    SubjectId, TenantId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 
-pub const WORK_ORDER_VERSION: u32 = 2;
+pub const WORK_ORDER_VERSION: u32 = 3;
 pub const MAXIMUM_WORK_ORDER_LIFETIME_MILLIS: u64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +34,7 @@ impl WorkOrderOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceCeilings {
+    pub allowed_guest_profiles: Vec<GuestProfileIdentity>,
     pub maximum_services: u16,
     pub maximum_timeout_ms: u64,
     pub memory_bytes_per_service: u64,
@@ -46,7 +47,17 @@ pub struct ResourceCeilings {
 
 impl ResourceCeilings {
     pub fn validate(&self) -> Result<(), CoreError> {
-        if self.maximum_services == 0
+        if self.allowed_guest_profiles.is_empty()
+            || self.allowed_guest_profiles.len() > 16
+            || self
+                .allowed_guest_profiles
+                .iter()
+                .enumerate()
+                .any(|(index, profile)| {
+                    self.allowed_guest_profiles[..index].contains(profile)
+                        || GuestProfileIdentity::parse(&profile.canonical()).as_ref() != Ok(profile)
+                })
+            || self.maximum_services == 0
             || self.maximum_services > 64
             || self.maximum_timeout_ms == 0
             || self.maximum_timeout_ms > 300_000
@@ -151,6 +162,7 @@ mod tests {
             nonce: "nonce-1".to_owned(),
             operation_digest: format!("sha256:{}", "a".repeat(64)),
             resource_ceilings: ResourceCeilings {
+                allowed_guest_profiles: vec![crate::GuestProfile::strict().identity],
                 maximum_services: 4,
                 maximum_timeout_ms: 10_000,
                 memory_bytes_per_service: 1024,

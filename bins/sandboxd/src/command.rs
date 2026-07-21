@@ -17,6 +17,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 maximum_connections,
                 io_timeout_seconds,
                 worker_id,
+                guest_profiles,
                 artifact_master_key,
                 artifact_s3_bucket,
                 artifact_s3_region,
@@ -37,6 +38,20 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 runsc,
                 ip,
             } = *options;
+            let mut installed_guest_profiles = vec![runtrue_sandbox_core::GuestProfile::strict()];
+            for name in guest_profiles {
+                let profile = runtrue_sandbox_core::GuestProfile::reviewed_named(&name)
+                    .map_err(|error| SandboxError::Runtime(error.to_string()))?;
+                if installed_guest_profiles
+                    .iter()
+                    .any(|installed| installed.identity == profile.identity)
+                {
+                    return Err(SandboxError::Runtime(format!(
+                        "guest profile `{name}` was installed more than once"
+                    )));
+                }
+                installed_guest_profiles.push(profile);
+            }
             server::serve(server::ServerConfig {
                 operator_socket: socket,
                 workload_socket,
@@ -44,6 +59,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 work_order_key,
                 worker_id: runtrue_sandbox_core::WorkerId::parse(worker_id)
                     .map_err(|error| SandboxError::Runtime(error.to_string()))?,
+                guest_profiles: installed_guest_profiles,
                 artifact_master_key,
                 artifact_s3_bucket,
                 artifact_s3_region,

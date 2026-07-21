@@ -1,4 +1,4 @@
-use runtrue_sandbox_core::WorkerId;
+use runtrue_sandbox_core::{GuestProfile, WorkerId, STRICT_GUEST_PROFILE};
 use runtrue_sandbox_oci::SandboxError;
 use std::{path::PathBuf, time::Duration};
 
@@ -8,6 +8,7 @@ pub(crate) struct ServerConfig {
     pub(crate) broker_uid: Option<u32>,
     pub(crate) work_order_key: Option<PathBuf>,
     pub(crate) worker_id: WorkerId,
+    pub(crate) guest_profiles: Vec<GuestProfile>,
     pub(crate) artifact_master_key: Option<PathBuf>,
     pub(crate) artifact_s3_bucket: Option<String>,
     pub(crate) artifact_s3_region: String,
@@ -80,6 +81,24 @@ impl ServerConfig {
                 "S3 artifact options require --artifact-s3-bucket".to_owned(),
             ));
         }
+        if self.guest_profiles.is_empty()
+            || self.guest_profiles[0].identity.canonical() != STRICT_GUEST_PROFILE
+            || self
+                .guest_profiles
+                .iter()
+                .enumerate()
+                .any(|(index, profile)| {
+                    GuestProfile::reviewed(&profile.identity).as_ref() != Some(profile)
+                        || self.guest_profiles[..index]
+                            .iter()
+                            .any(|prior| prior.identity == profile.identity)
+                })
+        {
+            return Err(SandboxError::Runtime(
+                "installed guest profiles must be unique reviewed definitions with strict-v1 first"
+                    .to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -95,6 +114,7 @@ mod tests {
             broker_uid: Some(991),
             work_order_key: Some(PathBuf::from("/etc/sandboxd/work-order.key")),
             worker_id: WorkerId::parse("worker-a").expect("worker ID"),
+            guest_profiles: vec![GuestProfile::strict()],
             artifact_master_key: None,
             artifact_s3_bucket: None,
             artifact_s3_region: "us-east-1".to_owned(),
@@ -144,5 +164,26 @@ mod tests {
         let mut stray_endpoint = config();
         stray_endpoint.artifact_s3_endpoint = Some("https://s3.example.com".to_owned());
         assert!(stray_endpoint.validate().is_err());
+    }
+
+    #[test]
+    fn guest_profiles_are_exact_reviewed_operator_policy() {
+        let mut enabled = config();
+        enabled.guest_profiles.push(
+            GuestProfile::reviewed_named(runtrue_sandbox_core::ROOT_GUEST_PROFILE)
+                .expect("root profile"),
+        );
+        enabled.validate().expect("reviewed profile set");
+
+        let mut duplicate = config();
+        duplicate.guest_profiles.push(GuestProfile::strict());
+        assert!(duplicate.validate().is_err());
+
+        let mut tampered = config();
+        tampered.guest_profiles[0]
+            .restrictions
+            .effective_capabilities
+            .push("CAP_SYS_ADMIN".to_owned());
+        assert!(tampered.validate().is_err());
     }
 }
