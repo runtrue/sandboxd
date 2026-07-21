@@ -18,5 +18,8 @@ enforcement.
 
 The snapshot example keeps both containers running, creates and restores a live
 copy while the source continues, then performs a stop-and-move restore under a
-second sandbox identity. Both paths verify that the client's persistent
-connection and `/tmp` counter survived and continued advancing.
+second sandbox identity. The client opts into a quota-backed writable OCI root
+and atomically updates `/var/tmp/snapshot-counter`. Both paths verify that the
+persistent connection and writable-root state survived and continued
+advancing, and that a larger payload retains its digest, mode, and size. The
+script prints cached-create and sparse-backing allocation diagnostics.

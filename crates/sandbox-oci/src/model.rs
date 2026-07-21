@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(crate) const LOCK_SCHEMA_VERSION: u32 = 2;
+pub(crate) const LOCK_SCHEMA_VERSION: u32 = 3;
 pub(crate) const MAX_SERVICES: usize = 32;
 pub(crate) const MAX_NETWORKS: usize = 8;
 pub(crate) const MAX_ENVIRONMENT: usize = 128;
@@ -115,6 +115,14 @@ pub struct LockedService {
     pub networks: Vec<String>,
     pub user: String,
     pub working_dir: String,
+    pub root_filesystem: RootFilesystemMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootFilesystemMode {
+    ReadOnly,
+    Writable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +172,7 @@ pub struct SandboxPolicy {
     pub cpu_per_service_millis: u32,
     pub pids_per_service: u32,
     pub tmpfs_bytes: u64,
+    pub writable_root_bytes_per_service: u64,
     pub maximum_output_bytes: usize,
 }
 
@@ -175,6 +184,7 @@ impl Default for SandboxPolicy {
             cpu_per_service_millis: 500,
             pids_per_service: 96,
             tmpfs_bytes: 16 * 1024 * 1024,
+            writable_root_bytes_per_service: 64 * 1024 * 1024,
             maximum_output_bytes: 1024 * 1024,
         }
     }

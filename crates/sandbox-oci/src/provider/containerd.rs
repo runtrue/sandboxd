@@ -1,3 +1,4 @@
+use super::writable::LoopbackWritableRootfs;
 use super::{
     command::CommandRunner,
     config::{canonical_child, ContainerdProviderConfig, ImagePlatform},
@@ -8,7 +9,8 @@ use super::{
         validate_platform,
     },
     GarbageCollectionReport, ImageProvider, ImmutableRootfs, PreparationStatus,
-    PreparedImageHandle, RegistryCredential,
+    PreparedImageHandle, RegistryCredential, WritableRootfs, WritableRootfsExport,
+    WritableRootfsIdentity,
 };
 use crate::{io_error, LockedDescriptor, LockedImage, SandboxError};
 use serde_json::Value;
@@ -35,12 +37,17 @@ const MANIFEST_MEDIA_TYPES: &[&str] = &[
 pub struct ContainerdImageProvider {
     config: ContainerdProviderConfig,
     runner: CommandRunner,
+    writable: LoopbackWritableRootfs,
     operation: Mutex<()>,
 }
 
 impl ContainerdImageProvider {
     pub fn new(config: ContainerdProviderConfig) -> Result<Self, SandboxError> {
         let config = config.validated()?;
+        let writable = LoopbackWritableRootfs::new(
+            config.writable_rootfs.clone(),
+            config.limits.maximum_command_output_bytes,
+        )?;
         let runner = CommandRunner::new(
             config.ctr_program.clone(),
             config.address.clone(),
@@ -55,6 +62,7 @@ impl ContainerdImageProvider {
         let provider = Self {
             config,
             runner,
+            writable,
             operation: Mutex::new(()),
         };
         provider.ensure_namespace()?;
@@ -842,11 +850,48 @@ impl ImageProvider for ContainerdImageProvider {
         Ok(())
     }
 
+    fn create_writable_rootfs(
+        &self,
+        immutable: &ImmutableRootfs,
+        identity: WritableRootfsIdentity,
+        quota_bytes: u64,
+    ) -> Result<WritableRootfs, SandboxError> {
+        let _operation = self.operation.lock().expect("image provider lock");
+        self.writable.create(immutable, identity, quota_bytes)
+    }
+
+    fn release_writable_rootfs(&self, rootfs: &WritableRootfs) -> Result<(), SandboxError> {
+        let _operation = self.operation.lock().expect("image provider lock");
+        self.writable.release(rootfs)
+    }
+
+    fn export_writable_rootfs(
+        &self,
+        rootfs: &WritableRootfs,
+        destination: &Path,
+    ) -> Result<WritableRootfsExport, SandboxError> {
+        let _operation = self.operation.lock().expect("image provider lock");
+        self.writable.export(rootfs, destination)
+    }
+
+    fn restore_writable_rootfs(
+        &self,
+        immutable: &ImmutableRootfs,
+        identity: WritableRootfsIdentity,
+        quota_bytes: u64,
+        diff: &Path,
+    ) -> Result<WritableRootfs, SandboxError> {
+        let _operation = self.operation.lock().expect("image provider lock");
+        self.writable
+            .restore(immutable, identity, quota_bytes, diff)
+    }
+
     fn garbage_collect(&self) -> Result<GarbageCollectionReport, SandboxError> {
         let _operation = self.operation.lock().expect("image provider lock");
         let mut report = GarbageCollectionReport {
             stale_staging_directories: 0,
             stale_mounts: 0,
+            stale_writable_roots: self.writable.garbage_collect()?,
         };
         for entry in fs::read_dir(&self.config.mount_root)
             .map_err(|source| io_error(&self.config.mount_root, source))?

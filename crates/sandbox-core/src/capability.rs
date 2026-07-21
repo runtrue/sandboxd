@@ -25,14 +25,18 @@ pub struct BackendCapabilities {
     pub live_snapshot: bool,
     pub stop_and_snapshot: bool,
     pub preserves_internal_connections: bool,
+    pub writable_root_filesystems: bool,
+    pub writable_root_snapshots: bool,
     pub snapshot_portability: SnapshotPortability,
     pub maximum_containers: u16,
+    pub maximum_writable_root_bytes: u64,
 }
 
 impl BackendCapabilities {
     #[must_use]
     pub const fn gvisor_snapshot(
         maximum_containers: u16,
+        maximum_writable_root_bytes: u64,
         snapshot_portability: SnapshotPortability,
     ) -> Self {
         Self {
@@ -41,8 +45,11 @@ impl BackendCapabilities {
             live_snapshot: true,
             stop_and_snapshot: true,
             preserves_internal_connections: true,
+            writable_root_filesystems: true,
+            writable_root_snapshots: true,
             snapshot_portability,
             maximum_containers,
+            maximum_writable_root_bytes,
         }
     }
 }
@@ -53,13 +60,18 @@ mod tests {
 
     #[test]
     fn gvisor_snapshot_capability_is_limited_by_the_artifact_provider() {
-        let capabilities =
-            BackendCapabilities::gvisor_snapshot(64, SnapshotPortability::SameWorker);
+        let capabilities = BackendCapabilities::gvisor_snapshot(
+            64,
+            16 * 1024 * 1024 * 1024,
+            SnapshotPortability::SameWorker,
+        );
         assert_eq!(
             capabilities.snapshot_portability,
             SnapshotPortability::SameWorker
         );
         assert!(capabilities.live_snapshot);
         assert!(capabilities.stop_and_snapshot);
+        assert!(capabilities.writable_root_filesystems);
+        assert!(capabilities.writable_root_snapshots);
     }
 }

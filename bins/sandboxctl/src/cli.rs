@@ -9,6 +9,10 @@ use std::path::PathBuf;
 pub(crate) struct Cli {
     #[arg(long, global = true, default_value = "/usr/bin/ctr")]
     pub(crate) ctr: PathBuf,
+    #[arg(long, global = true, default_value = "/usr/sbin/mkfs.ext4")]
+    pub(crate) mkfs_ext4: PathBuf,
+    #[arg(long, global = true, default_value = "/usr/sbin/losetup")]
+    pub(crate) losetup: PathBuf,
     #[arg(long, global = true, default_value = "/run/containerd/containerd.sock")]
     pub(crate) containerd_address: PathBuf,
     #[arg(long, global = true, default_value = "runtrue-sandboxd")]

@@ -1,8 +1,9 @@
 use crate::{
     model::{
         ComposeInput, DependencyCondition, DigestInput, LockedHealthcheck, LockedImage,
-        LockedNetwork, LockedService, SandboxPolicy, TopologyLock, LOCK_SCHEMA_VERSION,
-        MAX_ARGUMENTS, MAX_ENVIRONMENT, MAX_NETWORKS, MAX_SERVICES, MAX_VALUE_BYTES,
+        LockedNetwork, LockedService, RootFilesystemMode, SandboxPolicy, TopologyLock,
+        LOCK_SCHEMA_VERSION, MAX_ARGUMENTS, MAX_ENVIRONMENT, MAX_NETWORKS, MAX_SERVICES,
+        MAX_VALUE_BYTES,
     },
     provider::{ImageProvider, RegistryCredential},
     SandboxError,
@@ -103,11 +104,11 @@ where
         for (key, value) in &service.environment {
             validate_environment(key, value)?;
         }
-        if service.read_only == Some(false) {
-            return Err(SandboxError::Unsupported(format!(
-                "service `{service_name}` requests a writable root filesystem"
-            )));
-        }
+        let root_filesystem = if service.read_only == Some(false) {
+            RootFilesystemMode::Writable
+        } else {
+            RootFilesystemMode::ReadOnly
+        };
         let user = service.user.unwrap_or_else(|| "65534:65534".to_owned());
         validate_value("user", &user)?;
         let working_dir = service.working_dir.unwrap_or_else(|| "/work".to_owned());
@@ -191,6 +192,7 @@ where
                 networks: selected_networks,
                 user,
                 working_dir,
+                root_filesystem,
             },
         );
     }
@@ -395,8 +397,29 @@ services:
         .unwrap();
         let lock = compile(input, |reference| Ok(image(reference))).unwrap();
         assert_eq!(lock.startup_order, ["server", "client"]);
+        assert!(lock
+            .services
+            .values()
+            .all(|service| service.root_filesystem == RootFilesystemMode::ReadOnly));
         verify_lock(&lock).unwrap();
         assert_eq!(lock.topology_digest, digest(&lock.digest_input()).unwrap());
+    }
+
+    #[test]
+    fn writable_root_requires_an_explicit_compose_request() {
+        let input: ComposeInput = serde_yaml::from_str(
+            "name: x\nservices:\n  writable:\n    image: x\n    read_only: false\n  default:\n    image: x\n",
+        )
+        .unwrap();
+        let lock = compile(input, |reference| Ok(image(reference))).unwrap();
+        assert_eq!(
+            lock.services["writable"].root_filesystem,
+            RootFilesystemMode::Writable
+        );
+        assert_eq!(
+            lock.services["default"].root_filesystem,
+            RootFilesystemMode::ReadOnly
+        );
     }
 
     #[test]

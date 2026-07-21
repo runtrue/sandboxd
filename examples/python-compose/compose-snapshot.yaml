@@ -39,14 +39,21 @@ services:
   client:
     image: docker.io/library/python:3.13-slim
     user: "65534:65534"
-    read_only: true
+    read_only: false
     working_dir: /work
     entrypoint: ["/usr/local/bin/python3", "-c"]
     command:
       - |
         import http.client, json, pathlib, time
-        counter_path = pathlib.Path("/tmp/snapshot-counter")
+        counter_path = pathlib.Path("/var/tmp/snapshot-counter")
+        counter_temp = pathlib.Path("/var/tmp/.snapshot-counter.tmp")
+        payload_path = pathlib.Path("/var/tmp/snapshot-payload")
+        payload_temp = pathlib.Path("/var/tmp/.snapshot-payload.tmp")
         counter = int(counter_path.read_text()) if counter_path.exists() else 0
+        if not payload_path.exists():
+            payload_temp.write_bytes(b"runtrue-writable-root\n" * 50000)
+            payload_temp.chmod(0o640)
+            payload_temp.replace(payload_path)
         connection = http.client.HTTPConnection("server", 8080, timeout=2)
         while True:
             connection.request("GET", "/from-snapshot-client")
@@ -55,7 +62,8 @@ services:
             if payload.get("ok") is not True or payload.get("service") != "server":
                 raise RuntimeError(f"unexpected server response: {payload!r}")
             counter += 1
-            counter_path.write_text(f"{counter}\n")
+            counter_temp.write_text(f"{counter}\n")
+            counter_temp.replace(counter_path)
             time.sleep(0.1)
     environment:
       TOPOLOGY_NAME: sandbox-snapshot-example

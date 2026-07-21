@@ -1,5 +1,6 @@
 use super::{cgroup, network, process::Runsc, runtime_id, validate_project};
 use crate::{error::io_error, model::TopologyLock, SandboxError};
+use runtrue_sandbox_oci::provider::LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
@@ -8,9 +9,9 @@ use std::{
     path::Path,
 };
 
-const RECOVERY_SCHEMA_VERSION: u32 = 2;
+const RECOVERY_SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecoveryRecord {
     schema_version: u32,
@@ -20,6 +21,17 @@ struct RecoveryRecord {
     sandbox_runtime_id: String,
     bridge: String,
     network_namespaces: Vec<String>,
+    #[serde(default)]
+    writable_rootfs: Vec<WritableRootfsRecovery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WritableRootfsRecovery {
+    pub(super) service: String,
+    pub(super) provider: String,
+    pub(super) key: String,
+    pub(super) quota_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,7 +76,7 @@ pub fn recover(
         let bytes = fs::read(&record_path).map_err(|source| io_error(&record_path, source))?;
         let record: RecoveryRecord = serde_json::from_slice(&bytes)
             .map_err(|error| SandboxError::Runtime(format!("decode recovery record: {error}")))?;
-        if record.schema_version != RECOVERY_SCHEMA_VERSION
+        if !matches!(record.schema_version, 2 | RECOVERY_SCHEMA_VERSION)
             || state.file_name().and_then(|name| name.to_str()) != Some(&record.project)
         {
             return Err(SandboxError::Runtime(
@@ -75,18 +87,13 @@ pub fn recover(
         let runsc_root = state.join("runsc");
         if runsc_root.exists() {
             let runsc = Runsc::new(runsc_program, &runsc_root)?;
+            let mut active_ids = Vec::new();
             for id in &record.runtime_ids {
                 if runsc.state(id).is_ok() {
-                    runsc.kill(id);
-                    runsc.delete(id)?;
+                    active_ids.push(id.clone());
                 }
             }
-            if !runsc.is_empty()? {
-                return Err(SandboxError::Runtime(format!(
-                    "runsc state for `{}` remains after recovery",
-                    record.project
-                )));
-            }
+            runsc.teardown(&active_ids, &record.sandbox_runtime_id)?;
         }
         network::recover(ip_program, &record.bridge, &record.network_namespaces)?;
         cgroup::recover_project(&record.project)?;
@@ -114,6 +121,7 @@ pub(super) fn write_recovery_record(
         sandbox_runtime_id: runtime_id(project, &lock.startup_order[0]),
         bridge,
         network_namespaces,
+        writable_rootfs: Vec::new(),
     };
     let path = state.join("recovery.json");
     let bytes = serde_json::to_vec_pretty(&record)
@@ -132,6 +140,35 @@ pub(super) fn write_recovery_record(
         .map_err(|source| io_error(state, source))
 }
 
+pub(super) fn write_writable_rootfs(
+    state: &Path,
+    roots: Vec<WritableRootfsRecovery>,
+) -> Result<(), SandboxError> {
+    let path = state.join("recovery.json");
+    let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
+    let mut record: RecoveryRecord = serde_json::from_slice(&bytes)
+        .map_err(|error| SandboxError::Runtime(format!("decode recovery record: {error}")))?;
+    record.schema_version = RECOVERY_SCHEMA_VERSION;
+    record.writable_rootfs = roots;
+    validate_recovery_record(&record)?;
+    let bytes = serde_json::to_vec_pretty(&record)
+        .map_err(|error| SandboxError::Runtime(format!("encode recovery record: {error}")))?;
+    let temporary = state.join("recovery.json.new");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|source| io_error(&temporary, source))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|source| io_error(&temporary, source))?;
+    fs::rename(&temporary, &path).map_err(|source| io_error(&path, source))?;
+    fs::File::open(state)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| io_error(state, source))
+}
+
 fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError> {
     validate_project(&record.project)?;
     if record.runtime_ids.is_empty()
@@ -140,6 +177,7 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError>
         || record.bridge != network::bridge_name(&record.project)
         || !record.topology_digest.starts_with("sha256:")
         || record.topology_digest.len() != 71
+        || (record.schema_version == 2 && !record.writable_rootfs.is_empty())
     {
         return Err(SandboxError::Runtime(
             "recovery record resource set is invalid".to_owned(),
@@ -171,6 +209,28 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError>
             "recovery network identity does not match its project".to_owned(),
         ));
     }
+    let runtime_services = record
+        .runtime_ids
+        .iter()
+        .filter_map(|id| id.strip_prefix(&prefix))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut writable_services = std::collections::BTreeSet::new();
+    for rootfs in &record.writable_rootfs {
+        if !runtime_services.contains(rootfs.service.as_str())
+            || !writable_services.insert(rootfs.service.as_str())
+            || rootfs.provider != LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID
+            || rootfs.key.len() != 64
+            || !rootfs
+                .key
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || rootfs.quota_bytes == 0
+        {
+            return Err(SandboxError::Runtime(
+                "recovery writable-root identity is invalid".to_owned(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -187,6 +247,7 @@ mod tests {
             sandbox_runtime_id: "rts-tenant-a-api_worker".to_owned(),
             bridge: network::bridge_name("tenant-a"),
             network_namespaces: vec![network::namespace_name("tenant-a")],
+            writable_rootfs: Vec::new(),
         }
     }
 
@@ -203,5 +264,29 @@ mod tests {
         let mut changed = recovery_record();
         changed.runtime_ids = vec!["rts-tenant-b-api_worker".to_owned()];
         assert!(validate_recovery_record(&changed).is_err());
+    }
+
+    #[test]
+    fn recovery_binds_writable_roots_to_issued_services_and_provider() {
+        let mut record = recovery_record();
+        record.writable_rootfs.push(WritableRootfsRecovery {
+            service: "api_worker".to_owned(),
+            provider: LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID.to_owned(),
+            key: "a".repeat(64),
+            quota_bytes: 16 * 1024 * 1024,
+        });
+        assert!(validate_recovery_record(&record).is_ok());
+
+        let mut wrong_service = record.clone();
+        wrong_service.writable_rootfs[0].service = "other".to_owned();
+        assert!(validate_recovery_record(&wrong_service).is_err());
+
+        let mut wrong_provider = record.clone();
+        wrong_provider.writable_rootfs[0].provider = "untrusted".to_owned();
+        assert!(validate_recovery_record(&wrong_provider).is_err());
+
+        let mut legacy = record;
+        legacy.schema_version = 2;
+        assert!(validate_recovery_record(&legacy).is_err());
     }
 }

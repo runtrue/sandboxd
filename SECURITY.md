@@ -40,9 +40,11 @@ assignment epochs. Tenant-visible state is scoped before lookup. The signer and
 configured broker are trusted; this repository does not implement their
 tenant-facing identity or policy layer. The local containerd daemon,
 snapshotter, and `ctr` client participate in image preparation and belong to
-the trusted operator boundary. OCI registries and their transport remain
-outside the worker boundary, so every admitted descriptor and blob is verified
-against the locked digest and size.
+the trusted operator boundary. The loop driver, ext4 implementation, overlayfs,
+`losetup`, and `mkfs.ext4` join that trusted host boundary when writable roots
+are enabled. OCI registries and their transport remain outside the worker
+boundary, so every admitted descriptor and blob is verified against the locked
+digest and size.
 
 Snapshot objects are tenant/workspace-scoped, content-addressed, encrypted with
 tenant-derived envelope keys, and published before their immutable manifest
@@ -52,10 +54,12 @@ claim to one worker and a newer assignment epoch. The current local provider
 still supports one worker only, so these records do not establish a distributed
 lease. The artifact master key remains an operator-managed secret.
 
-Writable OCI layers, bind mounts, external volumes, key rotation, a remote
-conditional artifact provider, and cross-backend restore remain outside the
-supported boundary. An artifact being portable does not by itself prove that a
-distributed control plane transferred ownership safely.
+Writable roots are private, quota-backed overlays created only from
+provider-issued identities. Their portable snapshot format currently rejects
+hard links and non-overlay extended attributes. Bind mounts, external volumes,
+key rotation, a remote conditional artifact provider, and cross-backend restore
+remain outside the supported boundary. An artifact being portable does not by
+itself prove that a distributed control plane transferred ownership safely.
 
 ## Security-relevant local checks
 

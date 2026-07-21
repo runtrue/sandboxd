@@ -20,9 +20,14 @@ use runtrue_sandbox_artifact::{ArtifactLimits, ArtifactStore, LocalArtifactStore
 use runtrue_sandbox_gvisor::executor;
 use runtrue_sandbox_oci::{
     io_error,
-    provider::{ContainerdImageProvider, ContainerdProviderConfig, ImageLimits, ImagePlatform},
+    provider::{
+        ContainerdImageProvider, ContainerdProviderConfig, ImageLimits, ImagePlatform,
+        WritableRootfsConfig,
+    },
     SandboxError,
 };
+
+pub(crate) const MAXIMUM_WRITABLE_ROOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -84,6 +89,14 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         namespace: config.containerd_namespace,
         snapshotter: config.snapshotter,
         mount_root: config.image_store,
+        writable_rootfs: WritableRootfsConfig {
+            root: config.state_root.join("writable-roots"),
+            mkfs_ext4_program: config.mkfs_ext4,
+            losetup_program: config.losetup,
+            minimum_bytes: runtrue_sandbox_oci::provider::MINIMUM_WRITABLE_ROOT_BYTES,
+            maximum_bytes: MAXIMUM_WRITABLE_ROOT_BYTES,
+            operation_timeout: Duration::from_secs(60),
+        },
         platform: ImagePlatform::parse(&config.image_platform)?,
         limits: ImageLimits::default(),
     })?);

@@ -34,6 +34,7 @@ sandbox
   |-- zero or more child OCI containers
   |-- one host network namespace and veth pair
   |-- service cgroup materializations
+  |-- zero or more private quota-backed writable roots
   |-- runsc state and process handles
   `-- portable immutable snapshot references
 ```
@@ -137,6 +138,15 @@ topology locks or snapshot manifests. Docker export and GNU tar remain available
 only through an explicitly named diagnostic command; neither is part of the
 production admission or execution path.
 
+Read-only roots remain the default. For an explicitly writable service, the
+provider creates a sparse ext4 image at the authorized size, attaches it to a
+private loop device, and mounts an overlay above the immutable image root. The
+ext4 filesystem enforces the bound at write time; post-hoc byte accounting is
+not the quota. Project, service, and image identity determine a provider key,
+and callers never supply host paths, loop devices, upper directories, work
+directories, or mount options. Provider metadata and the immutable lower layer
+remain outside the guest root.
+
 ## gVisor execution
 
 The first service in dependency order is written as a CRI sandbox container.
@@ -149,7 +159,8 @@ Generated OCI specifications provide:
 
 - numeric unprivileged guest users;
 - no capabilities and `noNewPrivileges`;
-- read-only OCI roots;
+- read-only OCI roots unless the topology explicitly requests an authorized
+  quota-backed writable root;
 - bounded tmpfs mounts for `/dev`, `/tmp`, and `/work`;
 - read-only `/etc/hosts` and `/etc/resolv.conf` materializations;
 - isolated PID, network, IPC, UTS, and mount namespaces;
@@ -177,7 +188,9 @@ external networking are not part of the accepted topology.
 The worker creates cgroup-v2 paths for the sandbox services and configures host
 memory, swap, CPU, and PID bounds before launching runsc. Output capture shares
 a fixed byte budget between stdout and stderr. Guest tmpfs mounts have explicit
-size bounds.
+size bounds. Each writable OCI root has its own ext4 block quota and overlay
+upper directory; writable roots are never shared even when services or tenants
+use the same immutable image.
 
 The shared Sentry performs guest work for every container. Host cgroup metrics
 therefore establish a sandbox containment boundary, but they do not establish
@@ -199,7 +212,8 @@ portable snapshot -> restore under a new sandbox identity -> running
 ```
 
 Pause and resume target the root sandbox once, which affects every child in the
-shared Sentry. Stop kills and deletes children before the root sandbox, tears
+shared Sentry. Stop terminates child process trees, tears down the root Sentry,
+removes stopped child state, releases writable mounts and loop devices, tears
 down networking and cgroups, verifies that runsc state is empty, and removes
 the recovery journal only after successful cleanup.
 
@@ -215,6 +229,13 @@ Both snapshot modes operate on the complete gVisor sandbox:
 - `stop_and_move` checkpoints and removes the source instance.
 
 runsc writes one sandbox-scoped checkpoint into a private staging directory.
+When any OCI root is writable, the daemon pauses the complete sandbox before
+checkpoint and diff export so publication cannot observe a changing upper
+layer. Each upper layer is encoded as an uncompressed OCI diff tar, including
+overlay whiteouts and basic ownership, mode, timestamp, file, directory, and
+symlink metadata. Hard links and non-overlay extended attributes fail closed
+until their portable representation is supported. A live snapshot resumes the
+source before artifact publication; failure also attempts to resume it.
 The artifact layer hashes each file while streaming, encrypts it with a random
 data key, wraps that key with a tenant/workspace-derived key, and publishes the
 object by content digest. A versioned encrypted manifest records tenant,
@@ -251,8 +272,13 @@ containers then restore against the same checkpoint. A child that had already
 exited is represented as stopped and is not passed to runsc restore.
 
 The checkpoint contains process state, memory, sockets, and writable tmpfs
-contents. The read-only OCI roots are re-admitted from the destination image
-store. The manifest declares `cross_worker_same_backend`, but the daemon reports
+contents. Immutable OCI roots are re-admitted from the destination image store.
+For each writable service, the manifest carries exactly one
+`writable_filesystem` object and its authorized quota. Restore rejects missing,
+extra, corrupt, oversized, or topology-mismatched diffs, reconstructs the
+private overlay, and only then starts guest code. Failed reconstruction releases
+its mounts, loop device, and provider state. The manifest declares
+`cross_worker_same_backend`, but the daemon reports
 the lower portability of its configured artifact provider. The current local
 provider therefore reports `same_worker` and rejects cross-worker restore before
 runtime allocation. A remote provider must preserve the same conditional grant

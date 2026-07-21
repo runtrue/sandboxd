@@ -4,15 +4,17 @@ use runtrue_sandbox_oci::{
     compiler, io_error, prepared,
     provider::{
         ContainerdImageProvider, ContainerdProviderConfig, ImageLimits, ImagePlatform,
-        ImageProvider,
+        ImageProvider, WritableRootfsConfig, MINIMUM_WRITABLE_ROOT_BYTES,
     },
     Docker, SandboxError, TopologyLock,
 };
-use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
     let provider_options = ProviderOptions {
         ctr: cli.ctr,
+        mkfs_ext4: cli.mkfs_ext4,
+        losetup: cli.losetup,
         address: cli.containerd_address,
         namespace: cli.containerd_namespace,
         snapshotter: cli.snapshotter,
@@ -25,14 +27,14 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
             image_store,
         } => {
             let provider = provider(&provider_options, image_store)?;
-            lock(&provider, compose, output)
+            lock(provider.as_ref(), compose, output)
         }
         Command::PrepareImage {
             reference,
             image_store,
         } => {
             let provider = provider(&provider_options, image_store)?;
-            prepare_image(&provider, reference)
+            prepare_image(provider.as_ref(), reference)
         }
         Command::PrepareDockerImage {
             docker,
@@ -52,7 +54,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
         } => {
             let provider = provider(&provider_options, image_store)?;
             run(
-                &provider,
+                provider,
                 lock,
                 project,
                 wait_for,
@@ -67,6 +69,8 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
 
 struct ProviderOptions {
     ctr: PathBuf,
+    mkfs_ext4: PathBuf,
+    losetup: PathBuf,
     address: PathBuf,
     namespace: String,
     snapshotter: String,
@@ -76,16 +80,26 @@ struct ProviderOptions {
 fn provider(
     options: &ProviderOptions,
     mount_root: PathBuf,
-) -> Result<ContainerdImageProvider, SandboxError> {
+) -> Result<Arc<ContainerdImageProvider>, SandboxError> {
+    let writable_root = mount_root.join("writable-roots");
     ContainerdImageProvider::new(ContainerdProviderConfig {
         ctr_program: options.ctr.clone(),
         address: options.address.clone(),
         namespace: options.namespace.clone(),
         snapshotter: options.snapshotter.clone(),
         mount_root,
+        writable_rootfs: WritableRootfsConfig {
+            root: writable_root,
+            mkfs_ext4_program: options.mkfs_ext4.clone(),
+            losetup_program: options.losetup.clone(),
+            minimum_bytes: MINIMUM_WRITABLE_ROOT_BYTES,
+            maximum_bytes: 16 * 1024 * 1024 * 1024,
+            operation_timeout: Duration::from_secs(60),
+        },
         platform: ImagePlatform::parse(&options.platform)?,
         limits: ImageLimits::default(),
     })
+    .map(Arc::new)
 }
 
 fn lock(
@@ -143,7 +157,7 @@ fn prepare_docker_image(
 
 #[allow(clippy::too_many_arguments)]
 fn run(
-    provider: &dyn ImageProvider,
+    provider: Arc<dyn ImageProvider>,
     lock: PathBuf,
     project: String,
     wait_for: String,
@@ -178,6 +192,7 @@ fn run(
         &runsc,
         &ip,
         &admitted,
+        Arc::clone(&provider),
     );
     let mut release_error = None;
     for rootfs in admitted.values() {

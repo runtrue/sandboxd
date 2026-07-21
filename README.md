@@ -16,7 +16,8 @@ restore.
 ## Capabilities
 
 - restricted Docker Compose compilation into an immutable topology lock;
-- digest-pinned OCI image admission and verified read-only root filesystems;
+- digest-pinned OCI image admission with immutable shared image roots;
+- opt-in, quota-backed writable OCI roots with portable snapshot deltas;
 - one gVisor Sentry containing a root sandbox and child containers;
 - private sandbox networking with service-name resolution;
 - create, inspect, logs, pause, resume, stop, and crash recovery;
@@ -41,10 +42,14 @@ gVisor Sentry, one network stack, and one checkpoint boundary. Service names
 resolve over the shared loopback interface, so containers also share one port
 namespace. Two services cannot bind the same address and port.
 
-OCI roots are read-only. Each container receives writable `/tmp` and `/work`
-tmpfs mounts. A snapshot captures guest processes, memory, internal
-sockets, and tmpfs contents. Restore requires an exact topology, runsc version,
-runtime configuration, CPU feature, architecture, and operating-system match.
+OCI roots are read-only by default. An explicit Compose `read_only: false`
+request gives that service a private ext4-backed overlay with a hard block
+quota; immutable image layers remain shared and read-only. Each container also
+receives writable `/tmp` and `/work` tmpfs mounts. A snapshot captures guest
+processes, memory, internal sockets, tmpfs contents, and an OCI-compatible diff
+for each writable root. Restore requires an exact topology, writable-root
+policy, runsc version, runtime configuration, CPU feature, architecture, and
+operating-system match.
 
 Host cgroups contain the Sentry, gofers, and runsc processes. Because guest work
 is executed by a shared Sentry, the host accounting boundary is the
@@ -56,8 +61,10 @@ independent guest CPU or memory guarantees.
 - the tenant-facing identity, policy, and work-order signing service is not part
   of this worker; the optional local broker boundary supports one configured UID
   and one active HMAC key;
-- snapshots are stored on the same worker and are not transferable artifacts;
-- writable OCI layers, bind mounts, and external volumes are unsupported;
+- the local artifact provider restricts snapshot restore to the same worker;
+- bind mounts and external volumes are unsupported;
+- writable-root snapshots reject hard links and non-overlay extended
+  attributes until those representations have a portable contract;
 - outbound networking and external DNS are disabled;
 - Compose port publishing, privileged containers, ambient capabilities, and
   host namespace access are rejected;
@@ -92,6 +99,7 @@ Detailed documentation covers [architecture and isolation](docs/architecture.md)
 - Rust 1.94;
 - gVisor `runsc` release `20260714.0` using the systrap platform;
 - containerd 2.2.2 with the overlayfs snapshotter and `ctr` client;
+- util-linux `losetup`, e2fsprogs `mkfs.ext4`, and available loop devices;
 - iproute2; and
 - outbound HTTPS access to the OCI registries used during preparation.
 
@@ -106,7 +114,8 @@ sudo ./examples/python-compose/run-local.sh
 ```
 
 Run live snapshot, live-copy restore, stop-and-move restore, connection
-continuity, tmpfs continuity, pause/resume, and cleanup checks:
+continuity, quota-backed writable-root continuity, pause/resume, and cleanup
+checks:
 
 ```bash
 sudo ./examples/python-compose/run-snapshot-local.sh
