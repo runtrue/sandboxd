@@ -7,4 +7,4 @@ pub mod provider;
 
 pub use docker::Docker;
 pub use error::{io_error, SandboxError};
-pub use model::{LockedDescriptor, LockedImage, SandboxPolicy, TopologyLock};
+pub use model::{LockedDescriptor, LockedImage, RootFilesystemMode, SandboxPolicy, TopologyLock};

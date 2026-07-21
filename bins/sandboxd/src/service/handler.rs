@@ -76,6 +76,7 @@ fn capabilities(daemon: &DaemonState) -> Value {
                 "status": "available",
                 "capabilities": BackendCapabilities::gvisor_snapshot(
                     64,
+                    crate::server::MAXIMUM_WRITABLE_ROOT_BYTES,
                     daemon.artifact_store.snapshot_portability(),
                 ),
             }
@@ -120,6 +121,7 @@ fn run(
         &daemon.runsc,
         &daemon.ip,
         &admitted,
+        std::sync::Arc::clone(&daemon.image_provider),
     );
     match result {
         Ok(result) => {
@@ -170,6 +172,7 @@ fn create(
         &daemon.runsc,
         &daemon.ip,
         &admitted,
+        std::sync::Arc::clone(&daemon.image_provider),
     ) {
         Ok(instance) => instance,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
@@ -244,6 +247,7 @@ fn restore(
         &daemon.runsc,
         &daemon.ip,
         &admitted,
+        std::sync::Arc::clone(&daemon.image_provider),
     ) {
         Ok(instance) => instance,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),

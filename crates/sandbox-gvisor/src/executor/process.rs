@@ -13,7 +13,10 @@ use std::{
 };
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+const DELETE_TIMEOUT: Duration = Duration::from_secs(5);
 const STATE_TIMEOUT: Duration = Duration::from_millis(250);
+const MAXIMUM_DIAGNOSTIC_BYTES: u64 = 64 * 1024;
+const DIAGNOSTIC_DIRECTORY: &str = "diagnostics";
 
 #[derive(Debug, Clone)]
 pub(super) struct Runsc {
@@ -57,6 +60,8 @@ impl Runsc {
         } else {
             std::fs::create_dir(root).map_err(|source| io_error(root, source))?;
         }
+        let diagnostics = root.join(DIAGNOSTIC_DIRECTORY);
+        std::fs::create_dir_all(&diagnostics).map_err(|source| io_error(&diagnostics, source))?;
         Ok(Self {
             program,
             root: root.to_owned(),
@@ -116,12 +121,15 @@ impl Runsc {
     {
         let current =
             std::env::current_exe().map_err(|source| io_error("<current executable>", source))?;
+        let diagnostic_path = self.diagnostic_path(&id);
         let mut command = Command::new(current);
         command
             .arg("__cgroup-exec")
             .arg(cgroup)
             .arg(&self.program)
             .args(self.common_arguments())
+            .arg(format!("--log={}", diagnostic_path.display()))
+            .arg("--log-format=text")
             .args(operation)
             .arg(&id)
             .env_clear()
@@ -218,17 +226,19 @@ impl Runsc {
                 Ok(state) if state == "running" => return Ok(()),
                 Ok(state) if matches!(state.as_str(), "creating" | "created") => {}
                 Ok(state) => {
+                    let diagnostic = self.diagnostic(&process.id);
                     return Err(SandboxError::Docker(format!(
-                        "runsc service `{}` entered state `{state}`",
-                        process.id
-                    )))
+                        "runsc service `{}` entered state `{state}`{diagnostic}",
+                        process.id,
+                    )));
                 }
                 Err(_) => {}
             }
             if Instant::now() >= deadline {
+                let diagnostic = self.diagnostic(&process.id);
                 return Err(SandboxError::Timeout(format!(
-                    "runsc service `{}` did not start",
-                    process.id
+                    "runsc service `{}` did not start{diagnostic}",
+                    process.id,
                 )));
             }
             thread::sleep(Duration::from_millis(10));
@@ -322,9 +332,42 @@ impl Runsc {
         Ok(value.is_null() || value.as_array().is_some_and(Vec::is_empty))
     }
 
-    pub(super) fn kill(&self, id: &str) {
+    pub(super) fn teardown(&self, ids: &[String], sandbox_id: &str) -> Result<(), SandboxError> {
+        let children = ids
+            .iter()
+            .filter(|id| id.as_str() != sandbox_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in &children {
+            self.kill(id);
+        }
+        if ids.iter().any(|id| id == sandbox_id) {
+            self.kill(sandbox_id);
+            let _ = self.delete_all(&[sandbox_id.to_owned()]);
+        }
+        let remaining = ids
+            .iter()
+            .filter(|id| self.state(id).is_ok())
+            .cloned()
+            .collect::<Vec<_>>();
+        self.delete_all(&remaining)?;
+        if self.is_empty()? {
+            Ok(())
+        } else {
+            Err(SandboxError::Docker(
+                "runsc state is not empty after sandbox teardown".to_owned(),
+            ))
+        }
+    }
+
+    fn kill(&self, id: &str) {
         let mut arguments = self.common_arguments();
-        arguments.extend(["kill".to_owned(), id.to_owned(), "KILL".to_owned()]);
+        arguments.extend([
+            "kill".to_owned(),
+            "--all".to_owned(),
+            id.to_owned(),
+            "KILL".to_owned(),
+        ]);
         let _ = checked(&self.program, &arguments);
     }
 
@@ -340,10 +383,14 @@ impl Runsc {
         checked(&self.program, &arguments).map(|_| ())
     }
 
-    pub(super) fn delete(&self, id: &str) -> Result<(), SandboxError> {
+    pub(super) fn delete_all(&self, ids: &[String]) -> Result<(), SandboxError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
         let mut arguments = self.common_arguments();
-        arguments.extend(["delete".to_owned(), "--force".to_owned(), id.to_owned()]);
-        checked(&self.program, &arguments).map(|_| ())
+        arguments.extend(["delete".to_owned(), "--force".to_owned()]);
+        arguments.extend(ids.iter().cloned());
+        checked_for(&self.program, &arguments, DELETE_TIMEOUT).map(|_| ())
     }
 
     pub(super) fn state(&self, id: &str) -> Result<String, SandboxError> {
@@ -372,6 +419,32 @@ impl Runsc {
             "--host-fifo=none".to_owned(),
             "--net-raw=false".to_owned(),
         ]
+    }
+
+    fn diagnostic_path(&self, id: &str) -> PathBuf {
+        self.root
+            .join(DIAGNOSTIC_DIRECTORY)
+            .join(format!("{id}.log"))
+    }
+
+    fn diagnostic(&self, id: &str) -> String {
+        let path = self.diagnostic_path(id);
+        let Ok(file) = std::fs::File::open(&path) else {
+            return String::new();
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(MAXIMUM_DIAGNOSTIC_BYTES)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.is_empty()
+        {
+            return String::new();
+        }
+        format!(
+            "; runsc diagnostic: {}",
+            String::from_utf8_lossy(&bytes).trim()
+        )
     }
 }
 

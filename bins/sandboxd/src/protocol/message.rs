@@ -28,7 +28,7 @@ pub(crate) enum RequestAuthorization {
         subject_id: SubjectId,
     },
     WorkOrder {
-        work_order: SignedWorkOrder,
+        work_order: Box<SignedWorkOrder>,
     },
 }
 

@@ -5,11 +5,16 @@ mod credentials;
 mod handle;
 mod layer;
 mod validation;
+mod writable;
 
 pub use config::{ContainerdProviderConfig, ImageLimits, ImagePlatform};
 pub use containerd::ContainerdImageProvider;
 pub use credentials::RegistryCredential;
 pub use handle::{ImmutableRootfs, PreparedImageHandle};
+pub use writable::{
+    WritableRootfs, WritableRootfsConfig, WritableRootfsExport, WritableRootfsIdentity,
+    LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID, MINIMUM_WRITABLE_ROOT_BYTES,
+};
 
 use crate::{LockedImage, SandboxError};
 
@@ -23,6 +28,7 @@ pub enum PreparationStatus {
 pub struct GarbageCollectionReport {
     pub stale_staging_directories: usize,
     pub stale_mounts: usize,
+    pub stale_writable_roots: usize,
 }
 
 pub trait ImageProvider: Send + Sync {
@@ -47,6 +53,49 @@ pub trait ImageProvider: Send + Sync {
     fn mount(&self, image: &PreparedImageHandle) -> Result<ImmutableRootfs, SandboxError>;
 
     fn release(&self, rootfs: &ImmutableRootfs) -> Result<(), SandboxError>;
+
+    fn create_writable_rootfs(
+        &self,
+        immutable: &ImmutableRootfs,
+        identity: WritableRootfsIdentity,
+        quota_bytes: u64,
+    ) -> Result<WritableRootfs, SandboxError> {
+        let _ = (immutable, identity, quota_bytes);
+        Err(SandboxError::Unsupported(
+            "image provider does not support quota-backed writable roots".to_owned(),
+        ))
+    }
+
+    fn release_writable_rootfs(&self, rootfs: &WritableRootfs) -> Result<(), SandboxError> {
+        let _ = rootfs;
+        Err(SandboxError::Unsupported(
+            "image provider does not support quota-backed writable roots".to_owned(),
+        ))
+    }
+
+    fn export_writable_rootfs(
+        &self,
+        rootfs: &WritableRootfs,
+        destination: &std::path::Path,
+    ) -> Result<WritableRootfsExport, SandboxError> {
+        let _ = (rootfs, destination);
+        Err(SandboxError::Unsupported(
+            "image provider does not support writable-root export".to_owned(),
+        ))
+    }
+
+    fn restore_writable_rootfs(
+        &self,
+        immutable: &ImmutableRootfs,
+        identity: WritableRootfsIdentity,
+        quota_bytes: u64,
+        diff: &std::path::Path,
+    ) -> Result<WritableRootfs, SandboxError> {
+        let _ = (immutable, identity, quota_bytes, diff);
+        Err(SandboxError::Unsupported(
+            "image provider does not support writable-root restore".to_owned(),
+        ))
+    }
 
     fn garbage_collect(&self) -> Result<GarbageCollectionReport, SandboxError>;
 

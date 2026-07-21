@@ -20,12 +20,17 @@ use cgroup::{CgroupMetrics, CgroupSet};
 use network::ProjectNetwork;
 use process::{Runsc, ServiceProcess};
 use runtrue_sandbox_core::{SnapshotId, SnapshotMode};
+use runtrue_sandbox_oci::{
+    provider::{ImageProvider, WritableRootfs, WritableRootfsIdentity},
+    RootFilesystemMode,
+};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -110,6 +115,14 @@ struct Resources {
     cgroups: Option<CgroupSet>,
     network: Option<ProjectNetwork>,
     processes: BTreeMap<String, ServiceProcess>,
+    rootfs_provider: Arc<dyn ImageProvider>,
+    service_rootfs: BTreeMap<String, ServiceRootfs>,
+}
+
+struct ServiceRootfs {
+    path: PathBuf,
+    read_only: bool,
+    writable: Option<WritableRootfs>,
 }
 
 struct ExecutionOutput {
@@ -130,6 +143,7 @@ pub fn run_admitted(
     runsc_program: &Path,
     ip_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
+    rootfs_provider: Arc<dyn ImageProvider>,
 ) -> Result<GvisorRunResult, SandboxError> {
     let overall_started = Instant::now();
     verify_lock(lock)?;
@@ -150,6 +164,7 @@ pub fn run_admitted(
         runsc_program,
         ip_program,
         admitted,
+        rootfs_provider,
         preflight_ms,
         overall_started,
     )
@@ -165,26 +180,25 @@ fn run_admitted_inner(
     runsc_program: &Path,
     ip_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
+    rootfs_provider: Arc<dyn ImageProvider>,
     preflight_ms: u128,
     overall_started: Instant,
 ) -> Result<GvisorRunResult, SandboxError> {
-    let rootfs_by_image = admitted
-        .iter()
-        .map(|(id, image)| (id.clone(), image.rootfs().to_owned()))
-        .collect::<BTreeMap<_, _>>();
     let infrastructure_started = Instant::now();
-    let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
+    let mut resources = create_resources(
+        lock,
+        project,
+        state_root,
+        runsc_program,
+        ip_program,
+        admitted,
+        rootfs_provider,
+        None,
+    )?;
     let infrastructure_ms = infrastructure_started.elapsed().as_millis();
     let started = Instant::now();
     let deadline = started + timeout;
-    let execution = execute(
-        &mut resources,
-        lock,
-        project,
-        wait_for,
-        deadline,
-        &rootfs_by_image,
-    );
+    let execution = execute(&mut resources, lock, project, wait_for, deadline);
     let cleanup_started = Instant::now();
     let cleanup = resources.cleanup();
     let cleanup_ms = cleanup_started.elapsed().as_millis();
@@ -231,17 +245,23 @@ pub fn start_admitted(
     runsc_program: &Path,
     ip_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
+    rootfs_provider: Arc<dyn ImageProvider>,
 ) -> Result<GvisorSandbox, SandboxError> {
     verify_lock(lock)?;
     validate_project(project)?;
     validate_admitted(lock, admitted)?;
-    let rootfs_by_image = admitted
-        .iter()
-        .map(|(id, image)| (id.clone(), image.rootfs().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
+    let mut resources = create_resources(
+        lock,
+        project,
+        state_root,
+        runsc_program,
+        ip_program,
+        admitted,
+        rootfs_provider,
+        None,
+    )?;
     let deadline = Instant::now() + timeout;
-    if let Err(error) = start_services(&mut resources, lock, project, deadline, &rootfs_by_image) {
+    if let Err(error) = start_services(&mut resources, lock, project, deadline) {
         let cleanup = resources.cleanup();
         return match cleanup {
             Ok(_) => Err(error),
@@ -283,12 +303,16 @@ fn validate_admitted(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_resources(
     lock: &TopologyLock,
     project: &str,
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
+    admitted: &BTreeMap<String, ImmutableRootfs>,
+    rootfs_provider: Arc<dyn ImageProvider>,
+    writable_diffs: Option<&BTreeMap<String, PathBuf>>,
 ) -> Result<Resources, SandboxError> {
     let state = prepare_state(state_root, project)?;
     if let Err(error) = recovery::write_recovery_record(&state, project, lock) {
@@ -320,7 +344,7 @@ fn create_resources(
             return Err(error);
         }
     };
-    Ok(Resources {
+    let mut resources = Resources {
         state,
         runsc,
         sandbox_runtime_id: runtime_id(project, &lock.startup_order[0]),
@@ -328,7 +352,41 @@ fn create_resources(
         cgroups: Some(cgroups),
         network: Some(network),
         processes: BTreeMap::new(),
-    })
+        rootfs_provider,
+        service_rootfs: BTreeMap::new(),
+    };
+    if let Err(error) = resources.prepare_service_rootfs(lock, project, admitted, writable_diffs) {
+        return match resources.cleanup() {
+            Ok(_) => Err(error),
+            Err(cleanup_error) => Err(SandboxError::Runtime(format!(
+                "prepare writable roots failed: {error}; cleanup failed: {cleanup_error}"
+            ))),
+        };
+    }
+    let writable_recovery = resources
+        .service_rootfs
+        .iter()
+        .filter_map(|(service, rootfs)| {
+            rootfs
+                .writable
+                .as_ref()
+                .map(|writable| recovery::WritableRootfsRecovery {
+                    service: service.clone(),
+                    provider: writable.provider_id().to_owned(),
+                    key: writable.key().to_owned(),
+                    quota_bytes: writable.quota_bytes(),
+                })
+        })
+        .collect();
+    if let Err(error) = recovery::write_writable_rootfs(&resources.state, writable_recovery) {
+        return match resources.cleanup() {
+            Ok(_) => Err(error),
+            Err(cleanup_error) => Err(SandboxError::Runtime(format!(
+                "record writable roots failed: {error}; cleanup failed: {cleanup_error}"
+            ))),
+        };
+    }
+    Ok(resources)
 }
 
 fn execute(
@@ -337,9 +395,8 @@ fn execute(
     project: &str,
     wait_for: &str,
     deadline: Instant,
-    rootfs_by_image: &BTreeMap<String, PathBuf>,
 ) -> Result<ExecutionOutput, SandboxError> {
-    let startup_ms = start_services(resources, lock, project, deadline, rootfs_by_image)?;
+    let startup_ms = start_services(resources, lock, project, deadline)?;
     let wait_process = resources
         .processes
         .get_mut(wait_for)
@@ -370,7 +427,6 @@ fn start_services(
     lock: &TopologyLock,
     project: &str,
     deadline: Instant,
-    rootfs_by_image: &BTreeMap<String, PathBuf>,
 ) -> Result<u128, SandboxError> {
     let startup = Instant::now();
     let sandbox_runtime_id = resources.sandbox_runtime_id.clone();
@@ -413,7 +469,8 @@ fn start_services(
         };
         bundle::write_bundle(
             &bundle_path,
-            &rootfs_by_image[&service.image.image_id],
+            &resources.service_rootfs[service_name].path,
+            resources.service_rootfs[service_name].read_only,
             service_name,
             service,
             &sandbox_network.namespace,
@@ -481,23 +538,88 @@ fn start_services(
 }
 
 impl Resources {
+    fn prepare_service_rootfs(
+        &mut self,
+        lock: &TopologyLock,
+        project: &str,
+        admitted: &BTreeMap<String, ImmutableRootfs>,
+        writable_diffs: Option<&BTreeMap<String, PathBuf>>,
+    ) -> Result<(), SandboxError> {
+        if let Some(diffs) = writable_diffs {
+            let expected = lock
+                .services
+                .iter()
+                .filter(|(_, service)| service.root_filesystem == RootFilesystemMode::Writable)
+                .map(|(service, _)| service)
+                .collect::<BTreeSet<_>>();
+            if expected != diffs.keys().collect::<BTreeSet<_>>() {
+                return Err(SandboxError::Runtime(
+                    "writable rootfs diffs do not match the restore topology".to_owned(),
+                ));
+            }
+        }
+        for service_name in &lock.startup_order {
+            let service = &lock.services[service_name];
+            let immutable = &admitted[&service.image.image_id];
+            let rootfs = match service.root_filesystem {
+                RootFilesystemMode::ReadOnly => ServiceRootfs {
+                    path: immutable.rootfs().to_owned(),
+                    read_only: true,
+                    writable: None,
+                },
+                RootFilesystemMode::Writable => {
+                    let identity = WritableRootfsIdentity::new(project, service_name)?;
+                    let writable = if let Some(diff) =
+                        writable_diffs.and_then(|diffs| diffs.get(service_name))
+                    {
+                        self.rootfs_provider.restore_writable_rootfs(
+                            immutable,
+                            identity,
+                            lock.policy.writable_root_bytes_per_service,
+                            diff,
+                        )?
+                    } else {
+                        self.rootfs_provider.create_writable_rootfs(
+                            immutable,
+                            identity,
+                            lock.policy.writable_root_bytes_per_service,
+                        )?
+                    };
+                    ServiceRootfs {
+                        path: writable.rootfs().to_owned(),
+                        read_only: false,
+                        writable: Some(writable),
+                    }
+                }
+            };
+            self.service_rootfs.insert(service_name.clone(), rootfs);
+        }
+        Ok(())
+    }
+
     fn cleanup(&mut self) -> Result<BTreeMap<String, CgroupMetrics>, SandboxError> {
         let mut first_error = None;
         let mut services = self.processes.keys().cloned().collect::<Vec<_>>();
         services.sort_by_key(|service| self.processes[service].id == self.sandbox_runtime_id);
-        for service in services {
-            let process = self.processes.get_mut(&service).expect("service exists");
-            self.runsc.kill(&process.id);
+        let runtime_ids = services
+            .iter()
+            .map(|service| self.processes[service].id.clone())
+            .filter(|id| self.runsc.state(id).is_ok())
+            .collect::<Vec<_>>();
+        if let Err(error) = self.runsc.teardown(&runtime_ids, &self.sandbox_runtime_id) {
+            first_error.get_or_insert(error);
+        }
+        for service in &services {
+            let process = self.processes.get_mut(service).expect("service exists");
             process.reap();
-            if let Err(error) = self.runsc.delete(&process.id) {
-                first_error.get_or_insert(error);
-            }
         }
         self.processes.clear();
-        if !self.runsc.is_empty().unwrap_or(false) {
-            first_error.get_or_insert_with(|| {
-                SandboxError::Docker("runsc state is not empty after cleanup".to_owned())
-            });
+        for (_, rootfs) in std::mem::take(&mut self.service_rootfs) {
+            if let Some(writable) = rootfs.writable {
+                if let Err(error) = self.rootfs_provider.release_writable_rootfs(&writable) {
+                    first_error.get_or_insert(error);
+                }
+            }
         }
         if let Some(network) = &mut self.network {
             if let Err(error) = network.cleanup() {

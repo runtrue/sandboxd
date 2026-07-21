@@ -133,6 +133,10 @@ pub(crate) struct ServeArgs {
     pub(crate) image_store: PathBuf,
     #[arg(long, default_value = "/usr/bin/ctr")]
     pub(crate) ctr: PathBuf,
+    #[arg(long, default_value = "/usr/sbin/mkfs.ext4")]
+    pub(crate) mkfs_ext4: PathBuf,
+    #[arg(long, default_value = "/usr/sbin/losetup")]
+    pub(crate) losetup: PathBuf,
     #[arg(long, default_value = "/run/containerd/containerd.sock")]
     pub(crate) containerd_address: PathBuf,
     #[arg(long, default_value = "runtrue-sandboxd")]

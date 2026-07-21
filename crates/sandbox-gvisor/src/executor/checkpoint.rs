@@ -10,9 +10,12 @@ use crate::{
 };
 use runtrue_sandbox_artifact::{ArtifactScope, ArtifactStore};
 use runtrue_sandbox_core::{LifecycleState, RestoreTarget, SnapshotId, SnapshotMode};
+use runtrue_sandbox_oci::provider::ImageProvider;
+use runtrue_sandbox_oci::RootFilesystemMode;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -30,6 +33,7 @@ pub fn restore_admitted(
     runsc_program: &Path,
     ip_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
+    rootfs_provider: Arc<dyn ImageProvider>,
 ) -> Result<GvisorSandbox, SandboxError> {
     let restore_started = Instant::now();
     verify_lock(lock)?;
@@ -43,6 +47,12 @@ pub fn restore_admitted(
     )?;
     let manifest = &restored.manifest;
     let metadata = &restored.metadata;
+    let expected_writable_services = lock
+        .services
+        .iter()
+        .filter(|(_, service)| service.root_filesystem == RootFilesystemMode::Writable)
+        .map(|(service, _)| (service.clone(), lock.policy.writable_root_bytes_per_service))
+        .collect::<BTreeMap<_, _>>();
     let cohort_started = Instant::now();
     manifest
         .validate_restore_target(restore_target)
@@ -68,6 +78,7 @@ pub fn restore_admitted(
         || metadata.services != lock.startup_order
         || metadata.root_service != lock.startup_order[0]
         || metadata.service_states.keys().ne(lock.services.keys())
+        || metadata.writable_services != expected_writable_services
         || metadata
             .service_states
             .values()
@@ -99,12 +110,17 @@ pub fn restore_admitted(
         transfer_claim_millis = claim_started.elapsed().as_millis();
     }
     let cohort_check_millis = cohort_started.elapsed().as_millis();
-    let rootfs_by_image = admitted
-        .iter()
-        .map(|(id, image)| (id.clone(), image.rootfs().to_owned()))
-        .collect::<BTreeMap<_, _>>();
     let runtime_started = Instant::now();
-    let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
+    let mut resources = create_resources(
+        lock,
+        project,
+        state_root,
+        runsc_program,
+        ip_program,
+        admitted,
+        rootfs_provider,
+        Some(&restored.writable_diffs),
+    )?;
     let compatibility = (|| {
         Ok::<_, SandboxError>(
             resources.runsc.version()? == metadata.runsc_version
@@ -138,7 +154,6 @@ pub fn restore_admitted(
         lock,
         project,
         deadline,
-        &rootfs_by_image,
         &restored.image_path,
         &selected_services,
     ) {
@@ -189,7 +204,7 @@ pub(super) fn snapshot(
             "a live snapshot requires a running sandbox".to_owned(),
         ));
     }
-    let resources = sandbox.resources.as_mut().ok_or_else(|| {
+    let resources = sandbox.resources.as_ref().ok_or_else(|| {
         SandboxError::Runtime("active sandbox has no runtime resources".to_owned())
     })?;
     let control_id = resources
@@ -208,11 +223,6 @@ pub(super) fn snapshot(
         GvisorSandboxState::Paused => LifecycleState::Paused,
         _ => unreachable!("snapshot state was validated"),
     };
-    let staging = SnapshotStaging::create(snapshot_staging_root)?;
-    let image_path = staging.image_path();
-    let runsc_version = resources.runsc.version()?;
-    let runtime_configuration_digest = resources.runsc.configuration_digest();
-    let cpu_features_digest = resources.runsc.cpu_features_digest()?;
     let service_states = resources
         .service_order
         .iter()
@@ -224,34 +234,90 @@ pub(super) fn snapshot(
                 .unwrap_or_else(|| "stopped".to_owned());
             (service.clone(), state)
         })
-        .collect();
-    let checkpoint_started = Instant::now();
-    resources
-        .runsc
-        .checkpoint(&control_id, image_path, true, Duration::from_secs(60))?;
-    let checkpoint_millis = checkpoint_started.elapsed().as_millis();
-    let root_service = resources
-        .processes
-        .iter()
-        .find(|(_, process)| process.id == resources.sandbox_runtime_id)
-        .map(|(service, _)| service.clone())
-        .expect("sandbox runtime belongs to a service");
-    let ordered_services = resources.service_order.clone();
-    let (publication, metadata) = staging.publication(
-        snapshot_id,
-        provenance,
-        sandbox.topology_digest.clone(),
-        mode,
-        captured_from,
-        runsc_version,
-        runtime_configuration_digest,
-        cpu_features_digest,
-        root_service,
-        ordered_services,
-        service_states,
-    )?;
-    let mut summary = snapshot::publish(artifact_store, publication, &metadata)?;
+        .collect::<BTreeMap<_, _>>();
+    let has_writable_rootfs = resources
+        .service_rootfs
+        .values()
+        .any(|rootfs| rootfs.writable.is_some());
+    let internally_paused = has_writable_rootfs && sandbox.state == GvisorSandboxState::Running;
+    if internally_paused {
+        sandbox.pause()?;
+    }
+    let staged = (|| {
+        let resources = sandbox.resources.as_ref().ok_or_else(|| {
+            SandboxError::Runtime("active sandbox has no runtime resources".to_owned())
+        })?;
+        let staging = SnapshotStaging::create(snapshot_staging_root)?;
+        let image_path = staging.image_path();
+        let runsc_version = resources.runsc.version()?;
+        let runtime_configuration_digest = resources.runsc.configuration_digest();
+        let cpu_features_digest = resources.runsc.cpu_features_digest()?;
+        let checkpoint_started = Instant::now();
+        resources
+            .runsc
+            .checkpoint(&control_id, image_path, true, Duration::from_secs(60))?;
+        let checkpoint_millis = checkpoint_started.elapsed().as_millis();
+        let writable_started = Instant::now();
+        let mut writable_objects = Vec::new();
+        let mut writable_services = BTreeMap::new();
+        for (service, rootfs) in &resources.service_rootfs {
+            let Some(writable) = &rootfs.writable else {
+                continue;
+            };
+            let (object, _) = staging.stage_writable_rootfs(
+                service,
+                resources.rootfs_provider.as_ref(),
+                writable,
+            )?;
+            writable_services.insert(service.clone(), writable.quota_bytes());
+            writable_objects.push(object);
+        }
+        let writable_export_millis = writable_started.elapsed().as_millis();
+        let root_service = resources
+            .processes
+            .iter()
+            .find(|(_, process)| process.id == resources.sandbox_runtime_id)
+            .map(|(service, _)| service.clone())
+            .expect("sandbox runtime belongs to a service");
+        let ordered_services = resources.service_order.clone();
+        let (publication, metadata) = staging.publication(
+            snapshot_id,
+            provenance,
+            sandbox.topology_digest.clone(),
+            mode,
+            captured_from,
+            runsc_version,
+            runtime_configuration_digest,
+            cpu_features_digest,
+            root_service,
+            ordered_services,
+            service_states,
+            writable_services,
+            writable_objects,
+        )?;
+        Ok::<_, SandboxError>((
+            staging,
+            publication,
+            metadata,
+            checkpoint_millis,
+            writable_export_millis,
+        ))
+    })();
+    let (staging, publication, metadata, checkpoint_millis, writable_export_millis) = match staged {
+        Ok(staged) => staged,
+        Err(error) => return resume_after_snapshot_error(sandbox, internally_paused, error),
+    };
+    if internally_paused && mode == SnapshotMode::Live {
+        sandbox.resume()?;
+    }
+    let published = snapshot::publish(artifact_store, publication, &metadata);
+    drop(staging);
+    let mut summary = match published {
+        Ok(summary) => summary,
+        Err(error) => return resume_after_snapshot_error(sandbox, internally_paused, error),
+    };
     summary.checkpoint_millis = checkpoint_millis;
+    summary.writable_export_millis = writable_export_millis;
     if mode == SnapshotMode::StopAndMove {
         let cleanup_started = Instant::now();
         let mut resources = sandbox.resources.take().expect("resources still exist");
@@ -259,10 +325,23 @@ pub(super) fn snapshot(
         summary.source_cleanup_millis = cleanup_started.elapsed().as_millis();
         sandbox.paused_runtime_ids.clear();
         sandbox.state = GvisorSandboxState::Stopped;
-    } else {
-        sandbox.state = GvisorSandboxState::Running;
     }
     Ok(summary)
+}
+
+fn resume_after_snapshot_error<T>(
+    sandbox: &mut GvisorSandbox,
+    internally_paused: bool,
+    error: SandboxError,
+) -> Result<T, SandboxError> {
+    if internally_paused && sandbox.state == GvisorSandboxState::Paused {
+        if let Err(resume_error) = sandbox.resume() {
+            return Err(SandboxError::Runtime(format!(
+                "snapshot failed: {error}; resume failed: {resume_error}"
+            )));
+        }
+    }
+    Err(error)
 }
 
 fn restore_services(
@@ -270,7 +349,6 @@ fn restore_services(
     lock: &TopologyLock,
     project: &str,
     deadline: Instant,
-    rootfs_by_image: &BTreeMap<String, PathBuf>,
     image_path: &Path,
     selected_services: &BTreeSet<String>,
 ) -> Result<(), SandboxError> {
@@ -302,7 +380,8 @@ fn restore_services(
         };
         bundle::write_bundle(
             &bundle_path,
-            &rootfs_by_image[&service.image.image_id],
+            &resources.service_rootfs[service_name].path,
+            resources.service_rootfs[service_name].read_only,
             service_name,
             service,
             &sandbox_network.namespace,

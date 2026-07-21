@@ -3,8 +3,11 @@ use crate::{LockedDescriptor, SandboxError};
 use flate2::read::MultiGzDecoder;
 use std::{
     collections::BTreeSet,
+    fs::File,
     io::{self, Read},
     os::unix::ffi::OsStrExt as _,
+    path::Path,
+    time::Duration,
     time::Instant,
 };
 
@@ -130,6 +133,48 @@ pub(crate) fn validate_layer(
         .checked_add(limited.bytes)
         .ok_or_else(|| SandboxError::ImageProvider("decoded layer size overflow".to_owned()))?;
     Ok(())
+}
+
+pub(crate) fn validate_writable_diff(
+    path: &Path,
+    maximum_decoded_bytes: u64,
+    maximum_entries: usize,
+    maximum_path_bytes: usize,
+    timeout: Duration,
+) -> Result<(), SandboxError> {
+    let size = path
+        .metadata()
+        .map_err(|source| crate::io_error(path, source))?
+        .len();
+    if size == 0 || size > maximum_decoded_bytes {
+        return Err(SandboxError::ImageProvider(
+            "writable rootfs diff exceeds its archive limit".to_owned(),
+        ));
+    }
+    let descriptor = LockedDescriptor {
+        media_type: TAR_MEDIA_TYPE.to_owned(),
+        digest: format!("sha256:{}", "0".repeat(64)),
+        size,
+    };
+    let limits = ImageLimits {
+        maximum_manifest_bytes: 1,
+        maximum_config_bytes: 1,
+        maximum_compressed_bytes: maximum_decoded_bytes,
+        maximum_expanded_bytes: maximum_decoded_bytes,
+        maximum_layers: 1,
+        maximum_entries,
+        maximum_path_bytes,
+        maximum_command_output_bytes: 1,
+        operation_timeout: timeout,
+    };
+    let mut file = File::open(path).map_err(|source| crate::io_error(path, source))?;
+    validate_layer(
+        &mut file,
+        &descriptor,
+        &limits,
+        &mut LayerBudget::default(),
+        Instant::now() + timeout,
+    )
 }
 
 fn normalized_path(bytes: &[u8], maximum: usize, kind: &str) -> Result<Vec<u8>, SandboxError> {

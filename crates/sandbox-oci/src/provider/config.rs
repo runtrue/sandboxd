@@ -123,6 +123,7 @@ pub struct ContainerdProviderConfig {
     pub namespace: String,
     pub snapshotter: String,
     pub mount_root: PathBuf,
+    pub writable_rootfs: super::WritableRootfsConfig,
     pub platform: ImagePlatform,
     pub limits: ImageLimits,
 }

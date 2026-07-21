@@ -11,6 +11,7 @@ pub(super) enum ContainerRole<'a> {
 pub(super) fn write_bundle(
     bundle: &Path,
     rootfs: &Path,
+    rootfs_read_only: bool,
     service_name: &str,
     service: &LockedService,
     network_namespace: &str,
@@ -84,7 +85,7 @@ pub(super) fn write_bundle(
                 {"type": "RLIMIT_CORE", "hard": 0, "soft": 0}
             ]
         },
-        "root": {"path": rootfs, "readonly": true},
+        "root": {"path": rootfs, "readonly": rootfs_read_only},
         "hostname": service_name,
         "mounts": [
             {"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]},

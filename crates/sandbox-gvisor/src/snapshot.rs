@@ -7,6 +7,7 @@ use runtrue_sandbox_core::{
     RestoreRequirements, SandboxId, SnapshotId, SnapshotManifest, SnapshotMode,
     SnapshotPortability, TenantId, WorkerId, WorkspaceId, SNAPSHOT_MANIFEST_VERSION,
 };
+use runtrue_sandbox_oci::provider::{ImageProvider, WritableRootfs, WritableRootfsExport};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,9 +18,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const METADATA_VERSION: u32 = 1;
+const METADATA_VERSION: u32 = 2;
 const CHECKPOINT_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.checkpoint";
-const METADATA_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.metadata.v1+json";
+const METADATA_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.metadata.v2+json";
+const WRITABLE_DIFF_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 
 #[derive(Debug, Clone)]
 pub struct SnapshotProvenance {
@@ -49,6 +51,7 @@ pub(super) struct GvisorSnapshotMetadata {
     pub(super) root_service: String,
     pub(super) services: Vec<String>,
     pub(super) service_states: BTreeMap<String, String>,
+    pub(super) writable_services: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +65,7 @@ pub struct SnapshotSummary {
     pub transferred_bytes: u64,
     pub reused_objects: usize,
     pub checkpoint_millis: u128,
+    pub writable_export_millis: u128,
     pub publish_millis: u128,
     pub source_cleanup_millis: u128,
     pub runtime_configuration_digest: String,
@@ -117,6 +121,8 @@ impl SnapshotStaging {
         root_service: String,
         services: Vec<String>,
         service_states: BTreeMap<String, String>,
+        writable_services: BTreeMap<String, u64>,
+        mut writable_objects: Vec<StagedSnapshotObject>,
     ) -> Result<(SnapshotPublication, GvisorSnapshotMetadata), SandboxError> {
         let created_unix_millis = unix_millis()?;
         let metadata = GvisorSnapshotMetadata {
@@ -130,9 +136,11 @@ impl SnapshotStaging {
             root_service,
             services,
             service_states,
+            writable_services,
         };
         validate_metadata(&metadata)?;
         let mut objects = checkpoint_objects(&self.image_path)?;
+        objects.append(&mut writable_objects);
         for service in &metadata.services {
             let container = ContainerId::parse(service.clone())
                 .map_err(|error| SandboxError::Runtime(error.to_string()))?;
@@ -188,6 +196,31 @@ impl SnapshotStaging {
             metadata,
         ))
     }
+
+    pub(super) fn stage_writable_rootfs(
+        &self,
+        service: &str,
+        provider: &dyn ImageProvider,
+        rootfs: &WritableRootfs,
+    ) -> Result<(StagedSnapshotObject, WritableRootfsExport), SandboxError> {
+        validate_name(service)?;
+        let name = format!("rootfs-{service}.tar");
+        let path = self.temporary.path().join(&name);
+        let exported = provider.export_writable_rootfs(rootfs, &path)?;
+        Ok((
+            StagedSnapshotObject {
+                role: ArtifactRole::WritableFilesystem,
+                container: Some(
+                    ContainerId::parse(service.to_owned())
+                        .map_err(|error| SandboxError::Runtime(error.to_string()))?,
+                ),
+                name,
+                path,
+                media_type: WRITABLE_DIFF_MEDIA_TYPE.to_owned(),
+            },
+            exported,
+        ))
+    }
 }
 
 pub(super) struct RestoredSnapshot {
@@ -195,6 +228,7 @@ pub(super) struct RestoredSnapshot {
     pub(super) manifest: SnapshotManifest,
     pub(super) metadata: GvisorSnapshotMetadata,
     pub(super) image_path: PathBuf,
+    pub(super) writable_diffs: BTreeMap<String, PathBuf>,
     pub(super) transferred_bytes: u64,
     pub(super) materialization_millis: u128,
 }
@@ -227,6 +261,7 @@ pub(super) fn materialize(
     let transferred_bytes = materialized.transferred_bytes;
     let materialization_millis = materialized.materialization_millis;
     let metadata = load_metadata(&materialized)?;
+    let writable_diffs = writable_diff_paths(&materialized, &metadata)?;
     let image_path = temporary.path().join("runtime");
     fs::DirBuilder::new()
         .mode(0o700)
@@ -265,6 +300,7 @@ pub(super) fn materialize(
         manifest: materialized.manifest,
         metadata,
         image_path,
+        writable_diffs,
         transferred_bytes,
         materialization_millis,
     })
@@ -277,9 +313,7 @@ fn load_metadata(
         object.artifact.media_type != CHECKPOINT_MEDIA_TYPE
             || !matches!(
                 object.role,
-                ArtifactRole::RuntimeState
-                    | ArtifactRole::MemoryPages
-                    | ArtifactRole::WritableFilesystem
+                ArtifactRole::RuntimeState | ArtifactRole::MemoryPages
             )
     }) {
         return Err(SandboxError::Runtime(
@@ -289,23 +323,36 @@ fn load_metadata(
     let mut descriptor = None;
     let mut name = None;
     for (container, objects) in &materialized.manifest.containers {
-        if objects.len() != 1
-            || objects[0].role != ArtifactRole::BackendMetadata
-            || objects[0].artifact.media_type != METADATA_MEDIA_TYPE
+        let backend_objects = objects
+            .iter()
+            .filter(|object| object.role == ArtifactRole::BackendMetadata)
+            .collect::<Vec<_>>();
+        let writable_objects = objects
+            .iter()
+            .filter(|object| object.role == ArtifactRole::WritableFilesystem)
+            .collect::<Vec<_>>();
+        if backend_objects.len() != 1
+            || backend_objects[0].artifact.media_type != METADATA_MEDIA_TYPE
+            || writable_objects.len() > 1
+            || objects.len() != backend_objects.len() + writable_objects.len()
+            || writable_objects
+                .first()
+                .is_some_and(|object| object.artifact.media_type != WRITABLE_DIFF_MEDIA_TYPE)
         {
             return Err(SandboxError::Runtime(format!(
                 "snapshot container `{container}` has invalid backend metadata"
             )));
         }
+        let backend = backend_objects[0];
         if let Some(expected) = &descriptor {
-            if expected != &objects[0].artifact {
+            if expected != &backend.artifact {
                 return Err(SandboxError::Runtime(
                     "snapshot container metadata is inconsistent".to_owned(),
                 ));
             }
         } else {
-            descriptor = Some(objects[0].artifact.clone());
-            name = Some(objects[0].name.clone());
+            descriptor = Some(backend.artifact.clone());
+            name = Some(backend.name.clone());
         }
     }
     let name = name.ok_or_else(|| {
@@ -354,12 +401,42 @@ fn validate_metadata(metadata: &GvisorSnapshotMetadata) -> Result<(), SandboxErr
             .service_states
             .values()
             .any(|state| !matches!(state.as_str(), "running" | "paused" | "stopped"))
+        || metadata
+            .writable_services
+            .iter()
+            .any(|(service, quota)| *quota == 0 || !metadata.services.contains(service))
     {
         return Err(SandboxError::Runtime(
             "gVisor snapshot metadata is invalid".to_owned(),
         ));
     }
     Ok(())
+}
+
+fn writable_diff_paths(
+    materialized: &MaterializedSnapshot,
+    metadata: &GvisorSnapshotMetadata,
+) -> Result<BTreeMap<String, PathBuf>, SandboxError> {
+    let mut result = BTreeMap::new();
+    for (container, objects) in &materialized.manifest.containers {
+        let writable = objects
+            .iter()
+            .filter(|object| object.role == ArtifactRole::WritableFilesystem)
+            .collect::<Vec<_>>();
+        let expected = metadata.writable_services.contains_key(container.as_str());
+        if expected != (writable.len() == 1) {
+            return Err(SandboxError::Runtime(format!(
+                "snapshot container `{container}` has inconsistent writable-root state"
+            )));
+        }
+        if let Some(object) = writable.first() {
+            result.insert(
+                container.as_str().to_owned(),
+                materialized.directory.join(&object.name),
+            );
+        }
+    }
+    Ok(result)
 }
 
 fn checkpoint_objects(directory: &Path) -> Result<Vec<StagedSnapshotObject>, SandboxError> {
@@ -476,6 +553,7 @@ pub(super) fn publish(
         transferred_bytes: metrics.transferred_bytes,
         reused_objects: metrics.reused_objects,
         checkpoint_millis: 0,
+        writable_export_millis: 0,
         publish_millis: metrics.publish_millis,
         source_cleanup_millis: 0,
         runtime_configuration_digest: metadata.runtime_configuration_digest.clone(),
@@ -506,6 +584,7 @@ mod tests {
             root_service: "server".to_owned(),
             services: vec!["server".to_owned()],
             service_states: BTreeMap::new(),
+            writable_services: BTreeMap::new(),
         };
         assert!(validate_metadata(&metadata).is_err());
     }

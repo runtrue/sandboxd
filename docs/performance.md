@@ -69,11 +69,13 @@ transferred bytes, reused objects, and publication latency. A sandbox created
 by restore includes transferred bytes, materialization, cohort validation,
 transfer claim, runtime restore, and total restore latency in its status.
 Snapshot responses also retain checkpoint and source-cleanup latency; a
-stop-and-move response adds durable-fence and transfer-grant latency. Storage
-values cover hashing, envelope encryption, provider transfer, verified
-decryption, and immutable local publication. Runtime restore ends when runsc
-reports all selected services restored. Guest-level time to first instruction
-requires an instrumented workload and is not inferred from that signal.
+stop-and-move response adds durable-fence and transfer-grant latency. When a
+topology has writable roots, the response also reports writable-diff export
+latency and the object totals include those OCI diff archives. Storage values
+cover hashing, envelope encryption, provider transfer, verified decryption, and
+immutable local publication. Runtime restore ends when runsc reports all
+selected services restored. Guest-level time to first instruction requires an
+instrumented workload and is not inferred from that signal.
 
 The local lifecycle fixture prints these fields while exercising both a live
 copy and stop-and-move:
@@ -112,6 +114,20 @@ This run used the local provider and therefore exercised a same-worker transfer
 grant and claim, not a cross-worker data transfer. The claim rounded below one
 millisecond. These measurements end when runsc reports restoration complete;
 they are not guest-level time to first instruction.
+
+After adding one quota-backed writable root, a local run on 2026-07-21 produced:
+
+| Mode | Logical bytes | Writable export | Checkpoint | Publish | Source cleanup | Materialize | Runtime restore | Total restore |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| live | 26,091,509 | 1 ms | 152 ms | 308 ms | n/a | 188 ms | 684 ms | 896 ms |
+| stop-and-move | 26,091,557 | 1 ms | 152 ms | 314 ms | 243 ms | 187 ms | 622 ms | 834 ms |
+
+This run reported a 2,180 ms cached create. After flushing the writable
+filesystem, the sparse quota image had 1,220,608 allocated host bytes for the
+1,100,000-byte payload, counter, and ext4 metadata—about 1.11 times the payload
+alone. The payload retained its SHA-256 digest, mode `0640`, and length through
+both restores. These are single-run local diagnostics rather than release
+thresholds.
 
 GitHub-hosted runners have variable CPU and storage neighbors. The PR comment
 flags a possible regression when throughput falls by more than 10% or p99

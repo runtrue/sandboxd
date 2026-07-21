@@ -143,6 +143,8 @@ fn enforce_resource_ceilings(
             || topology.policy.cpu_per_service_millis > ceilings.cpu_per_service_millis
             || topology.policy.pids_per_service > ceilings.pids_per_service
             || topology.policy.tmpfs_bytes > ceilings.tmpfs_bytes
+            || topology.policy.writable_root_bytes_per_service
+                > ceilings.writable_root_bytes_per_service
             || output_bytes > ceilings.maximum_output_bytes
         {
             return Err(SandboxError::Runtime(
@@ -201,9 +203,9 @@ mod tests {
             schema_version: PROTOCOL_VERSION,
             request_id: "request-1".to_owned(),
             authorization: Some(RequestAuthorization::WorkOrder {
-                work_order: signed_order(&Operation::Inspect {
+                work_order: Box::new(signed_order(&Operation::Inspect {
                     sandbox: "sandbox-a".to_owned(),
-                }),
+                })),
             }),
             operation: Operation::Inspect {
                 sandbox: "sandbox-a".to_owned(),
@@ -236,6 +238,7 @@ mod tests {
                 cpu_per_service_millis: 100,
                 pids_per_service: 16,
                 tmpfs_bytes: 1024,
+                writable_root_bytes_per_service: 1024,
                 maximum_output_bytes: 1024,
             },
         };
@@ -274,7 +277,7 @@ mod tests {
         );
         assert_eq!(
             signed_order(&operation).signature,
-            "f9678ddb135e9cd8e27a0b9fc702807e80f4a38ea34939ecc0129e7a7ff07542"
+            "54af2f73b53f6d2c009ca52a06b3b086d35a6f277c985f204ecd45c2459b6273"
         );
     }
 
@@ -303,12 +306,12 @@ mod tests {
     #[test]
     fn rejects_topology_above_signed_resource_ceiling() {
         use runtrue_sandbox_oci::model::{
-            LockedNetwork, LockedService, SandboxPolicy, TopologyLock,
+            LockedNetwork, LockedService, RootFilesystemMode, SandboxPolicy, TopologyLock,
         };
         use std::collections::BTreeMap;
 
         let topology = TopologyLock {
-            schema_version: 2,
+            schema_version: 3,
             topology_digest: format!("sha256:{}", "a".repeat(64)),
             name: "example".to_owned(),
             services: BTreeMap::from([(
@@ -346,6 +349,7 @@ mod tests {
                     networks: vec!["default".to_owned()],
                     user: "65534:65534".to_owned(),
                     working_dir: "/work".to_owned(),
+                    root_filesystem: RootFilesystemMode::ReadOnly,
                 },
             )]),
             networks: BTreeMap::from([(
@@ -368,7 +372,7 @@ mod tests {
             schema_version: PROTOCOL_VERSION,
             request_id: "request-1".to_owned(),
             authorization: Some(RequestAuthorization::WorkOrder {
-                work_order: work_order.clone(),
+                work_order: Box::new(work_order.clone()),
             }),
             operation,
         };
