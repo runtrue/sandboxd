@@ -119,7 +119,7 @@ pub fn prepare_image(
     let metadata_bytes = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| SandboxError::Lock(format!("encode prepared image: {error}")))?;
     fs::write(&metadata_path, metadata_bytes).map_err(|source| io_error(&metadata_path, source))?;
-    let staging_path = staging.into_path();
+    let staging_path = staging.keep();
     fs::rename(&staging_path, &destination).map_err(|source| io_error(&destination, source))?;
     Ok((destination, metadata))
 }

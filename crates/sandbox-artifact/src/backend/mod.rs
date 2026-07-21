@@ -1,6 +1,10 @@
 mod local;
+#[cfg(feature = "s3")]
+mod s3;
 
 pub use local::LocalArtifactStore;
+#[cfg(feature = "s3")]
+pub use s3::{S3ArtifactConfig, S3ArtifactStore};
 
 use crate::ArtifactError;
 use std::{

@@ -127,6 +127,20 @@ pub(crate) struct ServeArgs {
     pub(crate) worker_id: String,
     #[arg(long)]
     pub(crate) artifact_master_key: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) artifact_s3_bucket: Option<String>,
+    #[arg(long, default_value = "us-east-1")]
+    pub(crate) artifact_s3_region: String,
+    #[arg(long)]
+    pub(crate) artifact_s3_endpoint: Option<String>,
+    #[arg(long, default_value = "runtrue-sandboxd/v1")]
+    pub(crate) artifact_s3_prefix: String,
+    #[arg(long)]
+    pub(crate) artifact_s3_virtual_hosted: bool,
+    #[arg(long)]
+    pub(crate) artifact_s3_allow_http_for_local_testing: bool,
+    #[arg(long)]
+    pub(crate) artifact_s3_credentials_file: Option<PathBuf>,
     #[arg(long, default_value = "/var/lib/runtrue-sandboxd/state")]
     pub(crate) state_root: PathBuf,
     #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]
