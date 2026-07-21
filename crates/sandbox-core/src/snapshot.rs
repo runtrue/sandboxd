@@ -1,11 +1,11 @@
 use crate::{
     specification::validate_digest, BackendDescriptor, ContainerId, CoreError, LifecycleState,
-    SandboxId, SnapshotId, SnapshotPortability, WorkerId,
+    SandboxId, SnapshotId, SnapshotPortability, TenantId, WorkerId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-pub const SNAPSHOT_MANIFEST_VERSION: u32 = 1;
+pub const SNAPSHOT_MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +19,8 @@ pub enum SnapshotMode {
 pub struct SnapshotManifest {
     pub schema_version: u32,
     pub snapshot_id: SnapshotId,
+    pub tenant_id: TenantId,
+    pub workspace_id: WorkspaceId,
     pub sandbox_id: SandboxId,
     pub sandbox_spec_digest: String,
     pub source_worker: WorkerId,
@@ -41,12 +43,14 @@ pub struct RestoreRequirements {
     pub minimum_backend_version: String,
     pub portability: SnapshotPortability,
     pub required_cpu_features: Vec<String>,
+    pub cpu_features_digest: String,
     pub preserves_internal_connections: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotObject {
+    pub name: String,
     pub role: ArtifactRole,
     pub artifact: ArtifactDescriptor,
 }
@@ -84,6 +88,11 @@ impl SnapshotManifest {
             .map_err(|error| CoreError::InvalidSnapshot(error.to_string()))?;
         validate_digest("sandbox spec", &self.sandbox_spec_digest)
             .map_err(|error| CoreError::InvalidSnapshot(error.to_string()))?;
+        validate_digest(
+            "CPU feature profile",
+            &self.restore_requirements.cpu_features_digest,
+        )
+        .map_err(|error| CoreError::InvalidSnapshot(error.to_string()))?;
         if !matches!(
             self.captured_from,
             LifecycleState::Running | LifecycleState::Paused
@@ -108,7 +117,24 @@ impl SnapshotManifest {
             .values()
             .flatten()
             .chain(self.sandbox_objects.iter());
+        let mut names = BTreeSet::new();
         for object in objects {
+            if object.name.is_empty()
+                || object.name.len() > 128
+                || !object
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                return Err(CoreError::InvalidSnapshot(
+                    "snapshot object name is invalid".to_owned(),
+                ));
+            }
+            if !names.insert(&object.name) {
+                return Err(CoreError::InvalidSnapshot(
+                    "snapshot object names must be unique".to_owned(),
+                ));
+            }
             validate_digest("snapshot object", &object.artifact.digest)
                 .map_err(|error| CoreError::InvalidSnapshot(error.to_string()))?;
             if object.artifact.size_bytes == 0 || object.artifact.media_type.is_empty() {
@@ -136,6 +162,7 @@ mod tests {
 
     fn object(role: ArtifactRole, byte: char) -> SnapshotObject {
         SnapshotObject {
+            name: format!("object-{byte}"),
             role,
             artifact: ArtifactDescriptor {
                 digest: format!("sha256:{}", byte.to_string().repeat(64)),
@@ -149,6 +176,8 @@ mod tests {
         SnapshotManifest {
             schema_version: SNAPSHOT_MANIFEST_VERSION,
             snapshot_id: SnapshotId::parse("snapshot-a").expect("snapshot id"),
+            tenant_id: TenantId::parse("tenant-a").expect("tenant id"),
+            workspace_id: WorkspaceId::parse("workspace-a").expect("workspace id"),
             sandbox_id: SandboxId::parse("sandbox-a").expect("sandbox id"),
             sandbox_spec_digest: format!("sha256:{}", "a".repeat(64)),
             source_worker: WorkerId::parse("worker-a").expect("worker id"),
@@ -170,6 +199,7 @@ mod tests {
                 minimum_backend_version: "test".to_owned(),
                 portability: SnapshotPortability::CrossWorkerSameBackend,
                 required_cpu_features: Vec::new(),
+                cpu_features_digest: format!("sha256:{}", "e".repeat(64)),
                 preserves_internal_connections: true,
             },
             containers: BTreeMap::from([(

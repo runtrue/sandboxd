@@ -3,6 +3,8 @@ use crate::{
     audit::AuditLog,
     authorization::{SandboxKey, TenantScope, WorkOrderVerifier},
 };
+use runtrue_sandbox_artifact::ArtifactStore;
+use runtrue_sandbox_core::WorkerId;
 use runtrue_sandbox_gvisor::executor::{GvisorSandbox, ImmutableRootfs};
 use runtrue_sandbox_oci::provider::ImageProvider;
 use serde::Serialize;
@@ -34,7 +36,9 @@ pub(crate) struct TenantCounters {
 
 pub(crate) struct DaemonState {
     pub(crate) state_root: PathBuf,
-    pub(crate) snapshot_root: PathBuf,
+    pub(crate) snapshot_staging_root: PathBuf,
+    pub(crate) artifact_store: Arc<dyn ArtifactStore>,
+    pub(crate) worker_id: WorkerId,
     pub(crate) image_provider: Arc<dyn ImageProvider>,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,

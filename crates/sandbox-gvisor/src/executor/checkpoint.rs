@@ -5,10 +5,11 @@ use super::{
 use crate::{
     compiler::verify_lock,
     model::TopologyLock,
-    snapshot::{self, SnapshotStaging, SnapshotSummary},
+    snapshot::{self, SnapshotProvenance, SnapshotStaging, SnapshotSummary},
     SandboxError,
 };
-use runtrue_sandbox_core::{SnapshotId, SnapshotMode};
+use runtrue_sandbox_artifact::{ArtifactScope, ArtifactStore};
+use runtrue_sandbox_core::{LifecycleState, SnapshotId, SnapshotMode};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -21,7 +22,9 @@ pub fn restore_admitted(
     project: &str,
     timeout: Duration,
     state_root: &Path,
-    snapshot_root: &Path,
+    snapshot_staging_root: &Path,
+    artifact_store: &dyn ArtifactStore,
+    artifact_scope: &ArtifactScope,
     snapshot_id: &SnapshotId,
     runsc_program: &Path,
     ip_program: &Path,
@@ -30,14 +33,29 @@ pub fn restore_admitted(
     verify_lock(lock)?;
     validate_project(project)?;
     validate_admitted(lock, admitted)?;
-    let (manifest, image_path) = snapshot::load(snapshot_root, snapshot_id)?;
-    if manifest.topology_digest != lock.topology_digest
-        || manifest.architecture != std::env::consts::ARCH
-        || manifest.operating_system != std::env::consts::OS
-        || manifest.services != lock.startup_order
-        || manifest.root_service != lock.startup_order[0]
-        || manifest.service_states.keys().ne(lock.services.keys())
-        || manifest
+    let restored = snapshot::materialize(
+        artifact_store,
+        artifact_scope,
+        snapshot_id,
+        snapshot_staging_root,
+    )?;
+    let manifest = &restored.manifest;
+    let metadata = &restored.metadata;
+    if manifest.sandbox_spec_digest != lock.topology_digest
+        || manifest.backend.kind != runtrue_sandbox_core::BackendKind::Gvisor
+        || manifest.backend.implementation != "runsc"
+        || manifest.backend.implementation_version != metadata.runsc_version
+        || manifest.backend.configuration_digest != metadata.runtime_configuration_digest
+        || manifest.restore_requirements.cpu_features_digest != metadata.cpu_features_digest
+        || manifest.mode != metadata.mode
+        || manifest.created_unix_millis != metadata.created_unix_millis
+        || manifest.restore_requirements.architecture != std::env::consts::ARCH
+        || manifest.restore_requirements.operating_system != std::env::consts::OS
+        || metadata.topology_digest != lock.topology_digest
+        || metadata.services != lock.startup_order
+        || metadata.root_service != lock.startup_order[0]
+        || metadata.service_states.keys().ne(lock.services.keys())
+        || metadata
             .service_states
             .values()
             .any(|state| !matches!(state.as_str(), "running" | "paused" | "stopped"))
@@ -53,9 +71,9 @@ pub fn restore_admitted(
     let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
     let compatibility = (|| {
         Ok::<_, SandboxError>(
-            resources.runsc.version()? == manifest.runsc_version
-                && resources.runsc.configuration_digest() == manifest.runtime_configuration_digest
-                && resources.runsc.cpu_features_digest()? == manifest.cpu_features_digest,
+            resources.runsc.version()? == metadata.runsc_version
+                && resources.runsc.configuration_digest() == metadata.runtime_configuration_digest
+                && resources.runsc.cpu_features_digest()? == metadata.cpu_features_digest,
         )
     })();
     match compatibility {
@@ -71,11 +89,11 @@ pub fn restore_admitted(
         Err(error) => cleanup_after_restore_error(&mut resources, error)?,
     }
     let deadline = Instant::now() + timeout;
-    let selected_services = manifest
+    let selected_services = metadata
         .service_states
         .iter()
         .filter(|(service, state)| {
-            *service == &manifest.root_service || matches!(state.as_str(), "running" | "paused")
+            *service == &metadata.root_service || matches!(state.as_str(), "running" | "paused")
         })
         .map(|(service, _)| service.clone())
         .collect::<BTreeSet<_>>();
@@ -85,7 +103,7 @@ pub fn restore_admitted(
         project,
         deadline,
         &rootfs_by_image,
-        &image_path,
+        &restored.image_path,
         &selected_services,
     ) {
         let cleanup = resources.cleanup();
@@ -102,14 +120,20 @@ pub fn restore_admitted(
         state: GvisorSandboxState::Running,
         paused_runtime_ids: BTreeSet::new(),
         resources: Some(resources),
+        snapshot_restore: Some(super::SnapshotRestoreMetrics {
+            transferred_bytes: restored.transferred_bytes,
+            materialization_millis: restored.materialization_millis,
+        }),
     })
 }
 
 pub(super) fn snapshot(
     sandbox: &mut GvisorSandbox,
     snapshot_id: SnapshotId,
-    snapshot_root: &Path,
+    snapshot_staging_root: &Path,
     mode: SnapshotMode,
+    artifact_store: &dyn ArtifactStore,
+    provenance: &SnapshotProvenance,
 ) -> Result<SnapshotSummary, SandboxError> {
     if !matches!(
         sandbox.state,
@@ -138,8 +162,13 @@ pub(super) fn snapshot(
         })
         .map(|process| process.id.clone())
         .ok_or_else(|| SandboxError::Runtime("sandbox has no checkpointable service".to_owned()))?;
-    let staging = SnapshotStaging::create(snapshot_root, snapshot_id.clone())?;
-    let image_path = staging.image_path()?;
+    let captured_from = match sandbox.state {
+        GvisorSandboxState::Running => LifecycleState::Running,
+        GvisorSandboxState::Paused => LifecycleState::Paused,
+        _ => unreachable!("snapshot state was validated"),
+    };
+    let staging = SnapshotStaging::create(snapshot_staging_root)?;
+    let image_path = staging.image_path();
     let runsc_version = resources.runsc.version()?;
     let runtime_configuration_digest = resources.runsc.configuration_digest();
     let cpu_features_digest = resources.runsc.cpu_features_digest()?;
@@ -155,12 +184,9 @@ pub(super) fn snapshot(
             (service.clone(), state)
         })
         .collect();
-    resources.runsc.checkpoint(
-        &control_id,
-        &image_path,
-        mode == SnapshotMode::Live,
-        Duration::from_secs(60),
-    )?;
+    resources
+        .runsc
+        .checkpoint(&control_id, image_path, true, Duration::from_secs(60))?;
     let root_service = resources
         .processes
         .iter()
@@ -168,11 +194,12 @@ pub(super) fn snapshot(
         .map(|(service, _)| service.clone())
         .expect("sandbox runtime belongs to a service");
     let ordered_services = resources.service_order.clone();
-    let manifest = snapshot::manifest(
+    let (publication, metadata) = staging.publication(
         snapshot_id,
-        sandbox.project.clone(),
+        provenance,
         sandbox.topology_digest.clone(),
         mode,
+        captured_from,
         runsc_version,
         runtime_configuration_digest,
         cpu_features_digest,
@@ -180,7 +207,7 @@ pub(super) fn snapshot(
         ordered_services,
         service_states,
     )?;
-    let summary = staging.publish(manifest)?;
+    let summary = snapshot::publish(artifact_store, publication, &metadata)?;
     if mode == SnapshotMode::StopAndMove {
         let mut resources = sandbox.resources.take().expect("resources still exist");
         resources.cleanup()?;

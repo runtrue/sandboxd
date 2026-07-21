@@ -1,3 +1,4 @@
+use runtrue_sandbox_core::WorkerId;
 use runtrue_sandbox_oci::SandboxError;
 use std::{path::PathBuf, time::Duration};
 
@@ -6,6 +7,8 @@ pub(crate) struct ServerConfig {
     pub(crate) workload_socket: Option<PathBuf>,
     pub(crate) broker_uid: Option<u32>,
     pub(crate) work_order_key: Option<PathBuf>,
+    pub(crate) worker_id: WorkerId,
+    pub(crate) artifact_master_key: Option<PathBuf>,
     pub(crate) state_root: PathBuf,
     pub(crate) image_store: PathBuf,
     pub(crate) ctr: PathBuf,
@@ -67,6 +70,8 @@ mod tests {
             workload_socket: Some(PathBuf::from("/run/sandboxd/workload.sock")),
             broker_uid: Some(991),
             work_order_key: Some(PathBuf::from("/etc/sandboxd/work-order.key")),
+            worker_id: WorkerId::parse("worker-a").expect("worker ID"),
+            artifact_master_key: None,
             state_root: PathBuf::from("/var/lib/sandboxd/state"),
             image_store: PathBuf::from("/var/lib/sandboxd/images"),
             ctr: PathBuf::from("/usr/bin/ctr"),

@@ -71,7 +71,7 @@ fn capabilities() -> Value {
             {
                 "kind": BackendKind::Gvisor,
                 "status": "available",
-                "capabilities": BackendCapabilities::gvisor_local_snapshot(64),
+                "capabilities": BackendCapabilities::gvisor_portable_snapshot(64),
             }
         ]
     })
@@ -220,7 +220,9 @@ fn restore(
         &runtime_project,
         Duration::from_millis(timeout_ms),
         &daemon.state_root,
-        &context.scope().snapshot_root(&daemon.snapshot_root),
+        &daemon.snapshot_staging_root,
+        daemon.artifact_store.as_ref(),
+        &context.scope().artifact_scope(),
         &snapshot_id,
         &daemon.runsc,
         &daemon.ip,
@@ -324,8 +326,16 @@ fn snapshot(
         .ok_or_else(|| SandboxError::Runtime(format!("sandbox `{sandbox}` does not exist")))?;
     let summary = instance.lock().expect("sandbox instance lock").snapshot(
         snapshot_id,
-        &context.scope().snapshot_root(&daemon.snapshot_root),
+        &daemon.snapshot_staging_root,
         mode,
+        daemon.artifact_store.as_ref(),
+        &runtrue_sandbox_gvisor::snapshot::SnapshotProvenance {
+            tenant_id: key.scope.tenant_id.clone(),
+            workspace_id: key.scope.workspace_id.clone(),
+            sandbox_id: key.sandbox_id.clone(),
+            source_worker: daemon.worker_id.clone(),
+            source_assignment_epoch: epoch,
+        },
     )?;
     if mode == runtrue_sandbox_core::SnapshotMode::StopAndMove {
         let assignment_result = daemon

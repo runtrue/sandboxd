@@ -44,10 +44,15 @@ the trusted operator boundary. OCI registries and their transport remain
 outside the worker boundary, so every admitted descriptor and blob is verified
 against the locked digest and size.
 
-The implemented snapshot portability is `same_worker`. Writable OCI layers,
-bind mounts, external volumes, artifact import, transferable snapshot fencing,
-cross-worker restore, and cross-backend restore are outside the supported
-boundary.
+Snapshot objects are tenant/workspace-scoped, content-addressed, encrypted with
+tenant-derived envelope keys, and published before their immutable manifest
+reference. The current local provider supports one worker only. The artifact
+master key remains an operator-managed secret.
+
+Writable OCI layers, bind mounts, external volumes, key rotation, coordinated
+source-to-destination migration fencing, and cross-backend restore remain
+outside the supported boundary. An artifact being portable does not by itself
+prove that a distributed control plane transferred ownership safely.
 
 ## Security-relevant local checks
 

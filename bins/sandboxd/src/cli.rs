@@ -123,6 +123,10 @@ pub(crate) struct ServeArgs {
     pub(crate) maximum_connections: usize,
     #[arg(long, default_value_t = 5)]
     pub(crate) io_timeout_seconds: u64,
+    #[arg(long, default_value = "worker-local")]
+    pub(crate) worker_id: String,
+    #[arg(long)]
+    pub(crate) artifact_master_key: Option<PathBuf>,
     #[arg(long, default_value = "/var/lib/runtrue-sandboxd/state")]
     pub(crate) state_root: PathBuf,
     #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]
