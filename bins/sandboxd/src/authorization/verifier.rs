@@ -138,7 +138,14 @@ fn enforce_resource_ceilings(
         let output_bytes = u64::try_from(topology.policy.maximum_output_bytes).map_err(|_| {
             SandboxError::Runtime("topology output limit cannot be represented".to_owned())
         })?;
+        let volume_bytes = topology.volumes.values().try_fold(0_u64, |total, volume| {
+            total
+                .checked_add(volume.quota_bytes)
+                .ok_or_else(|| SandboxError::Runtime("topology volume quota overflow".to_owned()))
+        })?;
         if topology.services.len() > usize::from(ceilings.maximum_services)
+            || topology.volumes.len() > usize::from(ceilings.maximum_volumes)
+            || volume_bytes > ceilings.maximum_volume_bytes
             || topology.policy.memory_bytes_per_service > ceilings.memory_bytes_per_service
             || topology.policy.cpu_per_service_millis > ceilings.cpu_per_service_millis
             || topology.policy.pids_per_service > ceilings.pids_per_service
@@ -239,6 +246,8 @@ mod tests {
                 pids_per_service: 16,
                 tmpfs_bytes: 1024,
                 writable_root_bytes_per_service: 1024,
+                maximum_volumes: 4,
+                maximum_volume_bytes: 4096,
                 maximum_output_bytes: 1024,
             },
         };
@@ -277,7 +286,7 @@ mod tests {
         );
         assert_eq!(
             signed_order(&operation).signature,
-            "54af2f73b53f6d2c009ca52a06b3b086d35a6f277c985f204ecd45c2459b6273"
+            "88c7166ec9f359c662e5de1121854e7ef298296dbe60bfe4a73e3326c348f036"
         );
     }
 
@@ -306,12 +315,13 @@ mod tests {
     #[test]
     fn rejects_topology_above_signed_resource_ceiling() {
         use runtrue_sandbox_oci::model::{
-            LockedNetwork, LockedService, RootFilesystemMode, SandboxPolicy, TopologyLock,
+            LockedNetwork, LockedService, LockedVolume, RootFilesystemMode, SandboxPolicy,
+            TopologyLock,
         };
         use std::collections::BTreeMap;
 
         let topology = TopologyLock {
-            schema_version: 3,
+            schema_version: 4,
             topology_digest: format!("sha256:{}", "a".repeat(64)),
             name: "example".to_owned(),
             services: BTreeMap::from([(
@@ -350,6 +360,7 @@ mod tests {
                     user: "65534:65534".to_owned(),
                     working_dir: "/work".to_owned(),
                     root_filesystem: RootFilesystemMode::ReadOnly,
+                    volumes: Vec::new(),
                 },
             )]),
             networks: BTreeMap::from([(
@@ -359,8 +370,25 @@ mod tests {
                     driver: "bridge".to_owned(),
                 },
             )]),
+            volumes: BTreeMap::from([(
+                "oversized".to_owned(),
+                LockedVolume {
+                    persistence_class: runtrue_sandbox_core::VolumePersistenceClass::Persistent,
+                    snapshot_policy: runtrue_sandbox_core::VolumeSnapshotPolicy::Required,
+                    quota_bytes: 4097,
+                    content_digest: None,
+                },
+            )]),
             startup_order: vec!["app".to_owned()],
-            policy: SandboxPolicy::default(),
+            policy: SandboxPolicy {
+                runtime: "runsc".to_owned(),
+                memory_bytes_per_service: 1024,
+                cpu_per_service_millis: 100,
+                pids_per_service: 16,
+                tmpfs_bytes: 1024,
+                writable_root_bytes_per_service: 1024,
+                maximum_output_bytes: 1024,
+            },
         };
         let operation = Operation::Create {
             topology,

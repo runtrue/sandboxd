@@ -7,6 +7,7 @@ use runtrue_sandbox_artifact::ArtifactStore;
 use runtrue_sandbox_core::WorkerId;
 use runtrue_sandbox_gvisor::executor::{GvisorSandbox, ImmutableRootfs};
 use runtrue_sandbox_oci::provider::ImageProvider;
+use runtrue_sandbox_volume::VolumeProvider;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -40,6 +41,7 @@ pub(crate) struct DaemonState {
     pub(crate) artifact_store: Arc<dyn ArtifactStore>,
     pub(crate) worker_id: WorkerId,
     pub(crate) image_provider: Arc<dyn ImageProvider>,
+    pub(crate) volume_provider: Arc<dyn VolumeProvider>,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
     pub(crate) assignments: AssignmentLedger,

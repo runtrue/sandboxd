@@ -26,6 +26,9 @@ use runtrue_sandbox_oci::{
     },
     SandboxError,
 };
+use runtrue_sandbox_volume::{
+    LocalSecretResolver, LocalVolumeConfig, LocalVolumeProvider, VolumeProvider,
+};
 
 pub(crate) const MAXIMUM_WRITABLE_ROOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 use std::{
@@ -91,8 +94,8 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         mount_root: config.image_store,
         writable_rootfs: WritableRootfsConfig {
             root: config.state_root.join("writable-roots"),
-            mkfs_ext4_program: config.mkfs_ext4,
-            losetup_program: config.losetup,
+            mkfs_ext4_program: config.mkfs_ext4.clone(),
+            losetup_program: config.losetup.clone(),
             minimum_bytes: runtrue_sandbox_oci::provider::MINIMUM_WRITABLE_ROOT_BYTES,
             maximum_bytes: MAXIMUM_WRITABLE_ROOT_BYTES,
             operation_timeout: Duration::from_secs(60),
@@ -100,6 +103,22 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         platform: ImagePlatform::parse(&config.image_platform)?,
         limits: ImageLimits::default(),
     })?);
+    let mut volume_config = LocalVolumeConfig::new(config.state_root.join("volumes"));
+    volume_config.mkfs_ext4_program = config.mkfs_ext4.clone();
+    volume_config.losetup_program = config.losetup.clone();
+    volume_config.operation_timeout = Duration::from_secs(60);
+    let secret_resolver = Arc::new(
+        LocalSecretResolver::open(config.state_root.join("secret-source"), 16 * 1024 * 1024)
+            .map_err(|error| {
+                SandboxError::Runtime(format!("open local secret resolver: {error}"))
+            })?,
+    );
+    let volume_provider: Arc<dyn VolumeProvider> = Arc::new(
+        LocalVolumeProvider::open_with_secret_resolver(volume_config, Some(secret_resolver))
+            .map_err(|error| {
+                SandboxError::Runtime(format!("open local volume provider: {error}"))
+            })?,
+    );
 
     let mut endpoints = vec![BoundEndpoint {
         listener: socket::bind_operator(&config.operator_socket)?,
@@ -120,6 +139,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         artifact_store,
         worker_id: config.worker_id,
         image_provider,
+        volume_provider,
         runsc: config.runsc,
         ip: config.ip,
         assignments,

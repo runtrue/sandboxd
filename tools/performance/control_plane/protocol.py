@@ -17,6 +17,9 @@ RESOURCE_CEILINGS = {
     "cpu_per_service_millis": 1_000,
     "pids_per_service": 64,
     "tmpfs_bytes": 67_108_864,
+    "writable_root_bytes_per_service": 67_108_864,
+    "maximum_volumes": 8,
+    "maximum_volume_bytes": 536_870_912,
     "maximum_output_bytes": 1_048_576,
 }
 
@@ -34,7 +37,7 @@ def build_ping_request(key: bytes, run_id: str, index: int) -> bytes:
     operation = {"kind": "ping"}
     now_millis = time.time_ns() // 1_000_000
     claims = {
-        "schema_version": 1,
+        "schema_version": 3,
         "tenant_id": "performance",
         "workspace_id": "control-plane",
         "subject_id": "github-runner",

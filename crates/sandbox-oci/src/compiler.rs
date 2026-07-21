@@ -1,12 +1,15 @@
 use crate::{
     model::{
         ComposeInput, DependencyCondition, DigestInput, LockedHealthcheck, LockedImage,
-        LockedNetwork, LockedService, RootFilesystemMode, SandboxPolicy, TopologyLock,
-        LOCK_SCHEMA_VERSION, MAX_ARGUMENTS, MAX_ENVIRONMENT, MAX_NETWORKS, MAX_SERVICES,
-        MAX_VALUE_BYTES,
+        LockedNetwork, LockedService, LockedVolume, RootFilesystemMode, SandboxPolicy,
+        TopologyLock, LOCK_SCHEMA_VERSION, MAX_ARGUMENTS, MAX_ENVIRONMENT, MAX_NETWORKS,
+        MAX_SERVICES, MAX_VALUE_BYTES, MAX_VOLUMES,
     },
     provider::{ImageProvider, RegistryCredential},
     SandboxError,
+};
+use runtrue_sandbox_core::{
+    VolumeId, VolumePersistenceClass, VolumeSnapshotPolicy, VolumeSpec, VOLUME_SPEC_VERSION,
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -52,6 +55,44 @@ where
         return Err(SandboxError::Compose(format!(
             "service count must be between 1 and {MAX_SERVICES}"
         )));
+    }
+
+    if input.volumes.len() > MAX_VOLUMES {
+        return Err(SandboxError::Compose(format!(
+            "volume count exceeds {MAX_VOLUMES}"
+        )));
+    }
+    let mut volumes = BTreeMap::new();
+    for (name, volume) in input.volumes {
+        validate_identifier("volume", &name)?;
+        VolumeId::parse(name.clone()).map_err(|error| SandboxError::Compose(error.to_string()))?;
+        let snapshot_policy = volume
+            .snapshot_policy
+            .unwrap_or(match volume.persistence_class {
+                VolumePersistenceClass::Persistent => VolumeSnapshotPolicy::Required,
+                VolumePersistenceClass::Ephemeral => VolumeSnapshotPolicy::BestEffort,
+                VolumePersistenceClass::Artifact | VolumePersistenceClass::Secret => {
+                    VolumeSnapshotPolicy::Excluded
+                }
+            });
+        let quota_bytes = match (volume.persistence_class, volume.quota_bytes) {
+            (VolumePersistenceClass::Artifact, None) => 0,
+            (_, Some(quota)) => quota,
+            _ => {
+                return Err(SandboxError::Compose(format!(
+                    "volume `{name}` requires an explicit quota_bytes"
+                )));
+            }
+        };
+        volumes.insert(
+            name,
+            LockedVolume {
+                persistence_class: volume.persistence_class,
+                snapshot_policy,
+                quota_bytes,
+                content_digest: volume.content_digest,
+            },
+        );
     }
 
     let network_inputs = if input.networks.is_empty() {
@@ -109,6 +150,54 @@ where
         } else {
             RootFilesystemMode::ReadOnly
         };
+        if service.volumes.len() > 64 {
+            return Err(SandboxError::Compose(format!(
+                "service `{service_name}` has too many volume mounts"
+            )));
+        }
+        let mut service_volumes = Vec::with_capacity(service.volumes.len());
+        let mut volume_destinations = BTreeSet::new();
+        for volume in service.volumes {
+            let definition = volumes.get(&volume.source).ok_or_else(|| {
+                SandboxError::Compose(format!(
+                    "service `{service_name}` references unknown volume `{}`",
+                    volume.source
+                ))
+            })?;
+            let read_only = match definition.persistence_class {
+                VolumePersistenceClass::Artifact | VolumePersistenceClass::Secret => {
+                    if volume.read_only == Some(false) {
+                        return Err(SandboxError::Compose(format!(
+                            "service `{service_name}` requests a writable immutable volume"
+                        )));
+                    }
+                    true
+                }
+                VolumePersistenceClass::Ephemeral | VolumePersistenceClass::Persistent => {
+                    volume.read_only.unwrap_or(false)
+                }
+            };
+            let spec = VolumeSpec {
+                schema_version: VOLUME_SPEC_VERSION,
+                volume_id: VolumeId::parse(volume.source.clone())
+                    .map_err(|error| SandboxError::Compose(error.to_string()))?,
+                destination: volume.target,
+                read_only,
+                persistence_class: definition.persistence_class,
+                snapshot_policy: definition.snapshot_policy,
+                quota_bytes: definition.quota_bytes,
+                content_digest: definition.content_digest.clone(),
+            };
+            spec.validate()
+                .map_err(|error| SandboxError::Compose(error.to_string()))?;
+            if !volume_destinations.insert(spec.destination.clone()) {
+                return Err(SandboxError::Compose(format!(
+                    "service `{service_name}` repeats volume destination `{}`",
+                    spec.destination
+                )));
+            }
+            service_volumes.push(spec);
+        }
         let user = service.user.unwrap_or_else(|| "65534:65534".to_owned());
         validate_value("user", &user)?;
         let working_dir = service.working_dir.unwrap_or_else(|| "/work".to_owned());
@@ -193,6 +282,7 @@ where
                 user,
                 working_dir,
                 root_filesystem,
+                volumes: service_volumes,
             },
         );
     }
@@ -215,6 +305,7 @@ where
         name,
         services,
         networks,
+        volumes,
         startup_order,
         policy: SandboxPolicy::default(),
     };
@@ -420,6 +511,50 @@ services:
             lock.services["default"].root_filesystem,
             RootFilesystemMode::ReadOnly
         );
+    }
+
+    #[test]
+    fn compiles_typed_named_volumes_without_host_paths() {
+        let input: ComposeInput = serde_yaml::from_str(
+            r#"
+name: x
+volumes:
+  shared:
+    persistence_class: persistent
+    quota_bytes: 8388608
+services:
+  app:
+    image: x
+    volumes:
+      - source: shared
+        target: /var/lib/app
+"#,
+        )
+        .expect("compose");
+        let lock = compile(input, |reference| Ok(image(reference))).expect("lock");
+        let mount = &lock.services["app"].volumes[0];
+        assert_eq!(mount.volume_id.as_str(), "shared");
+        assert_eq!(mount.destination, "/var/lib/app");
+        assert!(!mount.read_only);
+        assert_eq!(mount.snapshot_policy, VolumeSnapshotPolicy::Required);
+        assert!(serde_json::to_string(&lock)
+            .expect("lock json")
+            .find("/host")
+            .is_none());
+        verify_lock(&lock).expect("verified lock");
+    }
+
+    #[test]
+    fn rejects_bind_mounts_crossing_the_provider_boundary() {
+        for source in [
+            "name: x\nservices:\n  app:\n    image: x\n    volumes: [/host:/guest]\n",
+            "name: x\nvolumes: {}\nservices:\n  app:\n    image: x\n    volumes:\n      - source: /host\n        target: /guest\n",
+        ] {
+            match serde_yaml::from_str::<ComposeInput>(source) {
+                Err(_) => {}
+                Ok(input) => assert!(compile(input, |reference| Ok(image(reference))).is_err()),
+            }
+        }
     }
 
     #[test]

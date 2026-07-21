@@ -193,6 +193,18 @@ fn run(
         &ip,
         &admitted,
         Arc::clone(&provider),
+        &runtrue_sandbox_volume::VolumeScope::new(
+            runtrue_sandbox_core::TenantId::parse("local").expect("local tenant"),
+            runtrue_sandbox_core::WorkspaceId::parse("local").expect("local workspace"),
+        ),
+        Arc::new(
+            runtrue_sandbox_volume::LocalVolumeProvider::open(
+                runtrue_sandbox_volume::LocalVolumeConfig::new(state_root.join(".volumes")),
+            )
+            .map_err(|error| {
+                SandboxError::Runtime(format!("open local volume provider: {error}"))
+            })?,
+        ),
     );
     let mut release_error = None;
     for rootfs in admitted.values() {

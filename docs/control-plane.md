@@ -64,7 +64,7 @@ A workload request has this outer form:
     "kind": "work_order",
     "work_order": {
       "claims": {
-        "schema_version": 2,
+        "schema_version": 3,
         "tenant_id": "tenant-a",
         "workspace_id": "team-a",
         "subject_id": "agent-service",
@@ -84,6 +84,8 @@ A workload request has this outer form:
           "pids_per_service": 64,
           "tmpfs_bytes": 67108864,
           "writable_root_bytes_per_service": 67108864,
+          "maximum_volumes": 8,
+          "maximum_volume_bytes": 536870912,
           "maximum_output_bytes": 1048576
         }
       },
@@ -172,8 +174,10 @@ not expose shared image-cache contents or global counters.
 ## Compatibility
 
 Protocol v2 is used by current local commands and is required on the workload
-socket. Signed requests use work-order schema 2, which adds the
-`writable_root_bytes_per_service` ceiling to the canonical HMAC payload.
+socket. Signed requests use work-order schema 3, which adds `maximum_volumes`
+and `maximum_volume_bytes` to the canonical HMAC payload. The daemon sums each
+top-level volume quota once, even when several containers attach the same named
+volume.
 Protocol v1 requests without an authorization object remain accepted only from
 UID 0 on the operator socket. This is an explicit migration path, not a
 workload compatibility mode.

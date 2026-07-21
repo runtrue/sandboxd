@@ -1,9 +1,11 @@
+use runtrue_sandbox_core::{VolumePersistenceClass, VolumeSnapshotPolicy, VolumeSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(crate) const LOCK_SCHEMA_VERSION: u32 = 3;
+pub(crate) const LOCK_SCHEMA_VERSION: u32 = 4;
 pub(crate) const MAX_SERVICES: usize = 32;
 pub(crate) const MAX_NETWORKS: usize = 8;
+pub(crate) const MAX_VOLUMES: usize = 128;
 pub(crate) const MAX_ENVIRONMENT: usize = 128;
 pub(crate) const MAX_ARGUMENTS: usize = 256;
 pub(crate) const MAX_VALUE_BYTES: usize = 16 * 1024;
@@ -16,6 +18,29 @@ pub(crate) struct ComposeInput {
     pub(crate) services: BTreeMap<String, ServiceInput>,
     #[serde(default)]
     pub(crate) networks: BTreeMap<String, NetworkInput>,
+    #[serde(default)]
+    pub(crate) volumes: BTreeMap<String, VolumeInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VolumeInput {
+    pub(crate) persistence_class: VolumePersistenceClass,
+    #[serde(default)]
+    pub(crate) snapshot_policy: Option<VolumeSnapshotPolicy>,
+    #[serde(default)]
+    pub(crate) quota_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) content_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ServiceVolumeInput {
+    pub(crate) source: String,
+    pub(crate) target: String,
+    #[serde(default)]
+    pub(crate) read_only: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -49,6 +74,8 @@ pub(crate) struct ServiceInput {
     pub(crate) working_dir: Option<String>,
     #[serde(default)]
     pub(crate) read_only: Option<bool>,
+    #[serde(default)]
+    pub(crate) volumes: Vec<ServiceVolumeInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +126,7 @@ pub struct TopologyLock {
     pub name: String,
     pub services: BTreeMap<String, LockedService>,
     pub networks: BTreeMap<String, LockedNetwork>,
+    pub volumes: BTreeMap<String, LockedVolume>,
     pub startup_order: Vec<String>,
     pub policy: SandboxPolicy,
 }
@@ -116,6 +144,17 @@ pub struct LockedService {
     pub user: String,
     pub working_dir: String,
     pub root_filesystem: RootFilesystemMode,
+    pub volumes: Vec<VolumeSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedVolume {
+    pub persistence_class: VolumePersistenceClass,
+    pub snapshot_policy: VolumeSnapshotPolicy,
+    pub quota_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +235,7 @@ pub(crate) struct DigestInput<'a> {
     pub(crate) name: &'a str,
     pub(crate) services: &'a BTreeMap<String, LockedService>,
     pub(crate) networks: &'a BTreeMap<String, LockedNetwork>,
+    pub(crate) volumes: &'a BTreeMap<String, LockedVolume>,
     pub(crate) startup_order: &'a [String],
     pub(crate) policy: &'a SandboxPolicy,
 }
@@ -208,6 +248,7 @@ impl TopologyLock {
             name: &self.name,
             services: &self.services,
             networks: &self.networks,
+            volumes: &self.volumes,
             startup_order: &self.startup_order,
             policy: &self.policy,
         }

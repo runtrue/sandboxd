@@ -10,6 +10,6 @@ pub use error::ArtifactError;
 pub use model::{
     ArtifactLimits, ArtifactScope, GarbageCollectionReport, MaterializedSnapshot,
     PublicationMetrics, SnapshotPublication, SnapshotTransferClaim, SnapshotTransferGrant,
-    StagedSnapshotObject,
+    StagedSnapshotObject, StagedVolumeMetadata,
 };
 pub use repository::ArtifactStore;

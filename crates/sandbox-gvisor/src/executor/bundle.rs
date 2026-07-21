@@ -1,4 +1,5 @@
 use crate::{error::io_error, model::LockedService, SandboxError};
+use runtrue_sandbox_volume::MountedVolume;
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -18,6 +19,7 @@ pub(super) fn write_bundle(
     hosts: &Path,
     resolv: &Path,
     tmpfs_bytes: u64,
+    volumes: &[MountedVolume],
     role: ContainerRole<'_>,
 ) -> Result<(), SandboxError> {
     fs::create_dir(bundle).map_err(|source| io_error(bundle, source))?;
@@ -67,6 +69,27 @@ pub(super) fn write_bundle(
             ),
         ]),
     };
+    let mut mounts = vec![
+        json!({"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]}),
+        json!({"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "strictatime", "mode=755", format!("size={tmpfs_bytes}")]}),
+        json!({"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"]}),
+        json!({"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "noexec", "mode=1777", format!("size={tmpfs_bytes}")]}),
+        json!({"destination": "/work", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "noexec", "mode=1777", format!("size={tmpfs_bytes}")]}),
+        json!({"destination": "/etc/hosts", "type": "bind", "source": hosts, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"]}),
+        json!({"destination": "/etc/resolv.conf", "type": "bind", "source": resolv, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"]}),
+    ];
+    for volume in volumes {
+        let mut options = vec!["rbind", "nosuid", "nodev"];
+        if volume.read_only() {
+            options.push("ro");
+        }
+        mounts.push(json!({
+            "destination": volume.destination(),
+            "type": "bind",
+            "source": volume.source(),
+            "options": options,
+        }));
+    }
     let config = json!({
         "ociVersion": "1.2.1",
         "annotations": annotations,
@@ -87,15 +110,7 @@ pub(super) fn write_bundle(
         },
         "root": {"path": rootfs, "readonly": rootfs_read_only},
         "hostname": service_name,
-        "mounts": [
-            {"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]},
-            {"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "strictatime", "mode=755", format!("size={tmpfs_bytes}")]},
-            {"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"]},
-            {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "noexec", "mode=1777", format!("size={tmpfs_bytes}")]},
-            {"destination": "/work", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "noexec", "mode=1777", format!("size={tmpfs_bytes}")]},
-            {"destination": "/etc/hosts", "type": "bind", "source": hosts, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"]},
-            {"destination": "/etc/resolv.conf", "type": "bind", "source": resolv, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"]}
-        ],
+        "mounts": mounts,
         "linux": {
             "namespaces": [
                 {"type": "pid"},

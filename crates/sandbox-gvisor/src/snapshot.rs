@@ -1,6 +1,7 @@
 use crate::{io_error, SandboxError};
 use runtrue_sandbox_artifact::{
     ArtifactScope, ArtifactStore, MaterializedSnapshot, SnapshotPublication, StagedSnapshotObject,
+    StagedVolumeMetadata,
 };
 use runtrue_sandbox_core::{
     ArtifactRole, AssignmentEpoch, BackendDescriptor, BackendKind, ContainerId, LifecycleState,
@@ -8,6 +9,7 @@ use runtrue_sandbox_core::{
     SnapshotPortability, TenantId, WorkerId, WorkspaceId, SNAPSHOT_MANIFEST_VERSION,
 };
 use runtrue_sandbox_oci::provider::{ImageProvider, WritableRootfs, WritableRootfsExport};
+use runtrue_sandbox_volume::{MountedVolume, VolumeProvider};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -153,6 +155,7 @@ impl SnapshotStaging {
                 name,
                 path,
                 media_type: METADATA_MEDIA_TYPE.to_owned(),
+                volume: None,
             });
         }
         let manifest = SnapshotManifest {
@@ -186,6 +189,7 @@ impl SnapshotStaging {
             },
             containers: BTreeMap::new(),
             sandbox_objects: Vec::new(),
+            volumes: BTreeMap::new(),
         };
         Ok((
             SnapshotPublication {
@@ -217,9 +221,58 @@ impl SnapshotStaging {
                 name,
                 path,
                 media_type: WRITABLE_DIFF_MEDIA_TYPE.to_owned(),
+                volume: None,
             },
             exported,
         ))
+    }
+
+    pub(super) fn stage_volume(
+        &self,
+        provider: &dyn VolumeProvider,
+        mounted: &MountedVolume,
+    ) -> Result<StagedSnapshotObject, SandboxError> {
+        let handle = mounted.attachment().handle();
+        let name = format!("volume-{}.ext4", handle.volume_id().as_str());
+        let path = self.temporary.path().join(&name);
+        provider
+            .freeze(mounted.attachment())
+            .map_err(volume_error)?;
+        let snapshot = match provider.snapshot(mounted.attachment(), &path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let thaw = provider.thaw(mounted.attachment());
+                return match thaw {
+                    Ok(()) => Err(volume_error(error)),
+                    Err(thaw_error) => Err(SandboxError::Runtime(format!(
+                        "volume snapshot failed: {error}; thaw failed: {thaw_error}"
+                    ))),
+                };
+            }
+        };
+        provider.thaw(mounted.attachment()).map_err(volume_error)?;
+        if snapshot.provider_id != provider.provider_id()
+            || snapshot.volume_id != *handle.volume_id()
+            || snapshot.persistence_class != handle.persistence_class()
+            || snapshot.quota_bytes != handle.quota_bytes()
+        {
+            return Err(SandboxError::Runtime(
+                "volume provider returned a mismatched snapshot descriptor".to_owned(),
+            ));
+        }
+        Ok(StagedSnapshotObject {
+            role: ArtifactRole::VolumeData,
+            container: None,
+            name,
+            path,
+            media_type: snapshot.format,
+            volume: Some(StagedVolumeMetadata {
+                volume_id: snapshot.volume_id,
+                provider_id: snapshot.provider_id,
+                persistence_class: snapshot.persistence_class,
+                portability: snapshot.portability,
+            }),
+        })
     }
 }
 
@@ -229,6 +282,7 @@ pub(super) struct RestoredSnapshot {
     pub(super) metadata: GvisorSnapshotMetadata,
     pub(super) image_path: PathBuf,
     pub(super) writable_diffs: BTreeMap<String, PathBuf>,
+    pub(super) volume_objects: BTreeMap<runtrue_sandbox_core::VolumeId, PathBuf>,
     pub(super) transferred_bytes: u64,
     pub(super) materialization_millis: u128,
 }
@@ -262,6 +316,17 @@ pub(super) fn materialize(
     let materialization_millis = materialized.materialization_millis;
     let metadata = load_metadata(&materialized)?;
     let writable_diffs = writable_diff_paths(&materialized, &metadata)?;
+    let volume_objects = materialized
+        .manifest
+        .volumes
+        .iter()
+        .map(|(volume_id, volume)| {
+            (
+                volume_id.clone(),
+                materialized_path.join(&volume.object_name),
+            )
+        })
+        .collect();
     let image_path = temporary.path().join("runtime");
     fs::DirBuilder::new()
         .mode(0o700)
@@ -301,6 +366,7 @@ pub(super) fn materialize(
         metadata,
         image_path,
         writable_diffs,
+        volume_objects,
         transferred_bytes,
         materialization_millis,
     })
@@ -309,13 +375,19 @@ pub(super) fn materialize(
 fn load_metadata(
     materialized: &MaterializedSnapshot,
 ) -> Result<GvisorSnapshotMetadata, SandboxError> {
-    if materialized.manifest.sandbox_objects.iter().any(|object| {
-        object.artifact.media_type != CHECKPOINT_MEDIA_TYPE
-            || !matches!(
-                object.role,
-                ArtifactRole::RuntimeState | ArtifactRole::MemoryPages
-            )
-    }) {
+    if materialized
+        .manifest
+        .sandbox_objects
+        .iter()
+        .filter(|object| object.role != ArtifactRole::VolumeData)
+        .any(|object| {
+            object.artifact.media_type != CHECKPOINT_MEDIA_TYPE
+                || !matches!(
+                    object.role,
+                    ArtifactRole::RuntimeState | ArtifactRole::MemoryPages
+                )
+        })
+    {
         return Err(SandboxError::Runtime(
             "snapshot contains an invalid gVisor runtime object".to_owned(),
         ));
@@ -380,6 +452,10 @@ fn load_metadata(
         ));
     }
     Ok(metadata)
+}
+
+fn volume_error(error: runtrue_sandbox_volume::VolumeError) -> SandboxError {
+    SandboxError::Runtime(format!("volume provider: {error}"))
 }
 
 fn validate_metadata(metadata: &GvisorSnapshotMetadata) -> Result<(), SandboxError> {
@@ -472,6 +548,7 @@ fn checkpoint_objects(directory: &Path) -> Result<Vec<StagedSnapshotObject>, San
                 name,
                 path: entry.path(),
                 media_type: CHECKPOINT_MEDIA_TYPE.to_owned(),
+                volume: None,
             })
         })
         .collect()

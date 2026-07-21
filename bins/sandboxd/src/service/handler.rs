@@ -122,6 +122,8 @@ fn run(
         &daemon.ip,
         &admitted,
         std::sync::Arc::clone(&daemon.image_provider),
+        &key.scope.volume_scope(),
+        std::sync::Arc::clone(&daemon.volume_provider),
     );
     match result {
         Ok(result) => {
@@ -173,6 +175,8 @@ fn create(
         &daemon.ip,
         &admitted,
         std::sync::Arc::clone(&daemon.image_provider),
+        &key.scope.volume_scope(),
+        std::sync::Arc::clone(&daemon.volume_provider),
     ) {
         Ok(instance) => instance,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
@@ -248,6 +252,8 @@ fn restore(
         &daemon.ip,
         &admitted,
         std::sync::Arc::clone(&daemon.image_provider),
+        &key.scope.volume_scope(),
+        std::sync::Arc::clone(&daemon.volume_provider),
     ) {
         Ok(instance) => instance,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),

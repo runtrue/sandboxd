@@ -41,8 +41,9 @@ configured broker are trusted; this repository does not implement their
 tenant-facing identity or policy layer. The local containerd daemon,
 snapshotter, and `ctr` client participate in image preparation and belong to
 the trusted operator boundary. The loop driver, ext4 implementation, overlayfs,
-`losetup`, and `mkfs.ext4` join that trusted host boundary when writable roots
-are enabled. OCI registries and their transport remain outside the worker
+`losetup`, `fsfreeze`, `mkfs.ext4`, and the local volume provider join that
+trusted host boundary when writable roots or named volumes are enabled. OCI
+registries and their transport remain outside the worker
 boundary, so every admitted descriptor and blob is verified against the locked
 digest and size.
 
@@ -55,8 +56,21 @@ still supports one worker only, so these records do not establish a distributed
 lease. The artifact master key remains an operator-managed secret.
 
 Writable roots are private, quota-backed overlays created only from
-provider-issued identities. Their portable snapshot format currently rejects
-hard links and non-overlay extended attributes. Bind mounts, external volumes,
+provider-issued identities. Named-volume keys bind tenant, workspace, and
+volume ID; customer input contains only the guest destination and never a host
+path, loop device, mount option, or provider handle. Attachment ownership is
+written durably before guest mounting, and startup recovery clears stale
+attachments, removes ephemeral and secret state, and retains unattached
+persistent data. Read-only artifacts are verified against their digest from the
+provider-owned artifact root. Secret source files must be owner-only regular
+files, are copied into a dedicated tmpfs, and neither their bytes nor source
+paths enter topology locks or snapshot manifests.
+
+Portable named-volume snapshots freeze the ext4 filesystem and publish the raw
+quota image as a typed encrypted artifact. A manifest declares the volume
+provider and portability; a nonportable or explicitly excluded named volume
+causes snapshot rejection. Writable-root snapshots currently reject hard links
+and non-overlay extended attributes. Raw bind mounts, arbitrary CSI plugins,
 key rotation, a remote conditional artifact provider, and cross-backend restore
 remain outside the supported boundary. An artifact being portable does not by
 itself prove that a distributed control plane transferred ownership safely.

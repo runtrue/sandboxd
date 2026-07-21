@@ -19,6 +19,7 @@ runtrue-sandbox-artifact.workspace = true
 runtrue-sandbox-core.workspace = true
 runtrue-sandbox-gvisor.workspace = true
 runtrue-sandbox-oci.workspace = true
+runtrue-sandbox-volume.workspace = true
 
 [lints]
 workspace = true

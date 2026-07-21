@@ -1,4 +1,4 @@
-use crate::{ContainerId, CoreError, NetworkId};
+use crate::{ContainerId, CoreError, NetworkId, VolumeSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,6 +23,8 @@ pub struct ContainerSpec {
     pub dependencies: Vec<ContainerDependency>,
     pub networks: Vec<NetworkId>,
     pub resources: ResourceSpec,
+    #[serde(default)]
+    pub volumes: Vec<VolumeSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +123,15 @@ impl SandboxSpec {
                 return Err(CoreError::InvalidSpecification(format!(
                     "container `{id}` has an invalid dependency"
                 )));
+            }
+            let mut destinations = BTreeSet::new();
+            for volume in &container.volumes {
+                volume.validate()?;
+                if !destinations.insert(volume.destination.as_str()) {
+                    return Err(CoreError::InvalidSpecification(format!(
+                        "container `{id}` repeats a volume destination"
+                    )));
+                }
             }
         }
         let positions = self

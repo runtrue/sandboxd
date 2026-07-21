@@ -57,6 +57,7 @@ identifier!(SandboxId, "sandbox", 64);
 identifier!(ContainerId, "container", 64);
 identifier!(NetworkId, "network", 64);
 identifier!(SnapshotId, "snapshot", 64);
+identifier!(VolumeId, "volume", 64);
 identifier!(WorkerId, "worker", 64);
 identifier!(TenantId, "tenant", 64);
 identifier!(WorkspaceId, "workspace", 64);
@@ -74,6 +75,8 @@ mod tests {
         assert!(SandboxId::parse("x".repeat(65)).is_err());
         assert!(TenantId::parse("tenant-a").is_ok());
         assert!(WorkspaceId::parse("team-b").is_ok());
+        assert!(VolumeId::parse("cache_1").is_ok());
+        assert!(VolumeId::parse("../cache").is_err());
         assert!(SubjectId::parse("service-account_1").is_ok());
     }
 }
