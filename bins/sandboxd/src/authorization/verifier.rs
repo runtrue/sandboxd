@@ -146,6 +146,9 @@ fn enforce_resource_ceilings(
         if topology.services.len() > usize::from(ceilings.maximum_services)
             || topology.volumes.len() > usize::from(ceilings.maximum_volumes)
             || volume_bytes > ceilings.maximum_volume_bytes
+            || !ceilings
+                .allowed_guest_profiles
+                .contains(&topology.policy.guest_profile)
             || topology.policy.memory_bytes_per_service > ceilings.memory_bytes_per_service
             || topology.policy.cpu_per_service_millis > ceilings.cpu_per_service_millis
             || topology.policy.pids_per_service > ceilings.pids_per_service
@@ -239,6 +242,7 @@ mod tests {
             nonce: "nonce-1".to_owned(),
             operation_digest: operation.digest().expect("digest"),
             resource_ceilings: ResourceCeilings {
+                allowed_guest_profiles: vec![runtrue_sandbox_core::GuestProfile::strict().identity],
                 maximum_services: 4,
                 maximum_timeout_ms: 10_000,
                 memory_bytes_per_service: 1024,
@@ -286,7 +290,7 @@ mod tests {
         );
         assert_eq!(
             signed_order(&operation).signature,
-            "88c7166ec9f359c662e5de1121854e7ef298296dbe60bfe4a73e3326c348f036"
+            "876b238463144dfc973549b5315a0fbdd0f04dfe2ee244b108c6d79a3b2f5bb8"
         );
     }
 
@@ -321,7 +325,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         let topology = TopologyLock {
-            schema_version: 4,
+            schema_version: 5,
             topology_digest: format!("sha256:{}", "a".repeat(64)),
             name: "example".to_owned(),
             services: BTreeMap::from([(
@@ -357,7 +361,6 @@ mod tests {
                     depends_on: BTreeMap::new(),
                     healthcheck: None,
                     networks: vec!["default".to_owned()],
-                    user: "65534:65534".to_owned(),
                     working_dir: "/work".to_owned(),
                     root_filesystem: RootFilesystemMode::ReadOnly,
                     volumes: Vec::new(),
@@ -381,6 +384,7 @@ mod tests {
             )]),
             startup_order: vec!["app".to_owned()],
             policy: SandboxPolicy {
+                guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
                 runtime: "runsc".to_owned(),
                 memory_bytes_per_service: 1024,
                 cpu_per_service_millis: 100,
@@ -390,6 +394,28 @@ mod tests {
                 maximum_output_bytes: 1024,
             },
         };
+        let mut profile_topology = topology.clone();
+        profile_topology.policy.memory_bytes_per_service = 1024;
+        profile_topology.policy.cpu_per_service_millis = 100;
+        profile_topology.policy.pids_per_service = 16;
+        profile_topology.policy.tmpfs_bytes = 1024;
+        profile_topology.policy.writable_root_bytes_per_service = 1024;
+        profile_topology.policy.maximum_output_bytes = 1024;
+        profile_topology.policy.guest_profile = runtrue_sandbox_core::GuestProfile::reviewed_named(
+            runtrue_sandbox_core::ROOT_GUEST_PROFILE,
+        )
+        .expect("root profile")
+        .identity;
+        let profile_operation = Operation::Create {
+            topology: profile_topology,
+            sandbox: "sandbox-a".to_owned(),
+            timeout_ms: 1_000,
+        };
+        assert!(enforce_resource_ceilings(
+            &profile_operation,
+            &signed_order(&profile_operation).claims
+        )
+        .is_err());
         let operation = Operation::Create {
             topology,
             sandbox: "sandbox-a".to_owned(),

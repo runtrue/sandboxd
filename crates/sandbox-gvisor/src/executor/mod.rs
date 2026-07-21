@@ -19,7 +19,9 @@ use crate::{
 use cgroup::{CgroupMetrics, CgroupSet};
 use network::ProjectNetwork;
 use process::{Runsc, ServiceProcess};
-use runtrue_sandbox_core::{ContainerId, SandboxId, SnapshotId, SnapshotMode, VolumeId};
+use runtrue_sandbox_core::{
+    ContainerId, GuestProfile, GuestProfileIdentity, SandboxId, SnapshotId, SnapshotMode, VolumeId,
+};
 use runtrue_sandbox_oci::{
     provider::{ImageProvider, WritableRootfs, WritableRootfsIdentity},
     RootFilesystemMode,
@@ -104,6 +106,7 @@ pub struct ServiceOutput {
 pub struct GvisorSandbox {
     project: String,
     topology_digest: String,
+    guest_profile: GuestProfileIdentity,
     state: GvisorSandboxState,
     paused_runtime_ids: BTreeSet<String>,
     resources: Option<Resources>,
@@ -294,6 +297,7 @@ pub fn start_admitted(
     Ok(GvisorSandbox {
         project: project.to_owned(),
         topology_digest: lock.topology_digest.clone(),
+        guest_profile: lock.policy.guest_profile.clone(),
         state: GvisorSandboxState::Running,
         paused_runtime_ids: BTreeSet::new(),
         resources: Some(resources),
@@ -462,6 +466,7 @@ fn start_services(
     project: &str,
     deadline: Instant,
 ) -> Result<u128, SandboxError> {
+    let guest_profile = reviewed_guest_profile(lock)?;
     let startup = Instant::now();
     let sandbox_runtime_id = resources.sandbox_runtime_id.clone();
     for service_name in &lock.startup_order {
@@ -507,6 +512,7 @@ fn start_services(
             resources.service_rootfs[service_name].read_only,
             service_name,
             service,
+            &guest_profile,
             &sandbox_network.namespace,
             &sandbox_network.hosts_path,
             &sandbox_network.resolv_path,
@@ -535,9 +541,13 @@ fn start_services(
                 if remaining.is_zero() {
                     break;
                 }
+                let health_user = format!(
+                    "{}:{}",
+                    guest_profile.restrictions.uid, guest_profile.restrictions.gid
+                );
                 if resources.runsc.health(
                     &resources.processes[service_name].id,
-                    &service.user,
+                    &health_user,
                     &healthcheck.command,
                     remaining.min(Duration::from_millis(healthcheck.timeout_ms)),
                 )? {
@@ -570,6 +580,15 @@ fn start_services(
         }
     }
     Ok(startup.elapsed().as_millis())
+}
+
+fn reviewed_guest_profile(lock: &TopologyLock) -> Result<GuestProfile, SandboxError> {
+    GuestProfile::reviewed(&lock.policy.guest_profile).ok_or_else(|| {
+        SandboxError::Unsupported(format!(
+            "guest profile `{}` is not reviewed by this worker build",
+            lock.policy.guest_profile.canonical()
+        ))
+    })
 }
 
 impl Resources {

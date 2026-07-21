@@ -78,6 +78,7 @@ fn capabilities(daemon: &DaemonState) -> Value {
                     64,
                     crate::server::MAXIMUM_WRITABLE_ROOT_BYTES,
                     daemon.artifact_store.snapshot_portability(),
+                    daemon.guest_profiles.clone(),
                 ),
             }
         ]
@@ -237,6 +238,7 @@ fn restore(
         worker_id: daemon.worker_id.clone(),
         assignment_epoch: epoch,
         artifact_portability: daemon.artifact_store.snapshot_portability(),
+        guest_profile: topology.policy.guest_profile.clone(),
     };
     let instance = match executor::restore_admitted(
         &topology,

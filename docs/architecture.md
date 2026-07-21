@@ -117,6 +117,13 @@ value counts; rejects privileged and ambient host features; requires internal
 networks; validates dependency order; resolves images to repository and image
 digests; and writes a canonical topology digest.
 
+The topology contains one versioned guest-profile identity for the complete
+sandbox. `strict-v1` is the default. Tenants can request another reviewed name
+through the top-level `x-runtrue-guest-profile` extension, but cannot provide a
+UID, capability list, device, namespace, or runtime annotation. Admission
+fails unless that exact profile is installed by the operator, and its identity
+is covered by the topology digest.
+
 The daemon re-verifies the topology digest before execution. The containerd
 provider resolves metadata through containerd and verifies the locked index,
 platform manifest, configuration, and every layer by digest and byte count. It
@@ -194,8 +201,8 @@ sandbox, consistent with gVisor's
 
 Generated OCI specifications provide:
 
-- numeric unprivileged guest users;
-- no capabilities and `noNewPrivileges`;
+- the selected profile's fixed numeric guest UID/GID;
+- `noNewPrivileges` and an empty ambient and inheritable capability set;
 - read-only OCI roots unless the topology explicitly requests an authorized
   quota-backed writable root;
 - bounded tmpfs mounts for `/dev`, `/tmp`, and `/work`;
@@ -203,6 +210,16 @@ Generated OCI specifications provide:
 - isolated PID, network, IPC, UTS, and mount namespaces;
 - masked sensitive proc/sys paths; and
 - no raw networking, host Unix sockets, host FIFOs, or directfs.
+
+The worker always installs `strict-v1` (UID/GID 65534, no capabilities).
+Operators may additionally install `root-in-sandbox-v1` (guest UID/GID 0, no
+capabilities) and `oci-compat-v1`. The compatibility profile grants only
+`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_SETGID`, and
+`CAP_SETUID` inside gVisor. It never grants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
+`CAP_NET_RAW`, module loading, process tracing, host mount administration, or
+host namespace access. Every CRI child uses the same sandbox-wide profile, so
+a child cannot exceed its parent sandbox. Ping capability responses report the
+installed identities and these exact restrictions.
 
 Every runsc control command has a subprocess deadline. A wedged state, pause,
 resume, checkpoint, kill, or delete command cannot hold a daemon request
@@ -281,11 +298,25 @@ cohort, CPU profile, architecture, operating system, and object roles. The
 small immutable snapshot pointer is published only after every referenced
 object and the manifest are durable.
 
-The current provider uses root-owned local files and conditional rename. Its
+The default provider uses root-owned local files and conditional rename. Its
 garbage-collection grace cannot be shorter than the maximum operation duration,
-so it cannot reclaim an active staging publication. The provider interface is
-backend-neutral, but no remote artifact provider is implemented; snapshots
-therefore remain on the worker that created them.
+so it cannot reclaim an active staging publication. The S3-compatible provider
+uses `s3-wire` for bounded streaming, retries, deadlines, conditional PUT,
+verified GET, HEAD, listing, and deletion. It hashes tenant and workspace names
+before deriving remote keys and publishes the snapshot pointer last. Large
+objects use bounded managed multipart uploads. A durable conditional lock gives
+one publisher ownership of a multipart destination, losing publishers wait for
+the completed object, and failed uploads are aborted. Garbage collection removes
+abandoned locks and stale multipart uploads after the configured grace period.
+The S3 provider requires that grace to be at least twice the operation timeout,
+leaving one full timeout window for client-owned abort cleanup after a caller
+deadline expires.
+The production endpoint must use TLS. The runtime principal is restricted to
+its configured bucket and prefix; bucket versioning must either be disabled or
+paired with a lifecycle policy because ordinary deletion cannot remove older
+versions. Environment credentials support session tokens. An optional
+owner-only credential file is re-read for every request so short-lived values
+can be rotated atomically without entering manifests, logs, or command lines.
 
 For stop-and-move, the assignment journal records `fencing` before runsc starts
 the checkpoint. The source remains inaccessible to later lifecycle operations
@@ -293,8 +324,8 @@ until the attempt either returns to `active` with intact runtime resources or
 advances to `transferable` after checkpoint publication and source cleanup. An
 encrypted transfer grant is published only after cleanup. A destination claim
 is immutable, idempotent for the same worker and epoch, and rejects a competing
-worker. A remote provider must implement the claim with a strong conditional
-create before the daemon can advertise cross-worker portability.
+worker. The S3 provider implements the claim with a strong conditional create
+before advertising cross-worker portability.
 
 Restore bounds the pointer, encrypted object, object count, individual object,
 and total snapshot sizes before publication into an empty read-only directory.

@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = ["s3-artifacts"]
+s3-artifacts = ["runtrue-sandbox-artifact/s3"]
+
 [dependencies]
 clap.workspace = true
 hex.workspace = true

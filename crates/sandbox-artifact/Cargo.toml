@@ -6,8 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+s3 = ["dep:async-trait", "dep:s3-wire", "dep:tokio"]
+
 [dependencies]
 aes-gcm.workspace = true
+async-trait = { workspace = true, optional = true }
 hex.workspace = true
 hkdf.workspace = true
 nix.workspace = true
@@ -15,8 +20,10 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+s3-wire = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }
 zeroize.workspace = true
 runtrue-sandbox-core.workspace = true
 runtrue-sandbox-runtime.workspace = true

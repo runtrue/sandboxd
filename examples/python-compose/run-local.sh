@@ -5,6 +5,7 @@ example_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_dir=$(cd -- "$example_dir/../.." && pwd)
 binary="$repo_dir/target/release/runtrue-sandboxd"
 lock_path="$example_dir/topology.lock.json"
+compat_lock_path="$example_dir/oci-compat.lock.json"
 image_store=/var/lib/runtrue-sandboxd/images
 run_root=/tmp/runtrue-sandboxd-local
 socket="$run_root/control.sock"
@@ -22,6 +23,8 @@ cargo build --quiet --release --offline --manifest-path "$repo_dir/Cargo.toml" \
 
 "$repo_dir/target/release/runtrue-sandboxctl" \
   lock --compose "$example_dir/compose.yaml" --output "$lock_path"
+"$repo_dir/target/release/runtrue-sandboxctl" \
+  lock --compose "$example_dir/compose-oci-compat.yaml" --output "$compat_lock_path"
 
 "$repo_dir/target/release/runtrue-sandboxctl" \
   prepare-image --reference docker.io/library/python:3.13-slim \
@@ -29,7 +32,7 @@ cargo build --quiet --release --offline --manifest-path "$repo_dir/Cargo.toml" \
 
 install -d -m 0700 "$run_root"
 "$binary" serve --socket "$socket" --state-root "$state_root" \
-  --image-store "$image_store" >"$daemon_log" 2>&1 &
+  --image-store "$image_store" --guest-profile oci-compat-v1 >"$daemon_log" 2>&1 &
 daemon_pid=$!
 
 cleanup() {
@@ -53,6 +56,9 @@ for _ in $(seq 1 100); do
 done
 
 "$binary" admit --socket "$socket" --lock "$lock_path"
+"$binary" admit --socket "$socket" --lock "$compat_lock_path"
+"$binary" run --socket "$socket" --lock "$compat_lock_path" \
+  --project "oci-compat-$$" --wait-for capability-fixture --timeout-seconds 20
 "$binary" create --socket "$socket" --lock "$lock_path" \
   --sandbox "$sandbox" --timeout-seconds 20
 sleep 1

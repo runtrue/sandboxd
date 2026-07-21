@@ -8,7 +8,6 @@ networks:
 services:
   server:
     image: docker.io/library/python:3.13-slim
-    user: "65534:65534"
     read_only: true
     working_dir: /work
     entrypoint: ["/usr/local/bin/python3", "-c"]
@@ -38,7 +37,6 @@ services:
 
   client:
     image: docker.io/library/python:3.13-slim
-    user: "65534:65534"
     read_only: false
     working_dir: /work
     entrypoint: ["/usr/local/bin/python3", "-c"]

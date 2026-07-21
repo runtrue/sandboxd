@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 RESOURCE_CEILINGS = {
+    "allowed_guest_profiles": [{"name": "strict", "version": 1}],
     "maximum_services": 4,
     "maximum_timeout_ms": 10_000,
     "memory_bytes_per_service": 268_435_456,
@@ -37,7 +38,7 @@ def build_ping_request(key: bytes, run_id: str, index: int) -> bytes:
     operation = {"kind": "ping"}
     now_millis = time.time_ns() // 1_000_000
     claims = {
-        "schema_version": 3,
+        "schema_version": 4,
         "tenant_id": "performance",
         "workspace_id": "control-plane",
         "subject_id": "github-runner",

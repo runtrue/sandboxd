@@ -22,7 +22,7 @@ use std::{
 };
 
 const POINTER_VERSION: u32 = 1;
-const MANIFEST_MEDIA_TYPE: &str = "application/vnd.runtrue.snapshot.manifest.v3+json";
+const MANIFEST_MEDIA_TYPE: &str = "application/vnd.runtrue.snapshot.manifest.v4+json";
 const MAXIMUM_POINTER_BYTES: u64 = 64 * 1024;
 const MAXIMUM_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -487,6 +487,7 @@ impl ArtifactRepository {
             .tempdir()
             .map_err(|error| io_error("artifact garbage collection", error))?;
         let mut reachable = BTreeSet::new();
+        let mut referenced_snapshots = BTreeSet::new();
         for pointer in self.backend.list(
             &snapshot_prefix(scope),
             self.limits.maximum_listing_entries,
@@ -494,6 +495,7 @@ impl ArtifactRepository {
         )? {
             check_deadline(deadline, "scan snapshot references")?;
             let snapshot_id = snapshot_id_from_pointer_key(&pointer.key)?;
+            referenced_snapshots.insert(snapshot_id.clone());
             let (manifest, _) =
                 self.load_manifest(scope, &snapshot_id, temporary.path(), deadline)?;
             let (pointer, _) =
@@ -534,6 +536,20 @@ impl ArtifactRepository {
             if object.modified <= cutoff {
                 self.backend.delete(&object.key, deadline)?;
                 report.removed_staging_objects += 1;
+            }
+        }
+        for object in self.backend.list(
+            &transfer_prefix(scope),
+            self.limits.maximum_listing_entries,
+            deadline,
+        )? {
+            check_deadline(deadline, "collect snapshot transfer records")?;
+            let snapshot_id = snapshot_id_from_transfer_key(scope, &object.key)?;
+            if referenced_snapshots.contains(&snapshot_id) || object.modified > cutoff {
+                report.retained_transfer_objects += 1;
+            } else {
+                self.backend.delete(&object.key, deadline)?;
+                report.removed_transfer_objects += 1;
             }
         }
         Ok(report)
@@ -706,6 +722,29 @@ pub(crate) fn staging_prefix(scope: &ArtifactScope) -> String {
     format!("{}/staging", scope.storage_prefix())
 }
 
+fn transfer_prefix(scope: &ArtifactScope) -> String {
+    format!("{}/transfers", scope.storage_prefix())
+}
+
+fn snapshot_id_from_transfer_key(
+    scope: &ArtifactScope,
+    key: &str,
+) -> Result<SnapshotId, ArtifactError> {
+    let prefix = format!("{}/transfers/", scope.storage_prefix());
+    let suffix = key.strip_prefix(&prefix).ok_or_else(|| {
+        ArtifactError::Integrity("snapshot transfer key escaped its tenant scope".to_owned())
+    })?;
+    let (snapshot_id, name) = suffix
+        .split_once('/')
+        .ok_or_else(|| ArtifactError::Integrity("snapshot transfer key is malformed".to_owned()))?;
+    if !matches!(name, "grant.json" | "grant.envelope" | "claim.envelope") {
+        return Err(ArtifactError::Integrity(
+            "snapshot transfer key is malformed".to_owned(),
+        ));
+    }
+    SnapshotId::parse(snapshot_id).map_err(|error| ArtifactError::Integrity(error.to_string()))
+}
+
 fn snapshot_id_from_pointer_key(key: &str) -> Result<SnapshotId, ArtifactError> {
     let name = key
         .rsplit('/')
@@ -861,6 +900,7 @@ mod tests {
                 required_cpu_features: Vec::new(),
                 cpu_features_digest: format!("sha256:{}", "c".repeat(64)),
                 preserves_internal_connections: true,
+                guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
             },
             containers: BTreeMap::new(),
             sandbox_objects: Vec::new(),
@@ -977,6 +1017,7 @@ mod tests {
                     worker_id: WorkerId::parse("worker-b").expect("worker"),
                     assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
                     artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+                    guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
                 },
             )
             .expect("local transfer claim contract");
@@ -1167,6 +1208,27 @@ mod tests {
         store
             .publish(fixture.publication.clone())
             .expect("publish snapshot");
+        let grant = store
+            .publish_transfer_grant(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+            )
+            .expect("publish transfer grant");
+        store
+            .claim_transfer(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+                &RestoreTarget {
+                    tenant_id: grant.tenant_id,
+                    workspace_id: grant.workspace_id,
+                    sandbox_id: grant.sandbox_id,
+                    worker_id: WorkerId::parse("worker-b").expect("worker"),
+                    assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
+                    artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+                    guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
+                },
+            )
+            .expect("claim transfer");
         store
             .remove_reference(
                 &fixture.publication.scope,
@@ -1178,7 +1240,9 @@ mod tests {
             .garbage_collect(&fixture.publication.scope)
             .expect("garbage collection");
         assert!(report.removed_unreferenced_objects >= 3);
+        assert_eq!(report.removed_transfer_objects, 3);
         assert_eq!(report.retained_objects, 0);
+        assert_eq!(report.retained_transfer_objects, 0);
     }
 
     #[test]
@@ -1250,6 +1314,7 @@ mod tests {
             worker_id: WorkerId::parse("worker-b").expect("worker"),
             assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+            guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
         };
         let claim = repository
             .claim_transfer(
@@ -1326,6 +1391,7 @@ mod tests {
             worker_id: WorkerId::parse("worker-b").expect("worker"),
             assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+            guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
         };
         assert!(repository
             .claim_transfer(

@@ -125,8 +125,25 @@ pub(crate) struct ServeArgs {
     pub(crate) io_timeout_seconds: u64,
     #[arg(long, default_value = "worker-local")]
     pub(crate) worker_id: String,
+    /// Enable an additional reviewed guest profile (root-in-sandbox-v1 or oci-compat-v1).
+    #[arg(long = "guest-profile")]
+    pub(crate) guest_profiles: Vec<String>,
     #[arg(long)]
     pub(crate) artifact_master_key: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) artifact_s3_bucket: Option<String>,
+    #[arg(long, default_value = "us-east-1")]
+    pub(crate) artifact_s3_region: String,
+    #[arg(long)]
+    pub(crate) artifact_s3_endpoint: Option<String>,
+    #[arg(long, default_value = "runtrue-sandboxd/v1")]
+    pub(crate) artifact_s3_prefix: String,
+    #[arg(long)]
+    pub(crate) artifact_s3_virtual_hosted: bool,
+    #[arg(long)]
+    pub(crate) artifact_s3_allow_http_for_local_testing: bool,
+    #[arg(long)]
+    pub(crate) artifact_s3_credentials_file: Option<PathBuf>,
     #[arg(long, default_value = "/var/lib/runtrue-sandboxd/state")]
     pub(crate) state_root: PathBuf,
     #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]

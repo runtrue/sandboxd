@@ -26,14 +26,16 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt --no-self-update
-          rustup default 1.94.0
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default 1.97.1
       - name: Cache Rust build data
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run workspace tests
         run: cargo test --workspace --locked
+      - name: Run cross-worker S3 artifact test
+        run: ./tools/test-s3-artifacts.sh
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Validate shell syntax
@@ -54,8 +56,8 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --no-self-update
-          rustup default 1.94.0
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup default 1.97.1
       - name: Install dependency scanners
         uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
@@ -76,8 +78,8 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --no-self-update
-          rustup default 1.94.0
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup default 1.97.1
       - name: Build release binaries
         run: |
           cargo build --workspace --release --locked

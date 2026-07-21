@@ -1,4 +1,5 @@
 use crate::{error::io_error, model::LockedService, SandboxError};
+use runtrue_sandbox_core::GuestProfile;
 use runtrue_sandbox_volume::MountedVolume;
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path};
@@ -15,6 +16,7 @@ pub(super) fn write_bundle(
     rootfs_read_only: bool,
     service_name: &str,
     service: &LockedService,
+    guest_profile: &GuestProfile,
     network_namespace: &str,
     hosts: &Path,
     resolv: &Path,
@@ -23,7 +25,9 @@ pub(super) fn write_bundle(
     role: ContainerRole<'_>,
 ) -> Result<(), SandboxError> {
     fs::create_dir(bundle).map_err(|source| io_error(bundle, source))?;
-    let (uid, gid) = parse_user(&service.user)?;
+    let restrictions = &guest_profile.restrictions;
+    let uid = restrictions.uid;
+    let gid = restrictions.gid;
     if service.entrypoint.is_empty() {
         return Err(SandboxError::Unsupported(format!(
             "gVisor service `{service_name}` requires an explicit exec-form entrypoint"
@@ -99,9 +103,13 @@ pub(super) fn write_bundle(
             "args": arguments,
             "env": environment,
             "cwd": service.working_dir,
-            "noNewPrivileges": true,
+            "noNewPrivileges": restrictions.no_new_privileges,
             "capabilities": {
-                "bounding": [], "effective": [], "inheritable": [], "permitted": [], "ambient": []
+                "bounding": restrictions.bounding_capabilities,
+                "effective": restrictions.effective_capabilities,
+                "inheritable": restrictions.inheritable_capabilities,
+                "permitted": restrictions.permitted_capabilities,
+                "ambient": restrictions.ambient_capabilities
             },
             "rlimits": [
                 {"type": "RLIMIT_NOFILE", "hard": 256, "soft": 256},
@@ -120,11 +128,8 @@ pub(super) fn write_bundle(
                 {"type": "mount"}
             ],
             "resources": {},
-            "maskedPaths": [
-                "/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys", "/proc/latency_stats",
-                "/proc/timer_list", "/proc/timer_stats", "/proc/sched_debug", "/sys/firmware"
-            ],
-            "readonlyPaths": ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"]
+            "maskedPaths": restrictions.masked_paths,
+            "readonlyPaths": restrictions.readonly_paths
         }
     });
     let path = bundle.join("config.json");
@@ -133,15 +138,130 @@ pub(super) fn write_bundle(
     fs::write(&path, bytes).map_err(|source| io_error(&path, source))
 }
 
-fn parse_user(user: &str) -> Result<(u32, u32), SandboxError> {
-    let (uid, gid) = user
-        .split_once(':')
-        .ok_or_else(|| SandboxError::Unsupported("gVisor requires numeric UID:GID".to_owned()))?;
-    let uid = uid
-        .parse()
-        .map_err(|_| SandboxError::Unsupported("gVisor requires numeric UID:GID".to_owned()))?;
-    let gid = gid
-        .parse()
-        .map_err(|_| SandboxError::Unsupported("gVisor requires numeric UID:GID".to_owned()))?;
-    Ok((uid, gid))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{LockedDescriptor, LockedImage, RootFilesystemMode};
+    use runtrue_sandbox_core::{
+        GuestProfile, OCI_COMPAT_GUEST_PROFILE, ROOT_GUEST_PROFILE, STRICT_GUEST_PROFILE,
+    };
+
+    fn service() -> LockedService {
+        let descriptor = LockedDescriptor {
+            media_type: "test".to_owned(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size: 1,
+        };
+        LockedService {
+            image: LockedImage {
+                source: "example/test".to_owned(),
+                exact_reference: format!("example/test@sha256:{}", "a".repeat(64)),
+                image_id: format!("sha256:{}", "b".repeat(64)),
+                index: None,
+                manifest: descriptor.clone(),
+                config: descriptor.clone(),
+                layers: vec![descriptor],
+                operating_system: "linux".to_owned(),
+                architecture: "amd64".to_owned(),
+                variant: None,
+            },
+            command: Vec::new(),
+            entrypoint: vec!["/bin/true".to_owned()],
+            environment: BTreeMap::new(),
+            depends_on: BTreeMap::new(),
+            healthcheck: None,
+            networks: vec!["default".to_owned()],
+            working_dir: "/work".to_owned(),
+            root_filesystem: RootFilesystemMode::ReadOnly,
+            volumes: Vec::new(),
+        }
+    }
+
+    fn generated(profile_name: &str) -> serde_json::Value {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let bundle = directory.path().join("bundle");
+        let rootfs = directory.path().join("rootfs");
+        let hosts = directory.path().join("hosts");
+        let resolv = directory.path().join("resolv.conf");
+        fs::create_dir(&rootfs).expect("rootfs");
+        fs::write(&hosts, "127.0.0.1 localhost\n").expect("hosts");
+        fs::write(&resolv, "").expect("resolv");
+        let profile = GuestProfile::reviewed_named(profile_name).expect("reviewed profile");
+        write_bundle(
+            &bundle,
+            &rootfs,
+            true,
+            "service",
+            &service(),
+            &profile,
+            "test-netns",
+            &hosts,
+            &resolv,
+            1024,
+            &[],
+            ContainerRole::Sandbox,
+        )
+        .expect("write bundle");
+        serde_json::from_slice(&fs::read(bundle.join("config.json")).expect("read bundle"))
+            .expect("decode bundle")
+    }
+
+    #[test]
+    fn strict_and_root_profiles_only_change_guest_identity() {
+        let strict = generated(STRICT_GUEST_PROFILE);
+        let root = generated(ROOT_GUEST_PROFILE);
+        assert_eq!(
+            strict["process"]["user"],
+            json!({"uid": 65534, "gid": 65534})
+        );
+        assert_eq!(root["process"]["user"], json!({"uid": 0, "gid": 0}));
+        for config in [&strict, &root] {
+            assert_eq!(config["process"]["capabilities"]["bounding"], json!([]));
+            assert_eq!(config["process"]["capabilities"]["ambient"], json!([]));
+            assert_eq!(config["process"]["noNewPrivileges"], true);
+        }
+    }
+
+    #[test]
+    fn oci_compatibility_capability_fixtures_are_exact_and_ambient_stays_empty() {
+        let config = generated(OCI_COMPAT_GUEST_PROFILE);
+        let expected = json!([
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_FSETID",
+            "CAP_SETGID",
+            "CAP_SETUID"
+        ]);
+        for set in ["bounding", "effective", "permitted"] {
+            assert_eq!(config["process"]["capabilities"][set], expected);
+        }
+        assert_eq!(config["process"]["capabilities"]["inheritable"], json!([]));
+        assert_eq!(config["process"]["capabilities"]["ambient"], json!([]));
+        let encoded = serde_json::to_string(&config).expect("encode config");
+        for forbidden in [
+            "CAP_SYS_ADMIN",
+            "CAP_NET_ADMIN",
+            "CAP_NET_RAW",
+            "CAP_SYS_MODULE",
+            "CAP_SYS_PTRACE",
+        ] {
+            assert!(!encoded.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn every_profile_keeps_namespace_and_filesystem_boundaries() {
+        for name in [
+            STRICT_GUEST_PROFILE,
+            ROOT_GUEST_PROFILE,
+            OCI_COMPAT_GUEST_PROFILE,
+        ] {
+            let config = generated(name);
+            assert_eq!(config["root"]["readonly"], true);
+            assert_eq!(config["linux"]["namespaces"].as_array().unwrap().len(), 5);
+            assert!(config["linux"]["maskedPaths"].as_array().unwrap().len() >= 9);
+            assert!(config["linux"]["readonlyPaths"].as_array().unwrap().len() >= 5);
+        }
+    }
 }

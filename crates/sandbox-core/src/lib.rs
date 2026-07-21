@@ -2,6 +2,7 @@ mod assignment;
 mod backend;
 mod capability;
 mod error;
+mod guest_profile;
 mod identity;
 mod lifecycle;
 mod snapshot;
@@ -13,6 +14,10 @@ pub use assignment::AssignmentEpoch;
 pub use backend::{BackendDescriptor, BackendKind};
 pub use capability::{BackendCapabilities, SnapshotPortability};
 pub use error::CoreError;
+pub use guest_profile::{
+    GuestProfile, GuestProfileIdentity, GuestProfileRestrictions, OCI_COMPAT_GUEST_PROFILE,
+    ROOT_GUEST_PROFILE, STRICT_GUEST_PROFILE,
+};
 pub use identity::{
     ContainerId, NetworkId, SandboxId, SnapshotId, SubjectId, TenantId, VolumeId, WorkerId,
     WorkspaceId,

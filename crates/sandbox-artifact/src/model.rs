@@ -177,5 +177,7 @@ pub struct SnapshotTransferClaim {
 pub struct GarbageCollectionReport {
     pub removed_staging_objects: usize,
     pub removed_unreferenced_objects: usize,
+    pub removed_transfer_objects: usize,
     pub retained_objects: usize,
+    pub retained_transfer_objects: usize,
 }
