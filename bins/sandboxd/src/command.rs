@@ -37,6 +37,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 image_platform,
                 runsc,
                 ip,
+                nft,
             } = *options;
             let mut installed_guest_profiles = vec![runtrue_sandbox_core::GuestProfile::strict()];
             for name in guest_profiles {
@@ -79,6 +80,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 image_platform,
                 runsc,
                 ip,
+                nft,
                 maximum_connections,
                 io_timeout: std::time::Duration::from_secs(io_timeout_seconds),
             })

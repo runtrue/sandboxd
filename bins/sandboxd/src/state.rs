@@ -43,6 +43,7 @@ pub(crate) struct DaemonState {
     pub(crate) image_provider: Arc<dyn ImageProvider>,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
+    pub(crate) nft: PathBuf,
     pub(crate) assignments: AssignmentLedger,
     pub(crate) audit: AuditLog,
     pub(crate) work_orders: Option<WorkOrderVerifier>,

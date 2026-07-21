@@ -32,6 +32,7 @@ pub fn restore_admitted(
     restore_target: &RestoreTarget,
     runsc_program: &Path,
     ip_program: &Path,
+    nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
 ) -> Result<GvisorSandbox, SandboxError> {
@@ -120,6 +121,7 @@ pub fn restore_admitted(
         state_root,
         runsc_program,
         ip_program,
+        nft_program,
         admitted,
         rootfs_provider,
         Some(&restored.writable_diffs),
@@ -394,6 +396,8 @@ fn restore_services(
             &sandbox_network.namespace,
             &sandbox_network.hosts_path,
             &sandbox_network.resolv_path,
+            sandbox_network.http_proxy.as_deref(),
+            sandbox_network.no_proxy.as_deref(),
             lock.policy.tmpfs_bytes,
             role,
         )?;

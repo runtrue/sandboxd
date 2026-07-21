@@ -28,6 +28,7 @@ pub(crate) struct ServerConfig {
     pub(crate) image_platform: String,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
+    pub(crate) nft: PathBuf,
     pub(crate) maximum_connections: usize,
     pub(crate) io_timeout: Duration,
 }
@@ -134,6 +135,7 @@ mod tests {
             image_platform: "linux/amd64".to_owned(),
             runsc: PathBuf::from("/usr/local/bin/runsc"),
             ip: PathBuf::from("/usr/sbin/ip"),
+            nft: PathBuf::from("/usr/sbin/nft"),
             maximum_connections: 64,
             io_timeout: Duration::from_secs(5),
         }

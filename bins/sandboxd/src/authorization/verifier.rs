@@ -315,7 +315,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         let topology = TopologyLock {
-            schema_version: 4,
+            schema_version: 5,
             topology_digest: format!("sha256:{}", "a".repeat(64)),
             name: "example".to_owned(),
             services: BTreeMap::from([(
