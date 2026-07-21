@@ -204,6 +204,7 @@ fn fixture() -> Fixture {
         },
         containers: BTreeMap::new(),
         sandbox_objects: Vec::new(),
+        volumes: BTreeMap::new(),
     };
     Fixture {
         _directory: directory,
@@ -217,6 +218,7 @@ fn fixture() -> Fixture {
                     name: "state.img".to_owned(),
                     path: runtime,
                     media_type: "application/vnd.runtrue.test.runtime".to_owned(),
+                    volume: None,
                 },
                 StagedSnapshotObject {
                     role: ArtifactRole::BackendMetadata,
@@ -224,6 +226,7 @@ fn fixture() -> Fixture {
                     name: "service.json".to_owned(),
                     path: metadata,
                     media_type: "application/vnd.runtrue.test.metadata+json".to_owned(),
+                    volume: None,
                 },
             ],
         },

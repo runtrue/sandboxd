@@ -1,7 +1,7 @@
 use crate::ArtifactError;
 use runtrue_sandbox_core::{
-    ArtifactRole, AssignmentEpoch, ContainerId, SandboxId, SnapshotId, SnapshotManifest, TenantId,
-    WorkerId, WorkspaceId,
+    ArtifactRole, AssignmentEpoch, ContainerId, SandboxId, SnapshotId, SnapshotManifest,
+    SnapshotPortability, TenantId, VolumeId, VolumePersistenceClass, WorkerId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
@@ -110,6 +110,15 @@ pub struct StagedSnapshotObject {
     pub name: String,
     pub path: PathBuf,
     pub media_type: String,
+    pub volume: Option<StagedVolumeMetadata>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StagedVolumeMetadata {
+    pub volume_id: VolumeId,
+    pub provider_id: String,
+    pub persistence_class: VolumePersistenceClass,
+    pub portability: SnapshotPortability,
 }
 
 #[derive(Debug, Clone)]

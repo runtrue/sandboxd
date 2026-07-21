@@ -924,6 +924,7 @@ dependencies = [
  "runtrue-sandbox-artifact",
  "runtrue-sandbox-core",
  "runtrue-sandbox-oci",
+ "runtrue-sandbox-volume",
  "serde",
  "serde_json",
  "sha2 0.10.8",
@@ -960,12 +961,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtrue-sandbox-volume"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "nix",
+ "runtrue-sandbox-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.8",
+ "tempfile",
+ "thiserror 1.0.61",
+ "zeroize",
+]
+
+[[package]]
 name = "runtrue-sandboxctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "runtrue-sandbox-core",
  "runtrue-sandbox-gvisor",
  "runtrue-sandbox-oci",
+ "runtrue-sandbox-volume",
  "serde_json",
 ]
 
@@ -981,6 +999,7 @@ dependencies = [
  "runtrue-sandbox-core",
  "runtrue-sandbox-gvisor",
  "runtrue-sandbox-oci",
+ "runtrue-sandbox-volume",
  "serde",
  "serde_json",
  "sha2 0.10.8",

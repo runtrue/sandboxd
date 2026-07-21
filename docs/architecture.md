@@ -154,6 +154,43 @@ and callers never supply host paths, loop devices, upper directories, work
 directories, or mount options. Provider metadata and the immutable lower layer
 remain outside the guest root.
 
+## Volume providers
+
+`sandbox-core` defines versioned volume specifications containing a tenant-owned
+volume ID, normalized guest destination, read-only flag, persistence class,
+snapshot policy, quota, and optional artifact digest. The restricted Compose
+compiler accepts only typed references to top-level volume definitions. Strings
+such as `/host/path:/guest/path`, protected guest destinations, unknown IDs,
+writable artifact/secret mounts, and secrets included in snapshots fail before
+image admission.
+
+`sandbox-volume` defines create, attach, mount, freeze/thaw, snapshot, restore,
+unmount, detach, delete, capability, and recovery operations over opaque
+provider handles. This is also the boundary for an operator-installed CSI or
+customer-hosted integration; no CSI plugin is loaded by the privileged daemon
+in this repository. The local provider derives a SHA-256 key from tenant,
+workspace, and volume ID. Ephemeral and persistent volumes use sparse ext4
+images, private loop devices, and hard block quotas. Persistent storage remains
+after the final detach; ephemeral storage is destroyed. Attachment ownership is
+atomically persisted before a mount is issued, and startup recovery clears
+stale ownership, mounts, and loop devices after daemon or worker failure.
+
+Artifact volumes resolve a provider-owned regular file by its SHA-256 digest,
+verify it is immutable, and expose it only through a read-only bind mount.
+Secret volumes resolve bounded owner-only files under
+`secret-source/tenants/<tenant>/workspaces/<workspace>/<volume>`, reject
+symlinks and special files, copy the bytes into a size-bounded tmpfs, and expose
+that tmpfs read-only. Secret bytes, source paths, and tmpfs handles do not enter
+topology locks or snapshot manifests.
+
+Snapshotting pauses the complete sandbox, freezes each named ext4 volume,
+copies the quota image, thaws it on success or failure, and publishes the image
+as a typed encrypted artifact. Manifest v3 binds each volume ID to exactly one
+object plus provider, persistence, and portability metadata. Restore verifies
+the topology, digest, size, quota, provider, and portability before attaching
+storage. Excluded named volumes reject snapshot creation explicitly; artifacts
+are reconstructed from their digest and secrets are freshly materialized.
+
 ## gVisor execution
 
 The first service in dependency order is written as a CRI sandbox container.

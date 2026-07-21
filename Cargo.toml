@@ -8,6 +8,7 @@ members = [
   "crates/sandbox-gvisor",
   "crates/sandbox-oci",
   "crates/sandbox-runtime",
+  "crates/sandbox-volume",
 ]
 
 [workspace.package]
@@ -44,6 +45,7 @@ runtrue-sandbox-core = { version = "=0.1.0", path = "crates/sandbox-core" }
 runtrue-sandbox-gvisor = { version = "=0.1.0", path = "crates/sandbox-gvisor" }
 runtrue-sandbox-oci = { version = "=0.1.0", path = "crates/sandbox-oci" }
 runtrue-sandbox-runtime = { version = "=0.1.0", path = "crates/sandbox-runtime" }
+runtrue-sandbox-volume = { version = "=0.1.0", path = "crates/sandbox-volume" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

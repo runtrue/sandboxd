@@ -7,7 +7,7 @@ use crate::{
 };
 use runtrue_sandbox_core::{
     ArtifactDescriptor, RestoreTarget, SnapshotId, SnapshotManifest, SnapshotObject,
-    SnapshotPortability,
+    SnapshotPortability, VolumeSnapshotDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -22,7 +22,7 @@ use std::{
 };
 
 const POINTER_VERSION: u32 = 1;
-const MANIFEST_MEDIA_TYPE: &str = "application/vnd.runtrue.snapshot.manifest.v2+json";
+const MANIFEST_MEDIA_TYPE: &str = "application/vnd.runtrue.snapshot.manifest.v4+json";
 const MAXIMUM_POINTER_BYTES: u64 = 64 * 1024;
 const MAXIMUM_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -136,6 +136,7 @@ impl ArtifactRepository {
         let mut names = BTreeSet::new();
         let mut containers = BTreeMap::new();
         let mut sandbox_objects = Vec::new();
+        let mut volumes = BTreeMap::new();
 
         for (index, staged) in publication.objects.iter().enumerate() {
             check_deadline(deadline, "publish snapshot objects")?;
@@ -190,6 +191,37 @@ impl ArtifactRepository {
                 role: staged.role,
                 artifact: descriptor,
             };
+            if let Some(volume) = &staged.volume {
+                if staged.container.is_some()
+                    || staged.role != runtrue_sandbox_core::ArtifactRole::VolumeData
+                {
+                    return Err(ArtifactError::Invalid(
+                        "volume snapshot object has an invalid role or container".to_owned(),
+                    ));
+                }
+                if volumes
+                    .insert(
+                        volume.volume_id.clone(),
+                        VolumeSnapshotDescriptor {
+                            provider_id: volume.provider_id.clone(),
+                            persistence_class: volume.persistence_class,
+                            portability: volume.portability,
+                            object_name: staged.name.clone(),
+                            artifact: object.artifact.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(ArtifactError::Invalid(format!(
+                        "duplicate volume snapshot `{}`",
+                        volume.volume_id
+                    )));
+                }
+            } else if staged.role == runtrue_sandbox_core::ArtifactRole::VolumeData {
+                return Err(ArtifactError::Invalid(
+                    "volume snapshot object omitted its volume metadata".to_owned(),
+                ));
+            }
             if let Some(container) = &staged.container {
                 containers
                     .entry(container.clone())
@@ -201,6 +233,7 @@ impl ArtifactRepository {
         }
         publication.manifest.containers = containers;
         publication.manifest.sandbox_objects = sandbox_objects;
+        publication.manifest.volumes = volumes;
         publication
             .manifest
             .validate()
@@ -608,7 +641,10 @@ impl ArtifactRepository {
 }
 
 fn validate_unpopulated_manifest(manifest: &SnapshotManifest) -> Result<(), ArtifactError> {
-    if !manifest.containers.is_empty() || !manifest.sandbox_objects.is_empty() {
+    if !manifest.containers.is_empty()
+        || !manifest.sandbox_objects.is_empty()
+        || !manifest.volumes.is_empty()
+    {
         return Err(ArtifactError::Invalid(
             "publication manifest must not contain caller-supplied object descriptors".to_owned(),
         ));
@@ -795,10 +831,11 @@ impl Drop for OperationPermit<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LocalArtifactStore, StagedSnapshotObject};
+    use crate::{LocalArtifactStore, StagedSnapshotObject, StagedVolumeMetadata};
     use runtrue_sandbox_core::{
         ArtifactRole, BackendDescriptor, BackendKind, ContainerId, LifecycleState, SandboxId,
-        SnapshotMode, SnapshotPortability, TenantId, WorkerId, WorkspaceId,
+        SnapshotMode, SnapshotPortability, TenantId, VolumeId, VolumePersistenceClass, WorkerId,
+        WorkspaceId,
     };
     use std::{
         fs,
@@ -867,6 +904,7 @@ mod tests {
             },
             containers: BTreeMap::new(),
             sandbox_objects: Vec::new(),
+            volumes: BTreeMap::new(),
         };
         Fixture {
             _directory: directory,
@@ -880,6 +918,7 @@ mod tests {
                         name: "state.img".to_owned(),
                         path: runtime,
                         media_type: "application/vnd.runtrue.test.runtime".to_owned(),
+                        volume: None,
                     },
                     StagedSnapshotObject {
                         role: ArtifactRole::BackendMetadata,
@@ -887,6 +926,7 @@ mod tests {
                         name: "service.json".to_owned(),
                         path: metadata,
                         media_type: "application/vnd.runtrue.test.metadata+json".to_owned(),
+                        volume: None,
                     },
                 ],
             },
@@ -981,6 +1021,47 @@ mod tests {
                 },
             )
             .expect("local transfer claim contract");
+    }
+
+    #[test]
+    fn publication_binds_volume_metadata_to_its_content_object() {
+        let directory = tempfile::tempdir().expect("artifact root parent");
+        let store = LocalArtifactStore::new(
+            directory.path().join("artifacts"),
+            MASTER_KEY,
+            ArtifactLimits::default(),
+        )
+        .expect("local store");
+        let mut fixture = fixture("snapshot-volume", "tenant-a");
+        let volume_path = fixture._directory.path().join("volume.ext4");
+        fs::write(&volume_path, vec![0x5a; 4096]).expect("volume object");
+        fixture.publication.objects.push(StagedSnapshotObject {
+            role: ArtifactRole::VolumeData,
+            container: None,
+            name: "volume-database.ext4".to_owned(),
+            path: volume_path,
+            media_type: "application/vnd.runtrue.volume.ext4.v1".to_owned(),
+            volume: Some(StagedVolumeMetadata {
+                volume_id: VolumeId::parse("database").expect("volume"),
+                provider_id: "local-loopback-v1".to_owned(),
+                persistence_class: VolumePersistenceClass::Persistent,
+                portability: SnapshotPortability::CrossWorkerSameBackend,
+            }),
+        });
+        store
+            .publish(fixture.publication.clone())
+            .expect("publish volume snapshot");
+        let materialized = store
+            .materialize(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+                &directory.path().join("materialized-volume"),
+            )
+            .expect("materialize volume snapshot");
+        let descriptor =
+            &materialized.manifest.volumes[&VolumeId::parse("database").expect("volume")];
+        assert_eq!(descriptor.object_name, "volume-database.ext4");
+        assert_eq!(descriptor.artifact.size_bytes, 4096);
     }
 
     #[test]

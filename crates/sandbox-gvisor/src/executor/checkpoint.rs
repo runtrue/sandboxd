@@ -9,9 +9,13 @@ use crate::{
     SandboxError,
 };
 use runtrue_sandbox_artifact::{ArtifactScope, ArtifactStore};
-use runtrue_sandbox_core::{LifecycleState, RestoreTarget, SnapshotId, SnapshotMode};
+use runtrue_sandbox_core::{
+    LifecycleState, RestoreTarget, SnapshotId, SnapshotMode, VolumePersistenceClass,
+    VolumeSnapshotPolicy,
+};
 use runtrue_sandbox_oci::provider::ImageProvider;
 use runtrue_sandbox_oci::RootFilesystemMode;
+use runtrue_sandbox_volume::{VolumeProvider, VolumeScope, VolumeSnapshot};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -35,6 +39,8 @@ pub fn restore_admitted(
     nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
+    volume_scope: &VolumeScope,
+    volume_provider: Arc<dyn VolumeProvider>,
 ) -> Result<GvisorSandbox, SandboxError> {
     let restore_started = Instant::now();
     verify_lock(lock)?;
@@ -54,6 +60,55 @@ pub fn restore_admitted(
         .filter(|(_, service)| service.root_filesystem == RootFilesystemMode::Writable)
         .map(|(service, _)| (service.clone(), lock.policy.writable_root_bytes_per_service))
         .collect::<BTreeMap<_, _>>();
+    let volume_specs = lock
+        .services
+        .values()
+        .flat_map(|service| service.volumes.iter())
+        .filter(|volume| {
+            matches!(
+                volume.persistence_class,
+                VolumePersistenceClass::Ephemeral | VolumePersistenceClass::Persistent
+            )
+        })
+        .map(|volume| (volume.volume_id.clone(), volume))
+        .collect::<BTreeMap<_, _>>();
+    if volume_specs
+        .values()
+        .any(|volume| volume.snapshot_policy == VolumeSnapshotPolicy::Excluded)
+        || manifest.volumes.keys().ne(volume_specs.keys())
+    {
+        return Err(SandboxError::Runtime(
+            "snapshot omitted a named volume required by the restore topology".to_owned(),
+        ));
+    }
+    let restored_volumes = volume_specs
+        .iter()
+        .map(|(volume_id, specification)| {
+            let descriptor = &manifest.volumes[volume_id];
+            let path = restored.volume_objects.get(volume_id).ok_or_else(|| {
+                SandboxError::Runtime(format!(
+                    "snapshot volume `{volume_id}` was not materialized"
+                ))
+            })?;
+            Ok((
+                volume_id.clone(),
+                (
+                    VolumeSnapshot {
+                        schema_version: runtrue_sandbox_volume::VOLUME_SNAPSHOT_VERSION,
+                        provider_id: descriptor.provider_id.clone(),
+                        volume_id: volume_id.clone(),
+                        persistence_class: descriptor.persistence_class,
+                        digest: descriptor.artifact.digest.clone(),
+                        size_bytes: descriptor.artifact.size_bytes,
+                        quota_bytes: specification.quota_bytes,
+                        format: descriptor.artifact.media_type.clone(),
+                        portability: descriptor.portability,
+                    },
+                    path.clone(),
+                ),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, SandboxError>>()?;
     let expected_guest_profile = lock.policy.guest_profile.clone();
     let cohort_started = Instant::now();
     manifest
@@ -124,7 +179,10 @@ pub fn restore_admitted(
         nft_program,
         admitted,
         rootfs_provider,
+        volume_scope,
+        volume_provider,
         Some(&restored.writable_diffs),
+        Some(&restored_volumes),
     )?;
     let compatibility = (|| {
         Ok::<_, SandboxError>(
@@ -245,7 +303,26 @@ pub(super) fn snapshot(
         .service_rootfs
         .values()
         .any(|rootfs| rootfs.writable.is_some());
-    let internally_paused = has_writable_rootfs && sandbox.state == GvisorSandboxState::Running;
+    let mut snapshot_volume_ids = BTreeSet::new();
+    let mut has_snapshot_volumes = false;
+    for volume in resources.service_volumes.values().flatten() {
+        if !matches!(
+            volume.attachment().handle().persistence_class(),
+            VolumePersistenceClass::Ephemeral | VolumePersistenceClass::Persistent
+        ) || !snapshot_volume_ids.insert(volume.attachment().handle().volume_id().clone())
+        {
+            continue;
+        }
+        if volume.attachment().snapshot_policy() == VolumeSnapshotPolicy::Excluded {
+            return Err(SandboxError::Unsupported(format!(
+                "named volume `{}` is excluded and makes the sandbox snapshot nonportable",
+                volume.attachment().handle().volume_id()
+            )));
+        }
+        has_snapshot_volumes = true;
+    }
+    let internally_paused = (has_writable_rootfs || has_snapshot_volumes)
+        && sandbox.state == GvisorSandboxState::Running;
     if internally_paused {
         sandbox.pause()?;
     }
@@ -277,6 +354,18 @@ pub(super) fn snapshot(
             )?;
             writable_services.insert(service.clone(), writable.quota_bytes());
             writable_objects.push(object);
+        }
+        let mut captured_volumes = BTreeSet::new();
+        for volume in resources.service_volumes.values().flatten() {
+            if !matches!(
+                volume.attachment().handle().persistence_class(),
+                VolumePersistenceClass::Ephemeral | VolumePersistenceClass::Persistent
+            ) || !captured_volumes.insert(volume.attachment().handle().volume_id().clone())
+            {
+                continue;
+            }
+            writable_objects
+                .push(staging.stage_volume(resources.volume_provider.as_ref(), volume)?);
         }
         let writable_export_millis = writable_started.elapsed().as_millis();
         let root_service = resources
@@ -399,6 +488,7 @@ fn restore_services(
             sandbox_network.http_proxy.as_deref(),
             sandbox_network.no_proxy.as_deref(),
             lock.policy.tmpfs_bytes,
+            &resources.service_volumes[service_name],
             role,
         )?;
         let process = resources.runsc.spawn_restore(

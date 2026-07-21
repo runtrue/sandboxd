@@ -9,6 +9,6 @@ pub use docker::Docker;
 pub use error::{io_error, SandboxError};
 pub use model::{
     is_protected_destination, DnsPolicy, EgressLimits, HttpEgressRule, HttpScheme, IngressRule,
-    LockedDescriptor, LockedImage, NetworkPolicy, NetworkProfile, RootFilesystemMode,
+    LockedDescriptor, LockedImage, LockedVolume, NetworkPolicy, NetworkProfile, RootFilesystemMode,
     SandboxPolicy, TcpEgressRule, TopologyLock,
 };

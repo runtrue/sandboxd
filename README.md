@@ -18,6 +18,8 @@ restore.
 - restricted Docker Compose compilation into an immutable topology lock;
 - digest-pinned OCI image admission with immutable shared image roots;
 - opt-in, quota-backed writable OCI roots with portable snapshot deltas;
+- tenant-scoped ephemeral and persistent named volumes with ext4 quotas,
+  read-only content-addressed artifact mounts, and tmpfs-backed secret mounts;
 - versioned, operator-enabled guest compatibility profiles;
 - one gVisor Sentry containing a root sandbox and child containers;
 - private sandbox networking plus explicit DNS, egress, and authenticated ingress profiles;
@@ -62,6 +64,28 @@ enabled that reviewed profile at startup. Raw Compose `user`, `cap_add`,
 rejected; profiles are operator policy, not a route for tenant-supplied OCI
 privilege fields.
 
+Compose volume input is deliberately narrower than Docker Compose bind mounts:
+
+```yaml
+volumes:
+  database:
+    persistence_class: persistent
+    quota_bytes: 268435456
+    snapshot_policy: required
+services:
+  app:
+    image: example/app:latest
+    volumes:
+      - source: database
+        target: /var/lib/app
+```
+
+`source` is a tenant-owned volume ID, never a host path. Persistent IDs survive
+stop and reattach inside the same tenant/workspace. Artifact definitions use an
+immutable `sha256:` content digest and are always read-only. Secret definitions
+resolve owner-only files from the operator secret source, copy them into a
+dedicated tmpfs, and are always read-only and snapshot-excluded.
+
 Host cgroups contain the Sentry, gofers, and runsc processes. Because guest work
 is executed by a shared Sentry, the host accounting boundary is the
 complete sandbox; policy fields named per-service must not be interpreted as
@@ -73,7 +97,7 @@ independent guest CPU or memory guarantees.
   of this worker; the optional local broker boundary supports one configured UID
   and one active HMAC key;
 - the local artifact provider restricts snapshot restore to the same worker;
-- bind mounts and external volumes are unsupported;
+- raw host bind mounts and uninstalled external/CSI providers are unsupported;
 - writable-root snapshots reject hard links and non-overlay extended
   attributes until those representations have a portable contract;
 - external networking remains disabled unless the topology lock carries an explicit
@@ -96,6 +120,9 @@ independent guest CPU or memory guarantees.
 - `sandbox-artifact` owns encrypted content-addressed publication, verified
   materialization, references, garbage collection, and local or S3-compatible
   storage providers.
+- `sandbox-volume` owns tenant-scoped handles, durable attachments, quota-backed
+  local storage, immutable artifacts, secret materialization, provider
+  capabilities, and volume snapshot/restore contracts.
 - `sandbox-oci` owns Compose validation, topology locks, the backend-neutral
   image-provider contract, and the containerd provider.
 - `sandbox-gvisor` owns runsc execution, OCI bundles, host resources, portable
@@ -111,7 +138,8 @@ Detailed documentation covers [architecture and isolation](docs/architecture.md)
 - Rust 1.97.1;
 - gVisor `runsc` release `20260714.0` using the systrap platform;
 - containerd 2.2.2 with the overlayfs snapshotter and `ctr` client;
-- util-linux `losetup`, e2fsprogs `mkfs.ext4`, and available loop devices;
+- util-linux `losetup` and `fsfreeze`, e2fsprogs `mkfs.ext4`, GNU `cp`, and
+  available loop devices;
 - iproute2 and nftables; and
 - outbound HTTPS access to the OCI registries used during preparation.
 

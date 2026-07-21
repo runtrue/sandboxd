@@ -16,6 +16,10 @@ impl TenantScope {
             self.workspace_id.clone(),
         )
     }
+
+    pub(crate) fn volume_scope(&self) -> runtrue_sandbox_volume::VolumeScope {
+        runtrue_sandbox_volume::VolumeScope::new(self.tenant_id.clone(), self.workspace_id.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

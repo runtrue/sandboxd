@@ -1,12 +1,12 @@
 use crate::{
     specification::validate_digest, BackendDescriptor, ContainerId, CoreError,
     GuestProfileIdentity, LifecycleState, SandboxId, SnapshotId, SnapshotPortability, TenantId,
-    WorkerId, WorkspaceId,
+    VolumeId, VolumeSnapshotDescriptor, WorkerId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SNAPSHOT_MANIFEST_VERSION: u32 = 3;
+pub const SNAPSHOT_MANIFEST_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +34,7 @@ pub struct SnapshotManifest {
     pub restore_requirements: RestoreRequirements,
     pub containers: BTreeMap<ContainerId, Vec<SnapshotObject>>,
     pub sandbox_objects: Vec<SnapshotObject>,
+    pub volumes: BTreeMap<VolumeId, VolumeSnapshotDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +75,7 @@ pub enum ArtifactRole {
     RuntimeState,
     MemoryPages,
     WritableFilesystem,
+    VolumeData,
     BackendMetadata,
 }
 
@@ -172,6 +174,33 @@ impl SnapshotManifest {
                 "snapshot omitted container or sandbox state".to_owned(),
             ));
         }
+        for (volume_id, volume) in &self.volumes {
+            volume.validate()?;
+            let matching = self
+                .sandbox_objects
+                .iter()
+                .filter(|object| {
+                    object.name == volume.object_name
+                        && object.role == ArtifactRole::VolumeData
+                        && object.artifact == volume.artifact
+                })
+                .count();
+            if matching != 1 {
+                return Err(CoreError::InvalidSnapshot(format!(
+                    "volume `{volume_id}` does not reference exactly one volume snapshot object"
+                )));
+            }
+        }
+        let described_volume_objects = self
+            .sandbox_objects
+            .iter()
+            .filter(|object| object.role == ArtifactRole::VolumeData)
+            .count();
+        if described_volume_objects != self.volumes.len() {
+            return Err(CoreError::InvalidSnapshot(
+                "volume snapshot objects and descriptors do not match".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -204,6 +233,15 @@ impl SnapshotManifest {
             {
                 return Err(CoreError::InvalidSnapshot(
                     "snapshot or artifact provider does not permit cross-worker restore".to_owned(),
+                ));
+            }
+            if self
+                .volumes
+                .values()
+                .any(|volume| !volume.portability.permits_cross_worker())
+            {
+                return Err(CoreError::InvalidSnapshot(
+                    "a captured volume does not permit cross-worker restore".to_owned(),
                 ));
             }
         }
@@ -269,6 +307,7 @@ mod tests {
                 vec![object(ArtifactRole::WritableFilesystem, 'c')],
             )]),
             sandbox_objects: vec![object(ArtifactRole::RuntimeState, 'd')],
+            volumes: BTreeMap::new(),
         }
     }
 
@@ -337,6 +376,60 @@ mod tests {
         manifest
             .validate_restore_target(&target)
             .expect("same-worker copy target");
+    }
+
+    #[test]
+    fn volume_snapshot_is_bound_to_one_typed_object() {
+        let mut manifest = manifest();
+        let object = object(ArtifactRole::VolumeData, 'f');
+        manifest.volumes.insert(
+            VolumeId::parse("database").expect("volume"),
+            VolumeSnapshotDescriptor {
+                provider_id: "local-loopback-v1".to_owned(),
+                persistence_class: crate::VolumePersistenceClass::Persistent,
+                portability: SnapshotPortability::CrossWorkerSameBackend,
+                object_name: object.name.clone(),
+                artifact: object.artifact.clone(),
+            },
+        );
+        manifest.sandbox_objects.push(object);
+        manifest.validate().expect("volume manifest");
+
+        manifest
+            .volumes
+            .values_mut()
+            .next()
+            .expect("descriptor")
+            .persistence_class = crate::VolumePersistenceClass::Secret;
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn nonportable_volume_rejects_cross_worker_restore() {
+        let mut manifest = manifest();
+        let object = object(ArtifactRole::VolumeData, 'f');
+        manifest.volumes.insert(
+            VolumeId::parse("database").expect("volume"),
+            VolumeSnapshotDescriptor {
+                provider_id: "worker-local-v1".to_owned(),
+                persistence_class: crate::VolumePersistenceClass::Persistent,
+                portability: SnapshotPortability::SameWorker,
+                object_name: object.name.clone(),
+                artifact: object.artifact.clone(),
+            },
+        );
+        manifest.sandbox_objects.push(object);
+        manifest.validate().expect("volume manifest");
+        let target = RestoreTarget {
+            tenant_id: manifest.tenant_id.clone(),
+            workspace_id: manifest.workspace_id.clone(),
+            sandbox_id: manifest.sandbox_id.clone(),
+            worker_id: WorkerId::parse("worker-b").expect("worker"),
+            assignment_epoch: crate::AssignmentEpoch::new(8).expect("epoch"),
+            artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+            guest_profile: manifest.restore_requirements.guest_profile.clone(),
+        };
+        assert!(manifest.validate_restore_target(&target).is_err());
     }
 
     #[test]

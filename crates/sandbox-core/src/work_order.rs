@@ -4,7 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WORK_ORDER_VERSION: u32 = 3;
+pub const WORK_ORDER_VERSION: u32 = 4;
 pub const MAXIMUM_WORK_ORDER_LIFETIME_MILLIS: u64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +42,8 @@ pub struct ResourceCeilings {
     pub pids_per_service: u32,
     pub tmpfs_bytes: u64,
     pub writable_root_bytes_per_service: u64,
+    pub maximum_volumes: u16,
+    pub maximum_volume_bytes: u64,
     pub maximum_output_bytes: u64,
 }
 
@@ -66,6 +68,8 @@ impl ResourceCeilings {
             || self.pids_per_service == 0
             || self.tmpfs_bytes == 0
             || self.writable_root_bytes_per_service == 0
+            || self.maximum_volumes > 128
+            || self.maximum_volume_bytes == 0
             || self.maximum_output_bytes == 0
         {
             return Err(CoreError::InvalidWorkOrder(
@@ -170,6 +174,8 @@ mod tests {
                 pids_per_service: 16,
                 tmpfs_bytes: 1024,
                 writable_root_bytes_per_service: 1024,
+                maximum_volumes: 4,
+                maximum_volume_bytes: 4096,
                 maximum_output_bytes: 1024,
             },
         }

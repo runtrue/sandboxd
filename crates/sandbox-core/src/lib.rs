@@ -7,6 +7,7 @@ mod identity;
 mod lifecycle;
 mod snapshot;
 mod specification;
+mod volume;
 mod work_order;
 
 pub use assignment::AssignmentEpoch;
@@ -18,7 +19,8 @@ pub use guest_profile::{
     ROOT_GUEST_PROFILE, STRICT_GUEST_PROFILE,
 };
 pub use identity::{
-    ContainerId, NetworkId, SandboxId, SnapshotId, SubjectId, TenantId, WorkerId, WorkspaceId,
+    ContainerId, NetworkId, SandboxId, SnapshotId, SubjectId, TenantId, VolumeId, WorkerId,
+    WorkspaceId,
 };
 pub use lifecycle::{Lifecycle, LifecycleState};
 pub use snapshot::{
@@ -27,6 +29,10 @@ pub use snapshot::{
 };
 pub use specification::{
     ContainerDependency, ContainerImage, ContainerSpec, NetworkSpec, ResourceSpec, SandboxSpec,
+};
+pub use volume::{
+    VolumePersistenceClass, VolumeSnapshotDescriptor, VolumeSnapshotPolicy, VolumeSpec,
+    MINIMUM_NAMED_VOLUME_BYTES, VOLUME_SPEC_VERSION,
 };
 pub use work_order::{
     ResourceCeilings, SignedWorkOrder, WorkOrderClaims, WorkOrderOperation,

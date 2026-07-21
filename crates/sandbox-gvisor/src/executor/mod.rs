@@ -21,10 +21,15 @@ use crate::{
 use cgroup::{CgroupMetrics, CgroupSet};
 use network::ProjectNetwork;
 use process::{Runsc, ServiceProcess};
-use runtrue_sandbox_core::{GuestProfile, GuestProfileIdentity, SnapshotId, SnapshotMode};
+use runtrue_sandbox_core::{
+    ContainerId, GuestProfile, GuestProfileIdentity, SandboxId, SnapshotId, SnapshotMode, VolumeId,
+};
 use runtrue_sandbox_oci::{
     provider::{ImageProvider, WritableRootfs, WritableRootfsIdentity},
     RootFilesystemMode,
+};
+use runtrue_sandbox_volume::{
+    AttachmentOwner, MountedVolume, VolumeHandle, VolumeProvider, VolumeScope, VolumeSnapshot,
 };
 use serde::Serialize;
 use std::{
@@ -121,6 +126,8 @@ struct Resources {
     processes: BTreeMap<String, ServiceProcess>,
     rootfs_provider: Arc<dyn ImageProvider>,
     service_rootfs: BTreeMap<String, ServiceRootfs>,
+    volume_provider: Arc<dyn VolumeProvider>,
+    service_volumes: BTreeMap<String, Vec<MountedVolume>>,
 }
 
 struct ServiceRootfs {
@@ -137,6 +144,8 @@ struct ExecutionOutput {
     truncated: bool,
 }
 
+type RestoredVolumes = BTreeMap<VolumeId, (VolumeSnapshot, PathBuf)>;
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_admitted(
     lock: &TopologyLock,
@@ -149,6 +158,8 @@ pub fn run_admitted(
     nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
+    volume_scope: &VolumeScope,
+    volume_provider: Arc<dyn VolumeProvider>,
 ) -> Result<GvisorRunResult, SandboxError> {
     let overall_started = Instant::now();
     verify_lock(lock)?;
@@ -171,6 +182,8 @@ pub fn run_admitted(
         nft_program,
         admitted,
         rootfs_provider,
+        volume_scope,
+        volume_provider,
         preflight_ms,
         overall_started,
     )
@@ -188,6 +201,8 @@ fn run_admitted_inner(
     nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
+    volume_scope: &VolumeScope,
+    volume_provider: Arc<dyn VolumeProvider>,
     preflight_ms: u128,
     overall_started: Instant,
 ) -> Result<GvisorRunResult, SandboxError> {
@@ -201,6 +216,9 @@ fn run_admitted_inner(
         nft_program,
         admitted,
         rootfs_provider,
+        volume_scope,
+        volume_provider,
+        None,
         None,
     )?;
     let infrastructure_ms = infrastructure_started.elapsed().as_millis();
@@ -255,6 +273,8 @@ pub fn start_admitted(
     nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
+    volume_scope: &VolumeScope,
+    volume_provider: Arc<dyn VolumeProvider>,
 ) -> Result<GvisorSandbox, SandboxError> {
     verify_lock(lock)?;
     validate_project(project)?;
@@ -268,6 +288,9 @@ pub fn start_admitted(
         nft_program,
         admitted,
         rootfs_provider,
+        volume_scope,
+        volume_provider,
+        None,
         None,
     )?;
     let deadline = Instant::now() + timeout;
@@ -324,7 +347,10 @@ fn create_resources(
     nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
+    volume_scope: &VolumeScope,
+    volume_provider: Arc<dyn VolumeProvider>,
     writable_diffs: Option<&BTreeMap<String, PathBuf>>,
+    volume_snapshots: Option<&RestoredVolumes>,
 ) -> Result<Resources, SandboxError> {
     let state = prepare_state(state_root, project)?;
     if let Err(error) = recovery::write_recovery_record(&state, project, lock) {
@@ -366,12 +392,22 @@ fn create_resources(
         processes: BTreeMap::new(),
         rootfs_provider,
         service_rootfs: BTreeMap::new(),
+        volume_provider,
+        service_volumes: BTreeMap::new(),
     };
     if let Err(error) = resources.prepare_service_rootfs(lock, project, admitted, writable_diffs) {
         return match resources.cleanup() {
             Ok(_) => Err(error),
             Err(cleanup_error) => Err(SandboxError::Runtime(format!(
                 "prepare writable roots failed: {error}; cleanup failed: {cleanup_error}"
+            ))),
+        };
+    }
+    if let Err(error) = resources.prepare_volumes(lock, project, volume_scope, volume_snapshots) {
+        return match resources.cleanup() {
+            Ok(_) => Err(error),
+            Err(cleanup_error) => Err(SandboxError::Runtime(format!(
+                "prepare volumes failed: {error}; cleanup failed: {cleanup_error}"
             ))),
         };
     }
@@ -493,6 +529,7 @@ fn start_services(
             sandbox_network.http_proxy.as_deref(),
             sandbox_network.no_proxy.as_deref(),
             lock.policy.tmpfs_bytes,
+            &resources.service_volumes[service_name],
             role,
         )?;
         let process = resources.runsc.spawn(
@@ -567,6 +604,89 @@ fn reviewed_guest_profile(lock: &TopologyLock) -> Result<GuestProfile, SandboxEr
 }
 
 impl Resources {
+    fn prepare_volumes(
+        &mut self,
+        lock: &TopologyLock,
+        project: &str,
+        scope: &VolumeScope,
+        snapshots: Option<&RestoredVolumes>,
+    ) -> Result<(), SandboxError> {
+        let sandbox_id = SandboxId::parse(project.to_owned())
+            .map_err(|error| SandboxError::Runtime(error.to_string()))?;
+        let mut handles = BTreeMap::<VolumeId, VolumeHandle>::new();
+        let expected_snapshots = lock
+            .services
+            .values()
+            .flat_map(|service| service.volumes.iter())
+            .filter(|volume| {
+                matches!(
+                    volume.persistence_class,
+                    runtrue_sandbox_core::VolumePersistenceClass::Ephemeral
+                        | runtrue_sandbox_core::VolumePersistenceClass::Persistent
+                ) && volume.snapshot_policy != runtrue_sandbox_core::VolumeSnapshotPolicy::Excluded
+            })
+            .map(|volume| &volume.volume_id)
+            .collect::<BTreeSet<_>>();
+        if let Some(snapshots) = snapshots {
+            if snapshots.keys().collect::<BTreeSet<_>>() != expected_snapshots {
+                return Err(SandboxError::Runtime(
+                    "volume snapshot objects do not match the restore topology".to_owned(),
+                ));
+            }
+        }
+        for service_name in &lock.startup_order {
+            let container_id = ContainerId::parse(service_name.clone())
+                .map_err(|error| SandboxError::Runtime(error.to_string()))?;
+            let mut mounted = Vec::new();
+            for specification in &lock.services[service_name].volumes {
+                let handle = match handles.get(&specification.volume_id) {
+                    Some(handle) => handle.clone(),
+                    None => {
+                        let handle = match snapshots
+                            .and_then(|snapshots| snapshots.get(&specification.volume_id))
+                        {
+                            Some((snapshot, path)) => self
+                                .volume_provider
+                                .restore(scope, specification, snapshot, path)
+                                .map_err(volume_error)?,
+                            None => self
+                                .volume_provider
+                                .create(scope, specification)
+                                .map_err(volume_error)?,
+                        };
+                        handles.insert(specification.volume_id.clone(), handle.clone());
+                        handle
+                    }
+                };
+                let attachment = self
+                    .volume_provider
+                    .attach(
+                        &handle,
+                        AttachmentOwner {
+                            sandbox_id: sandbox_id.clone(),
+                            container_id: container_id.clone(),
+                        },
+                        specification,
+                    )
+                    .map_err(volume_error)?;
+                match self.volume_provider.mount(&attachment) {
+                    Ok(volume) => mounted.push(volume),
+                    Err(error) => {
+                        let cleanup = self.volume_provider.detach(&attachment);
+                        return match cleanup {
+                            Ok(()) => Err(volume_error(error)),
+                            Err(cleanup_error) => Err(SandboxError::Runtime(format!(
+                                "mount volume failed: {error}; detach failed: {cleanup_error}"
+                            ))),
+                        };
+                    }
+                }
+            }
+            self.service_volumes.insert(service_name.clone(), mounted);
+        }
+        Ok(())
+    }
+
     fn prepare_service_rootfs(
         &mut self,
         lock: &TopologyLock,
@@ -643,6 +763,13 @@ impl Resources {
             process.reap();
         }
         self.processes.clear();
+        for (_, volumes) in std::mem::take(&mut self.service_volumes) {
+            for volume in volumes {
+                if let Err(error) = self.volume_provider.unmount(&volume) {
+                    first_error.get_or_insert_with(|| volume_error(error));
+                }
+            }
+        }
         for (_, rootfs) in std::mem::take(&mut self.service_rootfs) {
             if let Some(writable) = rootfs.writable {
                 if let Err(error) = self.rootfs_provider.release_writable_rootfs(&writable) {
@@ -676,6 +803,10 @@ impl Resources {
             None => Ok(metrics),
         }
     }
+}
+
+fn volume_error(error: runtrue_sandbox_volume::VolumeError) -> SandboxError {
+    SandboxError::Runtime(format!("volume provider: {error}"))
 }
 
 impl GvisorSandbox {
