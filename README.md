@@ -22,7 +22,7 @@ restore.
   read-only content-addressed artifact mounts, and tmpfs-backed secret mounts;
 - versioned, operator-enabled guest compatibility profiles;
 - one gVisor Sentry containing a root sandbox and child containers;
-- private sandbox networking with service-name resolution;
+- private sandbox networking plus explicit DNS, egress, and authenticated ingress profiles;
 - create, inspect, logs, pause, resume, stop, and crash recovery;
 - cgroup-backed host resource containment and bounded output capture;
 - tenant/workspace-scoped ownership with durable assignment fencing;
@@ -100,7 +100,8 @@ independent guest CPU or memory guarantees.
 - raw host bind mounts and uninstalled external/CSI providers are unsupported;
 - writable-root snapshots reject hard links and non-overlay extended
   attributes until those representations have a portable contract;
-- outbound networking and external DNS are disabled;
+- external networking remains disabled unless the topology lock carries an explicit
+  sandbox-wide `http_connect` or operator-approved `restricted_tcp` profile;
 - Compose port publishing, privileged containers, ambient capabilities, and
   host namespace access are rejected;
 - OCI registry trust, availability, and credential distribution remain operator
@@ -139,7 +140,7 @@ Detailed documentation covers [architecture and isolation](docs/architecture.md)
 - containerd 2.2.2 with the overlayfs snapshotter and `ctr` client;
 - util-linux `losetup` and `fsfreeze`, e2fsprogs `mkfs.ext4`, GNU `cp`, and
   available loop devices;
-- iproute2; and
+- iproute2 and nftables; and
 - outbound HTTPS access to the OCI registries used during preparation.
 
 The worker requires root for cgroup and network namespace management.

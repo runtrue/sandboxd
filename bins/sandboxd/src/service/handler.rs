@@ -121,6 +121,7 @@ fn run(
         &daemon.state_root,
         &daemon.runsc,
         &daemon.ip,
+        &daemon.nft,
         &admitted,
         std::sync::Arc::clone(&daemon.image_provider),
         &key.scope.volume_scope(),
@@ -174,6 +175,7 @@ fn create(
         &daemon.state_root,
         &daemon.runsc,
         &daemon.ip,
+        &daemon.nft,
         &admitted,
         std::sync::Arc::clone(&daemon.image_provider),
         &key.scope.volume_scope(),
@@ -190,6 +192,10 @@ fn create(
         .assignments
         .mark(&key, epoch, AssignmentState::Active)
     {
+        drop(instance);
+        return Err(mark_failed(daemon, &key, epoch, error));
+    }
+    if let Err(error) = instance.activate_ingress() {
         drop(instance);
         return Err(mark_failed(daemon, &key, epoch, error));
     }
@@ -252,6 +258,7 @@ fn restore(
         &restore_target,
         &daemon.runsc,
         &daemon.ip,
+        &daemon.nft,
         &admitted,
         std::sync::Arc::clone(&daemon.image_provider),
         &key.scope.volume_scope(),
@@ -268,6 +275,10 @@ fn restore(
         .assignments
         .mark(&key, epoch, AssignmentState::Active)
     {
+        drop(instance);
+        return Err(mark_failed(daemon, &key, epoch, error));
+    }
+    if let Err(error) = instance.activate_ingress() {
         drop(instance);
         return Err(mark_failed(daemon, &key, epoch, error));
     }
@@ -366,9 +377,11 @@ fn snapshot(
     let mut source_fence_millis = 0;
     if stop_and_move {
         let fence_started = Instant::now();
-        daemon
-            .assignments
-            .begin_fencing(&key, epoch, &snapshot_id)?;
+        instance.fence_ingress()?;
+        if let Err(error) = daemon.assignments.begin_fencing(&key, epoch, &snapshot_id) {
+            instance.activate_ingress()?;
+            return Err(error);
+        }
         source_fence_millis = fence_started.elapsed().as_millis();
     }
     let result = instance.snapshot(
@@ -390,6 +403,7 @@ fn snapshot(
             daemon
                 .assignments
                 .mark(&key, epoch, AssignmentState::Active)?;
+            instance.activate_ingress()?;
             return Err(error);
         }
         Err(error) if stop_and_move => {

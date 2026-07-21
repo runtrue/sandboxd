@@ -3,9 +3,11 @@ mod cgroup;
 mod checkpoint;
 mod network;
 mod process;
+mod proxy;
 mod recovery;
 
 pub use checkpoint::restore_admitted;
+pub use proxy::IngressEndpoint;
 pub use recovery::{recover, RecoveryReport};
 pub use runtrue_sandbox_oci::provider::ImmutableRootfs;
 
@@ -80,6 +82,7 @@ pub struct GvisorSandboxStatus {
     pub running_services: usize,
     pub paused_services: usize,
     pub stopped_services: usize,
+    pub ingress_endpoints: Vec<IngressEndpoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_restore: Option<SnapshotRestoreMetrics>,
 }
@@ -152,6 +155,7 @@ pub fn run_admitted(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
+    nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
@@ -175,6 +179,7 @@ pub fn run_admitted(
         state_root,
         runsc_program,
         ip_program,
+        nft_program,
         admitted,
         rootfs_provider,
         volume_scope,
@@ -193,6 +198,7 @@ fn run_admitted_inner(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
+    nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
@@ -207,6 +213,7 @@ fn run_admitted_inner(
         state_root,
         runsc_program,
         ip_program,
+        nft_program,
         admitted,
         rootfs_provider,
         volume_scope,
@@ -263,6 +270,7 @@ pub fn start_admitted(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
+    nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
@@ -277,6 +285,7 @@ pub fn start_admitted(
         state_root,
         runsc_program,
         ip_program,
+        nft_program,
         admitted,
         rootfs_provider,
         volume_scope,
@@ -335,6 +344,7 @@ fn create_resources(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
+    nft_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
@@ -354,7 +364,7 @@ fn create_resources(
             return Err(error);
         }
     };
-    let network = match ProjectNetwork::create(ip_program, project, lock, &state) {
+    let network = match ProjectNetwork::create(ip_program, nft_program, project, lock, &state) {
         Ok(network) => network,
         Err(error) => {
             let _ = cgroups.cleanup();
@@ -516,6 +526,8 @@ fn start_services(
             &sandbox_network.namespace,
             &sandbox_network.hosts_path,
             &sandbox_network.resolv_path,
+            sandbox_network.http_proxy.as_deref(),
+            sandbox_network.no_proxy.as_deref(),
             lock.policy.tmpfs_bytes,
             &resources.service_volumes[service_name],
             role,
@@ -833,6 +845,11 @@ impl GvisorSandbox {
             running_services,
             paused_services,
             stopped_services,
+            ingress_endpoints: self
+                .resources
+                .as_ref()
+                .and_then(|resources| resources.network.as_ref())
+                .map_or_else(Vec::new, |network| network.ingress_endpoints().to_vec()),
             snapshot_restore: self.snapshot_restore.clone(),
         })
     }
@@ -858,7 +875,15 @@ impl GvisorSandbox {
                 "sandbox root is not running".to_owned(),
             ));
         }
-        resources.runsc.pause(&resources.sandbox_runtime_id)?;
+        if let Some(network) = &resources.network {
+            network.set_ingress_active(false);
+        }
+        if let Err(error) = resources.runsc.pause(&resources.sandbox_runtime_id) {
+            if let Some(network) = &resources.network {
+                network.set_ingress_active(true);
+            }
+            return Err(error);
+        }
         self.paused_runtime_ids
             .insert(resources.sandbox_runtime_id.clone());
         self.state = GvisorSandboxState::Paused;
@@ -875,6 +900,9 @@ impl GvisorSandbox {
             SandboxError::Runtime("paused sandbox has no runtime resources".to_owned())
         })?;
         resources.runsc.resume(&resources.sandbox_runtime_id)?;
+        if let Some(network) = &resources.network {
+            network.set_ingress_active(true);
+        }
         self.paused_runtime_ids.clear();
         self.state = GvisorSandboxState::Running;
         self.status()
@@ -889,10 +917,36 @@ impl GvisorSandbox {
         let mut resources = self.resources.take().ok_or_else(|| {
             SandboxError::Runtime("active sandbox has no runtime resources".to_owned())
         })?;
+        if let Some(network) = &resources.network {
+            network.set_ingress_active(false);
+        }
         resources.cleanup()?;
         self.paused_runtime_ids.clear();
         self.state = GvisorSandboxState::Stopped;
         self.status()
+    }
+
+    pub fn fence_ingress(&self) -> Result<(), SandboxError> {
+        let resources = self.resources.as_ref().ok_or_else(|| {
+            SandboxError::Runtime("active sandbox has no runtime resources".to_owned())
+        })?;
+        if let Some(network) = &resources.network {
+            network.set_ingress_active(false);
+        }
+        Ok(())
+    }
+
+    pub fn activate_ingress(&self) -> Result<(), SandboxError> {
+        if self.state != GvisorSandboxState::Running {
+            return Ok(());
+        }
+        let resources = self.resources.as_ref().ok_or_else(|| {
+            SandboxError::Runtime("active sandbox has no runtime resources".to_owned())
+        })?;
+        if let Some(network) = &resources.network {
+            network.set_ingress_active(true);
+        }
+        Ok(())
     }
 
     pub fn snapshot(

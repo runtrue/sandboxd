@@ -51,6 +51,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
             image_store,
             runsc,
             ip,
+            nft,
         } => {
             let provider = provider(&provider_options, image_store)?;
             run(
@@ -62,6 +63,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 state_root,
                 runsc,
                 ip,
+                nft,
             )
         }
     }
@@ -165,6 +167,7 @@ fn run(
     state_root: std::path::PathBuf,
     runsc: PathBuf,
     ip: PathBuf,
+    nft: PathBuf,
 ) -> Result<(), SandboxError> {
     if timeout_seconds == 0 || timeout_seconds > 300 {
         return Err(SandboxError::Lock(
@@ -191,6 +194,7 @@ fn run(
         &state_root,
         &runsc,
         &ip,
+        &nft,
         &admitted,
         Arc::clone(&provider),
         &runtrue_sandbox_volume::VolumeScope::new(

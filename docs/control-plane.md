@@ -18,6 +18,15 @@ work order. A single configured broker UID may deliver it over the local
 workload socket. The broker may receive already-signed orders and does not need
 access to the signing key.
 
+Network permissions are part of that decision. The signed operation digest
+covers the complete topology lock, including its sandbox-wide network profile,
+domain/CIDR rules, limits, and ingress declarations. In particular,
+`restricted_tcp` is an operator grant rather than a tenant-controlled Compose
+escape hatch. The worker returns server-allocated ingress endpoints only after
+the assignment is active; the tenant-facing control plane is responsible for
+delivering those endpoint credentials to the owning principal without logging
+or cross-tenant caching them.
+
 The root-only operator socket is a separate recovery and development path. It
 is not an authorization boundary between tenants: the operator is trusted to
 select any local tenant/workspace scope.

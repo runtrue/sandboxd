@@ -325,7 +325,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         let topology = TopologyLock {
-            schema_version: 5,
+            schema_version: 6,
             topology_digest: format!("sha256:{}", "a".repeat(64)),
             name: "example".to_owned(),
             services: BTreeMap::from([(
@@ -392,6 +392,7 @@ mod tests {
                 tmpfs_bytes: 1024,
                 writable_root_bytes_per_service: 1024,
                 maximum_output_bytes: 1024,
+                network: Default::default(),
             },
         };
         let mut profile_topology = topology.clone();

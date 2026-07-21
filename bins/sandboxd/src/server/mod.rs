@@ -71,7 +71,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
     let artifact_root = config.state_root.join("artifacts");
     let snapshot_staging_root = config.state_root.join("snapshot-staging");
     let control_root = config.state_root.join("control");
-    let recovery = executor::recover(&sandbox_root, &config.runsc, &config.ip)?;
+    let recovery = executor::recover(&sandbox_root, &config.runsc, &config.ip, &config.nft)?;
     let assignments = AssignmentLedger::open(&control_root)?;
     assignments.reconcile_after_recovery()?;
     let audit = AuditLog::open(&control_root)?;
@@ -186,6 +186,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         volume_provider,
         runsc: config.runsc,
         ip: config.ip,
+        nft: config.nft,
         assignments,
         audit,
         work_orders,

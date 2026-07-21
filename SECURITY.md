@@ -47,6 +47,16 @@ registries and their transport remain outside the worker
 boundary, so every admitted descriptor and blob is verified against the locked
 digest and size.
 
+External guest networking is default-deny. A signed operation digest approves
+the exact sandbox-wide DNS, egress, and ingress policy in the topology lock.
+Host nftables state prevents a guest from bypassing the tenant-scoped resolver
+or policy proxy, and recovery records bind the nftables table, bridge, namespace,
+and runtime identities together for crash cleanup. HTTP egress never accepts IP
+literals or protected address resolutions. Restricted TCP CIDRs are a stronger
+operator grant and must not be issued from untrusted tenant input without an
+independent policy decision. Ingress credentials are secrets and status output
+containing them must remain within the owning tenant/workspace scope.
+
 Snapshot objects are tenant/workspace-scoped, content-addressed, encrypted with
 tenant-derived envelope keys, and published before their immutable manifest
 reference. Stop-and-move records a durable local fence before checkpointing,

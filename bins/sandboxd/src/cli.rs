@@ -166,4 +166,6 @@ pub(crate) struct ServeArgs {
     pub(crate) runsc: PathBuf,
     #[arg(long, default_value = "/usr/sbin/ip")]
     pub(crate) ip: PathBuf,
+    #[arg(long, default_value = "/usr/sbin/nft")]
+    pub(crate) nft: PathBuf,
 }

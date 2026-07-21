@@ -45,6 +45,7 @@ pub(crate) struct DaemonState {
     pub(crate) volume_provider: Arc<dyn VolumeProvider>,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
+    pub(crate) nft: PathBuf,
     pub(crate) assignments: AssignmentLedger,
     pub(crate) audit: AuditLog,
     pub(crate) work_orders: Option<WorkOrderVerifier>,

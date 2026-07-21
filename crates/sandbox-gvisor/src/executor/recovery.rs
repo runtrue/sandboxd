@@ -9,7 +9,7 @@ use std::{
     path::Path,
 };
 
-const RECOVERY_SCHEMA_VERSION: u32 = 3;
+const RECOVERY_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +21,8 @@ struct RecoveryRecord {
     sandbox_runtime_id: String,
     bridge: String,
     network_namespaces: Vec<String>,
+    #[serde(default)]
+    nft_table: String,
     #[serde(default)]
     writable_rootfs: Vec<WritableRootfsRecovery>,
 }
@@ -43,6 +45,7 @@ pub fn recover(
     state_root: &Path,
     runsc_program: &Path,
     ip_program: &Path,
+    nft_program: &Path,
 ) -> Result<RecoveryReport, SandboxError> {
     if !state_root.exists() {
         return Ok(RecoveryReport {
@@ -76,7 +79,7 @@ pub fn recover(
         let bytes = fs::read(&record_path).map_err(|source| io_error(&record_path, source))?;
         let record: RecoveryRecord = serde_json::from_slice(&bytes)
             .map_err(|error| SandboxError::Runtime(format!("decode recovery record: {error}")))?;
-        if !matches!(record.schema_version, 2 | RECOVERY_SCHEMA_VERSION)
+        if !matches!(record.schema_version, 2 | 3 | RECOVERY_SCHEMA_VERSION)
             || state.file_name().and_then(|name| name.to_str()) != Some(&record.project)
         {
             return Err(SandboxError::Runtime(
@@ -95,7 +98,17 @@ pub fn recover(
             }
             runsc.teardown(&active_ids, &record.sandbox_runtime_id)?;
         }
-        network::recover(ip_program, &record.bridge, &record.network_namespaces)?;
+        network::recover(
+            ip_program,
+            nft_program,
+            &record.bridge,
+            &record.network_namespaces,
+            &if record.nft_table.is_empty() {
+                network::nft_table_name(&record.project)
+            } else {
+                record.nft_table.clone()
+            },
+        )?;
         cgroup::recover_project(&record.project)?;
         fs::remove_dir_all(&state).map_err(|source| io_error(&state, source))?;
         recovered_projects.push(record.project);
@@ -108,7 +121,7 @@ pub(super) fn write_recovery_record(
     project: &str,
     lock: &TopologyLock,
 ) -> Result<(), SandboxError> {
-    let (bridge, network_namespaces) = network::planned_resources(project, lock);
+    let (bridge, network_namespaces, nft_table) = network::planned_resources(project, lock);
     let record = RecoveryRecord {
         schema_version: RECOVERY_SCHEMA_VERSION,
         project: project.to_owned(),
@@ -121,6 +134,7 @@ pub(super) fn write_recovery_record(
         sandbox_runtime_id: runtime_id(project, &lock.startup_order[0]),
         bridge,
         network_namespaces,
+        nft_table,
         writable_rootfs: Vec::new(),
     };
     let path = state.join("recovery.json");
@@ -178,6 +192,9 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError>
         || !record.topology_digest.starts_with("sha256:")
         || record.topology_digest.len() != 71
         || (record.schema_version == 2 && !record.writable_rootfs.is_empty())
+        || (record.schema_version >= RECOVERY_SCHEMA_VERSION
+            && record.nft_table != network::nft_table_name(&record.project))
+        || (record.schema_version < RECOVERY_SCHEMA_VERSION && !record.nft_table.is_empty())
     {
         return Err(SandboxError::Runtime(
             "recovery record resource set is invalid".to_owned(),
@@ -247,6 +264,7 @@ mod tests {
             sandbox_runtime_id: "rts-tenant-a-api_worker".to_owned(),
             bridge: network::bridge_name("tenant-a"),
             network_namespaces: vec![network::namespace_name("tenant-a")],
+            nft_table: network::nft_table_name("tenant-a"),
             writable_rootfs: Vec::new(),
         }
     }

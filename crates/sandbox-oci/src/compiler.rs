@@ -312,6 +312,7 @@ where
     }
     let policy = SandboxPolicy {
         guest_profile,
+        network: input.network_policy,
         ..SandboxPolicy::default()
     };
     let mut lock = TopologyLock {
@@ -324,6 +325,10 @@ where
         startup_order,
         policy,
     };
+    lock.policy
+        .network
+        .validate(&lock.services)
+        .map_err(SandboxError::Compose)?;
     lock.topology_digest = digest(&lock.digest_input())?;
     Ok(lock)
 }
@@ -342,6 +347,10 @@ pub fn verify_lock(lock: &TopologyLock) -> Result<(), SandboxError> {
             lock.topology_digest
         )));
     }
+    lock.policy
+        .network
+        .validate(&lock.services)
+        .map_err(SandboxError::Lock)?;
     Ok(())
 }
 
@@ -669,5 +678,62 @@ services:
             compile(cycle, |reference| Ok(image(reference))),
             Err(SandboxError::Compose(_))
         ));
+    }
+
+    #[test]
+    fn compiles_sandbox_wide_network_policy_into_digest() {
+        let input: ComposeInput = serde_yaml::from_str(
+            r#"
+name: x
+x-runtrue-network:
+  profile: http_connect
+  http_rules:
+    - domains: [api.example.com, "*.services.example"]
+      schemes: [https]
+      ports: [443]
+  ingress:
+    - service: app
+      container_port: 8080
+services:
+  app:
+    image: x
+"#,
+        )
+        .expect("networked Compose");
+        let lock = compile(input, |reference| Ok(image(reference))).expect("networked lock");
+        assert_eq!(
+            lock.policy.network.profile,
+            crate::NetworkProfile::HttpConnect
+        );
+        assert!(lock.policy.network.permits_http(
+            "v1.services.example",
+            crate::HttpScheme::Https,
+            443
+        ));
+        assert_eq!(lock.policy.network.ingress[0].service, "app");
+        verify_lock(&lock).expect("verified lock");
+
+        let default_input: ComposeInput =
+            serde_yaml::from_str("name: x\nservices:\n  app:\n    image: x\n")
+                .expect("default Compose");
+        let default_lock =
+            compile(default_input, |reference| Ok(image(reference))).expect("default lock");
+        assert_ne!(lock.topology_digest, default_lock.topology_digest);
+    }
+
+    #[test]
+    fn rejects_profile_rule_mismatches_and_caller_selected_ingress_bindings() {
+        let mismatched: ComposeInput = serde_yaml::from_str(
+            "name: x\nx-runtrue-network:\n  profile: none\n  tcp_rules:\n    - destination_cidr: 8.8.8.0/24\n      ports: [443]\nservices:\n  app:\n    image: x\n",
+        )
+        .expect("decodable policy");
+        assert!(matches!(
+            compile(mismatched, |reference| Ok(image(reference))),
+            Err(SandboxError::Compose(_))
+        ));
+        assert!(serde_yaml::from_str::<ComposeInput>(
+            "name: x\nx-runtrue-network:\n  ingress:\n    - service: app\n      container_port: 8080\n      host_port: 80\nservices:\n  app:\n    image: x\n"
+        )
+        .is_err());
     }
 }
