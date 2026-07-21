@@ -1,46 +1,54 @@
 use crate::{io_error, SandboxError};
-use runtrue_sandbox_core::{SnapshotId, SnapshotMode};
+use runtrue_sandbox_artifact::{
+    ArtifactScope, ArtifactStore, MaterializedSnapshot, SnapshotPublication, StagedSnapshotObject,
+};
+use runtrue_sandbox_core::{
+    ArtifactRole, AssignmentEpoch, BackendDescriptor, BackendKind, ContainerId, LifecycleState,
+    RestoreRequirements, SandboxId, SnapshotId, SnapshotManifest, SnapshotMode,
+    SnapshotPortability, TenantId, WorkerId, WorkspaceId, SNAPSHOT_MANIFEST_VERSION,
+};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{Read as _, Write as _},
+    io::Write as _,
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const LOCAL_SNAPSHOT_VERSION: u32 = 2;
-const MANIFEST_NAME: &str = "snapshot.json";
+const METADATA_VERSION: u32 = 1;
+const CHECKPOINT_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.checkpoint";
+const METADATA_MEDIA_TYPE: &str = "application/vnd.runtrue.gvisor.metadata.v1+json";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LocalSnapshotManifest {
-    pub schema_version: u32,
-    pub snapshot_id: SnapshotId,
-    pub source_sandbox: String,
-    pub topology_digest: String,
-    pub mode: SnapshotMode,
-    pub created_unix_millis: u64,
-    pub architecture: String,
-    pub operating_system: String,
-    pub runsc_version: String,
-    pub runtime_configuration_digest: String,
-    pub cpu_features_digest: String,
-    pub root_service: String,
-    pub services: Vec<String>,
-    pub service_states: BTreeMap<String, String>,
-    pub files: Vec<SnapshotFile>,
+#[derive(Debug, Clone)]
+pub struct SnapshotProvenance {
+    pub tenant_id: TenantId,
+    pub workspace_id: WorkspaceId,
+    pub sandbox_id: SandboxId,
+    pub source_worker: WorkerId,
+    pub source_assignment_epoch: AssignmentEpoch,
+}
+
+impl SnapshotProvenance {
+    pub fn scope(&self) -> ArtifactScope {
+        ArtifactScope::new(self.tenant_id.clone(), self.workspace_id.clone())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SnapshotFile {
-    pub name: String,
-    pub digest: String,
-    pub size_bytes: u64,
-    pub media_type: String,
+pub(super) struct GvisorSnapshotMetadata {
+    pub(super) schema_version: u32,
+    pub(super) topology_digest: String,
+    pub(super) mode: SnapshotMode,
+    pub(super) created_unix_millis: u64,
+    pub(super) runsc_version: String,
+    pub(super) runtime_configuration_digest: String,
+    pub(super) cpu_features_digest: String,
+    pub(super) root_service: String,
+    pub(super) services: Vec<String>,
+    pub(super) service_states: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,336 +59,450 @@ pub struct SnapshotSummary {
     pub mode: SnapshotMode,
     pub files: usize,
     pub size_bytes: u64,
+    pub transferred_bytes: u64,
+    pub reused_objects: usize,
+    pub publish_millis: u128,
     pub runtime_configuration_digest: String,
 }
 
 pub(super) struct SnapshotStaging {
-    snapshot_id: SnapshotId,
-    root: PathBuf,
-    staging: PathBuf,
-    final_path: PathBuf,
+    temporary: tempfile::TempDir,
+    image_path: PathBuf,
 }
 
 impl SnapshotStaging {
-    pub(super) fn create(root: &Path, snapshot_id: SnapshotId) -> Result<Self, SandboxError> {
-        if !root.is_absolute() {
+    pub(super) fn create(parent: &Path) -> Result<Self, SandboxError> {
+        if !parent.is_absolute() {
             return Err(SandboxError::Runtime(
-                "snapshot root must be absolute".to_owned(),
+                "snapshot staging root must be absolute".to_owned(),
             ));
         }
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(root)
-            .map_err(|source| io_error(root, source))?;
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700))
-            .map_err(|source| io_error(root, source))?;
-        let root = fs::canonicalize(root).map_err(|source| io_error(root, source))?;
-        let final_path = root.join(snapshot_id.as_str());
-        if final_path.exists() {
+            .create(parent)
+            .map_err(|error| io_error(parent, error))?;
+        let temporary = tempfile::Builder::new()
+            .prefix("checkpoint-")
+            .tempdir_in(parent)
+            .map_err(|error| io_error(parent, error))?;
+        let image_path = temporary.path().join("runtime");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&image_path)
+            .map_err(|error| io_error(&image_path, error))?;
+        Ok(Self {
+            temporary,
+            image_path,
+        })
+    }
+
+    pub(super) fn image_path(&self) -> &Path {
+        &self.image_path
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn publication(
+        &self,
+        snapshot_id: SnapshotId,
+        provenance: &SnapshotProvenance,
+        topology_digest: String,
+        mode: SnapshotMode,
+        captured_from: LifecycleState,
+        runsc_version: String,
+        runtime_configuration_digest: String,
+        cpu_features_digest: String,
+        root_service: String,
+        services: Vec<String>,
+        service_states: BTreeMap<String, String>,
+    ) -> Result<(SnapshotPublication, GvisorSnapshotMetadata), SandboxError> {
+        let created_unix_millis = unix_millis()?;
+        let metadata = GvisorSnapshotMetadata {
+            schema_version: METADATA_VERSION,
+            topology_digest: topology_digest.clone(),
+            mode,
+            created_unix_millis,
+            runsc_version: runsc_version.clone(),
+            runtime_configuration_digest: runtime_configuration_digest.clone(),
+            cpu_features_digest: cpu_features_digest.clone(),
+            root_service,
+            services,
+            service_states,
+        };
+        validate_metadata(&metadata)?;
+        let mut objects = checkpoint_objects(&self.image_path)?;
+        for service in &metadata.services {
+            let container = ContainerId::parse(service.clone())
+                .map_err(|error| SandboxError::Runtime(error.to_string()))?;
+            let name = format!("rtmeta-{service}.json");
+            let path = self.temporary.path().join(&name);
+            write_json(&path, &metadata)?;
+            objects.push(StagedSnapshotObject {
+                role: ArtifactRole::BackendMetadata,
+                container: Some(container),
+                name,
+                path,
+                media_type: METADATA_MEDIA_TYPE.to_owned(),
+            });
+        }
+        let manifest = SnapshotManifest {
+            schema_version: SNAPSHOT_MANIFEST_VERSION,
+            snapshot_id,
+            tenant_id: provenance.tenant_id.clone(),
+            workspace_id: provenance.workspace_id.clone(),
+            sandbox_id: provenance.sandbox_id.clone(),
+            sandbox_spec_digest: topology_digest,
+            source_worker: provenance.source_worker.clone(),
+            source_assignment_epoch: provenance.source_assignment_epoch.get(),
+            created_unix_millis,
+            captured_from,
+            restore_state: captured_from,
+            mode,
+            backend: BackendDescriptor {
+                kind: BackendKind::Gvisor,
+                implementation: "runsc".to_owned(),
+                implementation_version: runsc_version.clone(),
+                state_format_version: 1,
+                configuration_digest: runtime_configuration_digest,
+            },
+            restore_requirements: RestoreRequirements {
+                architecture: std::env::consts::ARCH.to_owned(),
+                operating_system: std::env::consts::OS.to_owned(),
+                minimum_backend_version: runsc_version,
+                portability: SnapshotPortability::CrossWorkerSameBackend,
+                required_cpu_features: Vec::new(),
+                cpu_features_digest,
+                preserves_internal_connections: true,
+            },
+            containers: BTreeMap::new(),
+            sandbox_objects: Vec::new(),
+        };
+        Ok((
+            SnapshotPublication {
+                scope: provenance.scope(),
+                manifest,
+                objects,
+            },
+            metadata,
+        ))
+    }
+}
+
+pub(super) struct RestoredSnapshot {
+    _temporary: tempfile::TempDir,
+    pub(super) manifest: SnapshotManifest,
+    pub(super) metadata: GvisorSnapshotMetadata,
+    pub(super) image_path: PathBuf,
+    pub(super) transferred_bytes: u64,
+    pub(super) materialization_millis: u128,
+}
+
+impl Drop for RestoredSnapshot {
+    fn drop(&mut self) {
+        let _ = make_cleanup_writable(self._temporary.path());
+    }
+}
+
+pub(super) fn materialize(
+    store: &dyn ArtifactStore,
+    scope: &ArtifactScope,
+    snapshot_id: &SnapshotId,
+    staging_root: &Path,
+) -> Result<RestoredSnapshot, SandboxError> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(staging_root)
+        .map_err(|error| io_error(staging_root, error))?;
+    let temporary = tempfile::Builder::new()
+        .prefix("restore-")
+        .tempdir_in(staging_root)
+        .map_err(|error| io_error(staging_root, error))?;
+    let materialized_path = temporary.path().join("materialized");
+    let materialized = store
+        .materialize(scope, snapshot_id, &materialized_path)
+        .map_err(artifact_error)?;
+    let transferred_bytes = materialized.transferred_bytes;
+    let materialization_millis = materialized.materialization_millis;
+    let metadata = load_metadata(&materialized)?;
+    let image_path = temporary.path().join("runtime");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&image_path)
+        .map_err(|error| io_error(&image_path, error))?;
+    for object in &materialized.manifest.sandbox_objects {
+        if !matches!(
+            object.role,
+            ArtifactRole::RuntimeState
+                | ArtifactRole::MemoryPages
+                | ArtifactRole::WritableFilesystem
+        ) {
+            continue;
+        }
+        let source = materialized_path.join(&object.name);
+        let destination = image_path.join(&object.name);
+        fs::hard_link(&source, &destination)
+            .or_else(|_| fs::copy(&source, &destination).map(|_| ()))
+            .map_err(|error| io_error(&destination, error))?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o400))
+            .map_err(|error| io_error(&destination, error))?;
+    }
+    if fs::read_dir(&image_path)
+        .map_err(|error| io_error(&image_path, error))?
+        .next()
+        .is_none()
+    {
+        return Err(SandboxError::Runtime(
+            "portable snapshot contains no gVisor runtime objects".to_owned(),
+        ));
+    }
+    fs::set_permissions(&image_path, fs::Permissions::from_mode(0o500))
+        .map_err(|error| io_error(&image_path, error))?;
+    Ok(RestoredSnapshot {
+        _temporary: temporary,
+        manifest: materialized.manifest,
+        metadata,
+        image_path,
+        transferred_bytes,
+        materialization_millis,
+    })
+}
+
+fn load_metadata(
+    materialized: &MaterializedSnapshot,
+) -> Result<GvisorSnapshotMetadata, SandboxError> {
+    if materialized.manifest.sandbox_objects.iter().any(|object| {
+        object.artifact.media_type != CHECKPOINT_MEDIA_TYPE
+            || !matches!(
+                object.role,
+                ArtifactRole::RuntimeState
+                    | ArtifactRole::MemoryPages
+                    | ArtifactRole::WritableFilesystem
+            )
+    }) {
+        return Err(SandboxError::Runtime(
+            "snapshot contains an invalid gVisor runtime object".to_owned(),
+        ));
+    }
+    let mut descriptor = None;
+    let mut name = None;
+    for (container, objects) in &materialized.manifest.containers {
+        if objects.len() != 1
+            || objects[0].role != ArtifactRole::BackendMetadata
+            || objects[0].artifact.media_type != METADATA_MEDIA_TYPE
+        {
             return Err(SandboxError::Runtime(format!(
-                "snapshot `{snapshot_id}` already exists"
+                "snapshot container `{container}` has invalid backend metadata"
             )));
         }
-        let staging = root.join(format!(
-            ".staging-{}-{}",
-            snapshot_id.as_str(),
-            std::process::id()
-        ));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&staging)
-            .map_err(|source| io_error(&staging, source))?;
-        Ok(Self {
-            snapshot_id,
-            root,
-            staging,
-            final_path,
-        })
-    }
-
-    pub(super) fn image_path(&self) -> Result<PathBuf, SandboxError> {
-        let path = self.staging.join("runtime");
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .map_err(|source| io_error(&path, source))?;
-        Ok(path)
-    }
-
-    pub(super) fn publish(
-        self,
-        mut manifest: LocalSnapshotManifest,
-    ) -> Result<SnapshotSummary, SandboxError> {
-        manifest.files = describe_files(&self.staging.join("runtime"))?;
-        if manifest.files.is_empty() {
-            return Err(SandboxError::Runtime(
-                "runsc checkpoint produced no files".to_owned(),
-            ));
-        }
-        let bytes = serde_json::to_vec_pretty(&manifest)
-            .map_err(|error| SandboxError::Runtime(format!("encode snapshot manifest: {error}")))?;
-        let manifest_path = self.staging.join(MANIFEST_NAME);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o400)
-            .open(&manifest_path)
-            .map_err(|source| io_error(&manifest_path, source))?;
-        file.write_all(&bytes)
-            .map_err(|source| io_error(&manifest_path, source))?;
-        file.sync_all()
-            .map_err(|source| io_error(&manifest_path, source))?;
-        make_read_only(&self.staging.join("runtime"))?;
-        fs::set_permissions(&self.staging, fs::Permissions::from_mode(0o500))
-            .map_err(|source| io_error(&self.staging, source))?;
-        fs::File::open(&self.staging)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| io_error(&self.staging, source))?;
-        fs::rename(&self.staging, &self.final_path)
-            .map_err(|source| io_error(&self.final_path, source))?;
-        fs::File::open(&self.root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| io_error(&self.root, source))?;
-        let size_bytes = manifest.files.iter().map(|file| file.size_bytes).sum();
-        Ok(SnapshotSummary {
-            snapshot_id: self.snapshot_id.clone(),
-            source_sandbox: manifest.source_sandbox,
-            topology_digest: manifest.topology_digest,
-            mode: manifest.mode,
-            files: manifest.files.len(),
-            size_bytes,
-            runtime_configuration_digest: manifest.runtime_configuration_digest,
-        })
-    }
-}
-
-impl Drop for SnapshotStaging {
-    fn drop(&mut self) {
-        if self.staging.exists() {
-            let _ = make_writable(&self.staging);
-            let _ = fs::remove_dir_all(&self.staging);
+        if let Some(expected) = &descriptor {
+            if expected != &objects[0].artifact {
+                return Err(SandboxError::Runtime(
+                    "snapshot container metadata is inconsistent".to_owned(),
+                ));
+            }
+        } else {
+            descriptor = Some(objects[0].artifact.clone());
+            name = Some(objects[0].name.clone());
         }
     }
-}
-
-pub(super) fn load(
-    root: &Path,
-    snapshot_id: &SnapshotId,
-) -> Result<(LocalSnapshotManifest, PathBuf), SandboxError> {
-    let root = fs::canonicalize(root).map_err(|source| io_error(root, source))?;
-    let directory = root.join(snapshot_id.as_str());
-    let canonical = fs::canonicalize(&directory).map_err(|source| io_error(&directory, source))?;
-    if canonical.parent() != Some(root.as_path()) {
+    let name = name.ok_or_else(|| {
+        SandboxError::Runtime("snapshot contains no container metadata".to_owned())
+    })?;
+    let path = materialized.directory.join(name);
+    let metadata: GvisorSnapshotMetadata =
+        serde_json::from_slice(&fs::read(&path).map_err(|error| io_error(&path, error))?)
+            .map_err(|error| SandboxError::Runtime(format!("decode gVisor metadata: {error}")))?;
+    validate_metadata(&metadata)?;
+    let containers = materialized
+        .manifest
+        .containers
+        .keys()
+        .map(ContainerId::as_str)
+        .collect::<BTreeSet<_>>();
+    let services = metadata
+        .services
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if containers != services {
         return Err(SandboxError::Runtime(
-            "snapshot path escaped its store".to_owned(),
+            "snapshot service metadata does not match its container map".to_owned(),
         ));
     }
-    let manifest_path = canonical.join(MANIFEST_NAME);
-    let bytes = fs::read(&manifest_path).map_err(|source| io_error(&manifest_path, source))?;
-    let manifest: LocalSnapshotManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| SandboxError::Runtime(format!("decode snapshot manifest: {error}")))?;
-    if manifest.schema_version != LOCAL_SNAPSHOT_VERSION || &manifest.snapshot_id != snapshot_id {
-        return Err(SandboxError::Runtime(
-            "snapshot manifest identity is invalid".to_owned(),
-        ));
-    }
-    verify_files(&canonical.join("runtime"), &manifest.files)?;
-    Ok((manifest, canonical.join("runtime")))
+    Ok(metadata)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn manifest(
-    snapshot_id: SnapshotId,
-    source_sandbox: String,
-    topology_digest: String,
-    mode: SnapshotMode,
-    runsc_version: String,
-    runtime_configuration_digest: String,
-    cpu_features_digest: String,
-    root_service: String,
-    services: Vec<String>,
-    service_states: BTreeMap<String, String>,
-) -> Result<LocalSnapshotManifest, SandboxError> {
-    let created_unix_millis = SystemTime::now()
+fn validate_metadata(metadata: &GvisorSnapshotMetadata) -> Result<(), SandboxError> {
+    if metadata.schema_version != METADATA_VERSION
+        || metadata.created_unix_millis == 0
+        || metadata.topology_digest.is_empty()
+        || metadata.runsc_version.is_empty()
+        || metadata.runtime_configuration_digest.is_empty()
+        || metadata.cpu_features_digest.is_empty()
+        || metadata.services.is_empty()
+        || metadata.root_service.is_empty()
+        || !metadata.services.contains(&metadata.root_service)
+        || metadata.service_states.len() != metadata.services.len()
+        || metadata
+            .services
+            .iter()
+            .any(|service| !metadata.service_states.contains_key(service))
+        || metadata
+            .service_states
+            .values()
+            .any(|state| !matches!(state.as_str(), "running" | "paused" | "stopped"))
+    {
+        return Err(SandboxError::Runtime(
+            "gVisor snapshot metadata is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn checkpoint_objects(directory: &Path) -> Result<Vec<StagedSnapshotObject>, SandboxError> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| io_error(directory, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| io_error(directory, error))?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    if entries.is_empty() {
+        return Err(SandboxError::Runtime(
+            "runsc checkpoint produced no files".to_owned(),
+        ));
+    }
+    entries
+        .into_iter()
+        .map(|entry| {
+            if !entry
+                .file_type()
+                .map_err(|error| io_error(entry.path(), error))?
+                .is_file()
+            {
+                return Err(SandboxError::Runtime(
+                    "runsc checkpoint contains a non-file entry".to_owned(),
+                ));
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                SandboxError::Runtime("checkpoint filename is not UTF-8".to_owned())
+            })?;
+            validate_name(&name)?;
+            Ok(StagedSnapshotObject {
+                role: ArtifactRole::RuntimeState,
+                container: None,
+                name,
+                path: entry.path(),
+                media_type: CHECKPOINT_MEDIA_TYPE.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn make_cleanup_writable(path: &Path) -> Result<(), SandboxError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+    if metadata.file_type().is_dir() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| io_error(path, error))?;
+        for entry in fs::read_dir(path).map_err(|error| io_error(path, error))? {
+            let entry = entry.map_err(|error| io_error(path, error))?;
+            make_cleanup_writable(&entry.path())?;
+        }
+    } else if metadata.file_type().is_file() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| io_error(path, error))?;
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<(), SandboxError> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(SandboxError::Runtime(
+            "checkpoint filename is unsafe".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<(), SandboxError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| SandboxError::Runtime(format!("encode gVisor metadata: {error}")))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o400)
+        .open(path)
+        .map_err(|error| io_error(path, error))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| io_error(path, error))
+}
+
+fn unix_millis() -> Result<u64, SandboxError> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SandboxError::Runtime("system clock predates the Unix epoch".to_owned()))?
         .as_millis()
         .try_into()
-        .map_err(|_| SandboxError::Runtime("snapshot timestamp overflow".to_owned()))?;
-    Ok(LocalSnapshotManifest {
-        schema_version: LOCAL_SNAPSHOT_VERSION,
+        .map_err(|_| SandboxError::Runtime("snapshot timestamp overflow".to_owned()))
+}
+
+fn artifact_error(error: runtrue_sandbox_artifact::ArtifactError) -> SandboxError {
+    SandboxError::Runtime(format!("artifact store: {error}"))
+}
+
+pub(super) fn publish(
+    store: &dyn ArtifactStore,
+    publication: SnapshotPublication,
+    metadata: &GvisorSnapshotMetadata,
+) -> Result<SnapshotSummary, SandboxError> {
+    let source_sandbox = publication.manifest.sandbox_id.as_str().to_owned();
+    let snapshot_id = publication.manifest.snapshot_id.clone();
+    let files = publication.objects.len();
+    let metrics = store.publish(publication).map_err(artifact_error)?;
+    Ok(SnapshotSummary {
         snapshot_id,
         source_sandbox,
-        topology_digest,
-        mode,
-        created_unix_millis,
-        architecture: std::env::consts::ARCH.to_owned(),
-        operating_system: std::env::consts::OS.to_owned(),
-        runsc_version,
-        runtime_configuration_digest,
-        cpu_features_digest,
-        root_service,
-        services,
-        service_states,
-        files: Vec::new(),
+        topology_digest: metadata.topology_digest.clone(),
+        mode: metadata.mode,
+        files,
+        size_bytes: metrics.logical_bytes,
+        transferred_bytes: metrics.transferred_bytes,
+        reused_objects: metrics.reused_objects,
+        publish_millis: metrics.publish_millis,
+        runtime_configuration_digest: metadata.runtime_configuration_digest.clone(),
     })
-}
-
-fn describe_files(directory: &Path) -> Result<Vec<SnapshotFile>, SandboxError> {
-    let mut entries = fs::read_dir(directory)
-        .map_err(|source| io_error(directory, source))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| io_error(directory, source))?;
-    entries.sort_by_key(fs::DirEntry::file_name);
-    let mut files = Vec::new();
-    for entry in entries {
-        if !entry
-            .file_type()
-            .map_err(|source| io_error(entry.path(), source))?
-            .is_file()
-        {
-            return Err(SandboxError::Runtime(
-                "checkpoint contains a non-file entry".to_owned(),
-            ));
-        }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| SandboxError::Runtime("checkpoint filename is not UTF-8".to_owned()))?;
-        if name.is_empty()
-            || name.len() > 128
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        {
-            return Err(SandboxError::Runtime(
-                "checkpoint filename is unsafe".to_owned(),
-            ));
-        }
-        let path = entry.path();
-        let (digest, size_bytes) = digest_file(&path)?;
-        files.push(SnapshotFile {
-            name,
-            digest,
-            size_bytes,
-            media_type: "application/vnd.runtrue.gvisor.checkpoint".to_owned(),
-        });
-    }
-    Ok(files)
-}
-
-fn verify_files(directory: &Path, expected: &[SnapshotFile]) -> Result<(), SandboxError> {
-    let actual = describe_files(directory)?;
-    if actual.len() != expected.len()
-        || actual.iter().zip(expected).any(|(actual, expected)| {
-            actual.name != expected.name
-                || actual.digest != expected.digest
-                || actual.size_bytes != expected.size_bytes
-                || actual.media_type != expected.media_type
-        })
-    {
-        return Err(SandboxError::Runtime(
-            "snapshot artifact integrity check failed".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn digest_file(path: &Path) -> Result<(String, u64), SandboxError> {
-    let mut file = fs::File::open(path).map_err(|source| io_error(path, source))?;
-    let mut digest = Sha256::new();
-    let mut size = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| io_error(path, source))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-        size = size
-            .checked_add(read as u64)
-            .ok_or_else(|| SandboxError::Runtime("snapshot size overflow".to_owned()))?;
-    }
-    Ok((format!("sha256:{:x}", digest.finalize()), size))
-}
-
-fn make_read_only(directory: &Path) -> Result<(), SandboxError> {
-    for entry in fs::read_dir(directory).map_err(|source| io_error(directory, source))? {
-        let path = entry.map_err(|source| io_error(directory, source))?.path();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o400))
-            .map_err(|source| io_error(&path, source))?;
-    }
-    fs::set_permissions(directory, fs::Permissions::from_mode(0o500))
-        .map_err(|source| io_error(directory, source))
-}
-
-fn make_writable(directory: &Path) -> Result<(), SandboxError> {
-    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-        .map_err(|source| io_error(directory, source))?;
-    for entry in fs::read_dir(directory).map_err(|source| io_error(directory, source))? {
-        let path = entry.map_err(|source| io_error(directory, source))?.path();
-        if path.is_dir() {
-            make_writable(&path)?;
-        } else {
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .map_err(|source| io_error(&path, source))?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
-    fn test_manifest(snapshot_id: SnapshotId) -> LocalSnapshotManifest {
-        manifest(
-            snapshot_id,
-            "source-a".to_owned(),
-            format!("sha256:{}", "a".repeat(64)),
-            SnapshotMode::StopAndMove,
-            "runsc test".to_owned(),
-            format!("sha256:{}", "b".repeat(64)),
-            format!("sha256:{}", "c".repeat(64)),
-            "server".to_owned(),
-            vec!["server".to_owned(), "client".to_owned()],
-            BTreeMap::from([
-                ("client".to_owned(), "running".to_owned()),
-                ("server".to_owned(), "running".to_owned()),
-            ]),
-        )
-        .expect("manifest")
+    #[test]
+    fn checkpoint_listing_rejects_nested_entries() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        fs::create_dir(directory.path().join("nested")).expect("nested directory");
+        assert!(checkpoint_objects(directory.path()).is_err());
     }
 
     #[test]
-    fn publishes_and_verifies_immutable_snapshot() {
-        let root = tempfile::tempdir().expect("temporary directory");
-        let id = SnapshotId::parse("snapshot-a").expect("snapshot ID");
-        let staging = SnapshotStaging::create(root.path(), id.clone()).expect("staging");
-        let image = staging.image_path().expect("image path");
-        fs::write(image.join("checkpoint.img"), b"checkpoint").expect("checkpoint file");
-        let summary = staging.publish(test_manifest(id.clone())).expect("publish");
-        assert_eq!(summary.files, 1);
-        let (loaded, _) = load(root.path(), &id).expect("load snapshot");
-        assert_eq!(loaded.service_states["client"], "running");
-        make_writable(root.path()).expect("allow temporary directory cleanup");
-    }
-
-    #[test]
-    fn rejects_modified_snapshot_artifact() {
-        let root = tempfile::tempdir().expect("temporary directory");
-        let id = SnapshotId::parse("snapshot-b").expect("snapshot ID");
-        let staging = SnapshotStaging::create(root.path(), id.clone()).expect("staging");
-        let image = staging.image_path().expect("image path");
-        fs::write(image.join("pages.img"), b"original").expect("pages file");
-        staging.publish(test_manifest(id.clone())).expect("publish");
-        let snapshot = root.path().join(id.as_str());
-        make_writable(&snapshot).expect("make snapshot writable for tamper probe");
-        fs::write(snapshot.join("runtime/pages.img"), b"tampered").expect("tamper artifact");
-        assert!(load(root.path(), &id).is_err());
+    fn metadata_rejects_incomplete_service_state() {
+        let metadata = GvisorSnapshotMetadata {
+            schema_version: METADATA_VERSION,
+            topology_digest: format!("sha256:{}", "a".repeat(64)),
+            mode: SnapshotMode::StopAndMove,
+            created_unix_millis: 1,
+            runsc_version: "runsc test".to_owned(),
+            runtime_configuration_digest: format!("sha256:{}", "b".repeat(64)),
+            cpu_features_digest: format!("sha256:{}", "c".repeat(64)),
+            root_service: "server".to_owned(),
+            services: vec!["server".to_owned()],
+            service_states: BTreeMap::new(),
+        };
+        assert!(validate_metadata(&metadata).is_err());
     }
 }

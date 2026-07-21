@@ -16,6 +16,7 @@ use nix::{
     errno::Errno,
     poll::{poll, PollFd, PollFlags},
 };
+use runtrue_sandbox_artifact::{ArtifactLimits, ArtifactStore, LocalArtifactStore};
 use runtrue_sandbox_gvisor::executor;
 use runtrue_sandbox_oci::{
     io_error,
@@ -57,12 +58,21 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
     )?;
 
     let sandbox_root = config.state_root.join("sandboxes");
-    let snapshot_root = config.state_root.join("snapshots");
+    let artifact_root = config.state_root.join("artifacts");
+    let snapshot_staging_root = config.state_root.join("snapshot-staging");
     let control_root = config.state_root.join("control");
     let recovery = executor::recover(&sandbox_root, &config.runsc, &config.ip)?;
     let assignments = AssignmentLedger::open(&control_root)?;
     assignments.reconcile_after_recovery()?;
     let audit = AuditLog::open(&control_root)?;
+    let key_path = config
+        .artifact_master_key
+        .unwrap_or_else(|| control_root.join("artifact-master.key"));
+    let artifact_store: Arc<dyn ArtifactStore> = Arc::new(
+        LocalArtifactStore::open(artifact_root, &key_path, ArtifactLimits::default()).map_err(
+            |error| SandboxError::Runtime(format!("open local artifact store: {error}")),
+        )?,
+    );
     let work_orders = config
         .work_order_key
         .as_deref()
@@ -93,7 +103,9 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
 
     let daemon = Arc::new(DaemonState {
         state_root: sandbox_root,
-        snapshot_root,
+        snapshot_staging_root,
+        artifact_store,
+        worker_id: config.worker_id,
         image_provider,
         runsc: config.runsc,
         ip: config.ip,

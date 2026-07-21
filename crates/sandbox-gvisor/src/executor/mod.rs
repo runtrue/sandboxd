@@ -70,6 +70,14 @@ pub struct GvisorSandboxStatus {
     pub running_services: usize,
     pub paused_services: usize,
     pub stopped_services: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_restore: Option<SnapshotRestoreMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotRestoreMetrics {
+    pub transferred_bytes: u64,
+    pub materialization_millis: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +95,7 @@ pub struct GvisorSandbox {
     state: GvisorSandboxState,
     paused_runtime_ids: BTreeSet<String>,
     resources: Option<Resources>,
+    snapshot_restore: Option<SnapshotRestoreMetrics>,
 }
 
 struct Resources {
@@ -243,6 +252,7 @@ pub fn start_admitted(
         state: GvisorSandboxState::Running,
         paused_runtime_ids: BTreeSet::new(),
         resources: Some(resources),
+        snapshot_restore: None,
     })
 }
 
@@ -540,6 +550,7 @@ impl GvisorSandbox {
             running_services,
             paused_services,
             stopped_services,
+            snapshot_restore: self.snapshot_restore.clone(),
         })
     }
 
@@ -604,10 +615,19 @@ impl GvisorSandbox {
     pub fn snapshot(
         &mut self,
         snapshot_id: SnapshotId,
-        snapshot_root: &Path,
+        snapshot_staging_root: &Path,
         mode: SnapshotMode,
+        artifact_store: &dyn runtrue_sandbox_artifact::ArtifactStore,
+        provenance: &crate::snapshot::SnapshotProvenance,
     ) -> Result<SnapshotSummary, SandboxError> {
-        checkpoint::snapshot(self, snapshot_id, snapshot_root, mode)
+        checkpoint::snapshot(
+            self,
+            snapshot_id,
+            snapshot_staging_root,
+            mode,
+            artifact_store,
+            provenance,
+        )
     }
 
     pub fn completed_output(

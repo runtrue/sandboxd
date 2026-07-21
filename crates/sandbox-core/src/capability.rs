@@ -24,15 +24,31 @@ pub struct BackendCapabilities {
 
 impl BackendCapabilities {
     #[must_use]
-    pub const fn gvisor_local_snapshot(maximum_containers: u16) -> Self {
+    pub const fn gvisor_portable_snapshot(maximum_containers: u16) -> Self {
         Self {
             multi_container: true,
             pause_resume: true,
             live_snapshot: true,
             stop_and_snapshot: true,
             preserves_internal_connections: true,
-            snapshot_portability: SnapshotPortability::SameWorker,
+            snapshot_portability: SnapshotPortability::CrossWorkerSameBackend,
             maximum_containers,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gvisor_snapshot_capability_matches_portable_manifest_contract() {
+        let capabilities = BackendCapabilities::gvisor_portable_snapshot(64);
+        assert_eq!(
+            capabilities.snapshot_portability,
+            SnapshotPortability::CrossWorkerSameBackend
+        );
+        assert!(capabilities.live_snapshot);
+        assert!(capabilities.stop_and_snapshot);
     }
 }

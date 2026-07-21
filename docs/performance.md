@@ -61,6 +61,41 @@ Those privileged lifecycle checks remain in the manually dispatched dedicated
 gVisor workflow because a normal hosted runner is not a stable production-like
 gVisor worker.
 
+## Snapshot measurements
+
+Snapshot and restore responses retain storage measurements from the real
+artifact path. Snapshot results include object count, logical bytes,
+transferred bytes, reused objects, and publication latency. A sandbox created
+by restore includes transferred bytes and materialization latency in its status.
+These values cover hashing, envelope encryption, provider transfer, verified
+decryption, and immutable local publication; they do not include runsc's
+checkpoint or process-restore time.
+
+The local lifecycle fixture prints these fields while exercising both a live
+copy and stop-and-move:
+
+```bash
+sudo ./examples/python-compose/run-snapshot-local.sh
+```
+
+Measure the stripped local-worker binary with:
+
+```bash
+cargo build --release --package runtrue-sandboxd
+stat --format=%s target/release/runtrue-sandboxd
+```
+
+One local run on the validated x86-64 cohort on 2026-07-20 produced:
+
+| Mode | Logical bytes | Publish transfer | Publish | Restore transfer | Materialize |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| live | 24,617,897 | 24,620,662 | 281 ms | 24,621,308 | 176 ms |
+| stop-and-move | 24,613,224 | 24,615,989 | 291 ms | 24,616,644 | 172 ms |
+
+Both publications reused one metadata object. The same checkout produced a
+3,159,488-byte release binary. `main` before the artifact-store change was
+2,864,456 bytes. These are single-host reference values, not release thresholds.
+
 GitHub-hosted runners have variable CPU and storage neighbors. The PR comment
 flags a possible regression when throughput falls by more than 10% or p99
 latency rises by more than 15%; relative performance alone never fails the

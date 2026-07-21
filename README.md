@@ -25,8 +25,8 @@ restore.
 - bounded local control transport with peer credentials, signed work orders,
   replay protection, and structured audit records;
 - live and stop-and-move gVisor checkpoints;
-- immutable local snapshot publication with SHA-256 verification; and
-- same-worker restore under a new sandbox identity.
+- tenant-scoped, encrypted, content-addressed snapshot artifacts; and
+- local restore under a new sandbox identity.
 
 The daemon reports only installed backend implementations. The backend-neutral
 contracts reserve stable identities for both `gvisor` and `marcovm`; this
@@ -40,7 +40,7 @@ resolve over the shared loopback interface, so containers also share one port
 namespace. Two services cannot bind the same address and port.
 
 OCI roots are read-only. Each container receives writable `/tmp` and `/work`
-tmpfs mounts. The local snapshot captures guest processes, memory, internal
+tmpfs mounts. A snapshot captures guest processes, memory, internal
 sockets, and tmpfs contents. Restore requires an exact topology, runsc version,
 runtime configuration, CPU feature, architecture, and operating-system match.
 
@@ -72,10 +72,13 @@ independent guest CPU or memory guarantees.
 - `sandbox-core` contains backend-neutral identities, lifecycle states,
   capability records, and snapshot contracts.
 - `sandbox-runtime` defines backend and live-instance interfaces.
+- `sandbox-artifact` owns encrypted content-addressed publication, verified
+  materialization, references, garbage collection, and the local storage
+  provider.
 - `sandbox-oci` owns Compose validation, topology locks, the backend-neutral
   image-provider contract, and the containerd provider.
-- `sandbox-gvisor` owns runsc execution, OCI bundles, host resources, local
-  snapshots, recovery, and cleanup.
+- `sandbox-gvisor` owns runsc execution, OCI bundles, host resources, portable
+  snapshot mapping, recovery, and cleanup.
 
 Detailed documentation covers [architecture and isolation](docs/architecture.md),
 [authenticated control](docs/control-plane.md), and

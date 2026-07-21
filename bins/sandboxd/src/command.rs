@@ -16,6 +16,8 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 work_order_key,
                 maximum_connections,
                 io_timeout_seconds,
+                worker_id,
+                artifact_master_key,
                 state_root,
                 image_store,
                 ctr,
@@ -31,6 +33,9 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 workload_socket,
                 broker_uid,
                 work_order_key,
+                worker_id: runtrue_sandbox_core::WorkerId::parse(worker_id)
+                    .map_err(|error| SandboxError::Runtime(error.to_string()))?,
+                artifact_master_key,
                 state_root,
                 image_store,
                 ctr,

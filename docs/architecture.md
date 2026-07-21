@@ -13,7 +13,7 @@ Topology documents, guest arguments, environment values, OCI image contents,
 workload requests, and guest execution are treated as untrusted. The worker
 operator, daemon configuration, work-order signer, local broker process,
 containerd daemon and snapshotter, `ctr` client, runsc binary, iproute2 binary,
-image store, state store, and snapshot store are trusted.
+image store, state store, artifact store, and artifact master key are trusted.
 
 The security boundary for guest code is gVisor plus host namespaces and cgroup
 containment. The daemon itself is privileged and is not a tenant-facing network
@@ -35,7 +35,7 @@ sandbox
   |-- one host network namespace and veth pair
   |-- service cgroup materializations
   |-- runsc state and process handles
-  `-- local immutable snapshots
+  `-- portable immutable snapshot references
 ```
 
 Host paths, network interface names, process IDs, cgroup paths, and runtime
@@ -52,6 +52,7 @@ bins/
 crates/
   sandbox-core/             identities, capabilities, lifecycle, snapshot types
   sandbox-runtime/          backend and live-instance interfaces
+  sandbox-artifact/         encrypted artifacts, providers, references, GC
   sandbox-oci/              Compose validation and OCI provider implementations
   sandbox-gvisor/           gVisor execution, snapshots, recovery, cleanup
 
@@ -85,7 +86,7 @@ resource ceilings, nonce, expiration, and assignment epoch. Shutdown has no
 workload work-order representation.
 
 The daemon owns image admission handles, tenant-scoped active sandbox handles,
-worker metrics, state paths, and snapshot paths. Tenant-facing sandbox IDs are
+worker metrics, state paths, and artifact scopes. Tenant-facing sandbox IDs are
 mapped to opaque epoch-scoped runtime project IDs. Assignments, consumed nonce
 digests, and bounded audit events are persisted under the private control state
 directory. Their bounded append queues preserve ordering and group concurrent
@@ -96,8 +97,8 @@ and fences active assignments before accepting new work.
 
 Each tenant/workspace/sandbox identity is reserved while create, run, or restore
 materializes host resources. Persistent instances are stored behind a
-sandbox-specific mutex. Snapshots are placed below tenant and workspace
-directories, logs require a scoped live-sandbox lookup, and workload metrics
+sandbox-specific mutex. Artifact keys include the verified tenant and workspace,
+logs require a scoped live-sandbox lookup, and workload metrics
 contain only the verified scope. The immutable image cache may be shared; its
 contents and global cache metrics are not exposed through workload stats.
 Graceful shutdown refuses to proceed while a sandbox remains active.
@@ -192,7 +193,7 @@ create -> running -> paused -> running -> stopped
                    |          |
                    + snapshot +
 
-local snapshot -> restore under a new sandbox identity -> running
+portable snapshot -> restore under a new sandbox identity -> running
 ```
 
 Pause and resume target the root sandbox once, which affects every child in the
@@ -204,39 +205,51 @@ The core crate also contains a broader lifecycle data type for backend-neutral
 orchestration. Its additional states are contracts, not daemon capability
 claims.
 
-## Local snapshots
+## Snapshot artifacts
 
 Both snapshot modes operate on the complete gVisor sandbox:
 
 - `live` checkpoints and immediately resumes the source;
 - `stop_and_move` checkpoints and removes the source instance.
 
-Publication uses a private mode `0700` staging directory. runsc writes one
-sandbox-scoped checkpoint, every output file is hashed, and a versioned local
-manifest records topology, service states, runsc version, runtime configuration,
-CPU features, architecture, and operating system. The checkpoint files and
-manifest are synced, changed to read-only permissions, and atomically renamed
-into the local snapshot store.
+runsc writes one sandbox-scoped checkpoint into a private staging directory.
+The artifact layer hashes each file while streaming, encrypts it with a random
+data key, wraps that key with a tenant/workspace-derived key, and publishes the
+object by content digest. A versioned encrypted manifest records tenant,
+sandbox, source worker, assignment epoch, topology, service states, backend
+cohort, CPU profile, architecture, operating system, and object roles. The
+small immutable snapshot pointer is published only after every referenced
+object and the manifest are durable.
 
-Restore re-hashes every file and requires an exact compatibility match before
-creating destination resources. The root restore starts first; active child
+The current provider uses root-owned local files and conditional rename. Its
+garbage-collection grace cannot be shorter than the maximum operation duration,
+so it cannot reclaim an active staging publication. The provider interface is
+backend-neutral, but no remote artifact provider is implemented; snapshots
+therefore remain on the worker that created them.
+
+Restore bounds the pointer, encrypted object, object count, individual object,
+and total snapshot sizes before publication into an empty read-only directory.
+It authenticates every encrypted chunk, re-hashes every plaintext file, and
+requires an exact compatibility match before creating destination resources.
+The root restore starts first; active child
 containers then restore against the same checkpoint. A child that had already
 exited is represented as stopped and is not passed to runsc restore.
 
 The checkpoint contains process state, memory, sockets, and writable tmpfs
-contents. The read-only OCI roots are re-admitted from the local image store.
-Snapshot portability is `same_worker`; no artifact export, writable OCI layer,
-external volume, or cross-worker restore is exposed. Control operations are
-assignment-epoch fenced, but the local snapshot is not a transferable,
-worker-fenced artifact.
+contents. The read-only OCI roots are re-admitted from the destination image
+store. The manifest declares `cross_worker_same_backend`, but the current local
+artifact provider cannot transfer it to another worker. A future destination
+would still need the exact runsc configuration, CPU profile, architecture,
+topology, artifact key, and OCI images. Assignment operations are fenced
+locally, but a distributed source-to-destination ownership transfer protocol is
+not included.
 
 ## Backend-neutral snapshot types
 
-`sandbox-core` defines portable snapshot descriptors with worker identity,
-assignment epoch, backend version and configuration, compatibility requirements,
-and content-addressed object roles. These types contain no worker-local paths.
-The local gVisor snapshot store does not claim portability merely because the
-portable types exist.
+`sandbox-core` defines portable snapshot descriptors with tenant scope, worker
+identity, assignment epoch, backend version and configuration, compatibility
+requirements, and content-addressed object roles. Manifests contain no host
+paths, process IDs, sockets, runtime handles, credentials, or encryption keys.
 
 MarcoVM has a reserved backend identity and can use the same outer contracts.
 There is no MarcoVM executor, VM snapshot format, or cross-backend conversion

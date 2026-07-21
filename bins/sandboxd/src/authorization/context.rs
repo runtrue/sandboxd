@@ -1,7 +1,6 @@
 use runtrue_sandbox_core::{AssignmentEpoch, SandboxId, SubjectId, TenantId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -11,9 +10,11 @@ pub(crate) struct TenantScope {
 }
 
 impl TenantScope {
-    pub(crate) fn snapshot_root(&self, base: &Path) -> PathBuf {
-        base.join(self.tenant_id.as_str())
-            .join(self.workspace_id.as_str())
+    pub(crate) fn artifact_scope(&self) -> runtrue_sandbox_artifact::ArtifactScope {
+        runtrue_sandbox_artifact::ArtifactScope::new(
+            self.tenant_id.clone(),
+            self.workspace_id.clone(),
+        )
     }
 }
 
@@ -116,15 +117,13 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_paths_are_tenant_and_workspace_scoped() {
-        let base = Path::new("/var/lib/runtrue-sandboxd/state/snapshots");
-        assert_eq!(
-            key("tenant-a").scope.snapshot_root(base),
-            base.join("tenant-a").join("team-a")
-        );
+    fn artifact_scopes_are_tenant_and_workspace_scoped() {
+        let scope = key("tenant-a").scope.artifact_scope();
+        assert_eq!(scope.tenant_id().as_str(), "tenant-a");
+        assert_eq!(scope.workspace_id().as_str(), "team-a");
         assert_ne!(
-            key("tenant-a").scope.snapshot_root(base),
-            key("tenant-b").scope.snapshot_root(base)
+            key("tenant-a").scope.artifact_scope(),
+            key("tenant-b").scope.artifact_scope()
         );
     }
 }

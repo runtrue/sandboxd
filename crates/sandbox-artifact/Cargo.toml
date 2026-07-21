@@ -1,5 +1,5 @@
 [package]
-name = "runtrue-sandbox-gvisor"
+name = "runtrue-sandbox-artifact"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,15 +7,19 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+aes-gcm.workspace = true
 hex.workspace = true
+hkdf.workspace = true
+nix.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-runtrue-sandbox-artifact.workspace = true
-runtrue-sandbox-oci.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
 runtrue-sandbox-core.workspace = true
+runtrue-sandbox-runtime.workspace = true
 
 [lints]
 workspace = true
