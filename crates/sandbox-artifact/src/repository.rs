@@ -337,12 +337,15 @@ impl ArtifactRepository {
             fs::set_permissions(&plaintext, fs::Permissions::from_mode(0o400))
                 .map_err(|error| io_error(&plaintext, error))?;
         }
-        fs::set_permissions(&output, fs::Permissions::from_mode(0o500))
-            .map_err(|error| io_error(&output, error))?;
         fs::File::open(&output)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| io_error(&output, error))?;
         fs::rename(&output, destination).map_err(|error| io_error(destination, error))?;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o500))
+            .map_err(|error| io_error(destination, error))?;
+        fs::File::open(destination)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| io_error(destination, error))?;
         fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| io_error(parent, error))?;
@@ -817,8 +820,25 @@ mod tests {
             fixture.publication.manifest.snapshot_id
         );
         for (name, bytes) in &fixture.expected {
-            assert_eq!(fs::read(destination.join(name)).expect("object"), *bytes);
+            let path = destination.join(name);
+            assert_eq!(fs::read(&path).expect("object"), *bytes);
+            assert_eq!(
+                fs::metadata(path)
+                    .expect("object metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o400
+            );
         }
+        assert_eq!(
+            fs::metadata(destination)
+                .expect("materialized directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o500
+        );
     }
 
     #[test]
@@ -875,6 +895,8 @@ mod tests {
             .into_iter()
             .find(|path| path.extension().and_then(|value| value.to_str()) == Some("envelope"))
             .expect("encrypted object");
+        fs::set_permissions(&envelope, fs::Permissions::from_mode(0o600))
+            .expect("make disposable envelope writable");
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -911,6 +933,8 @@ mod tests {
             .into_iter()
             .next()
             .expect("encrypted object");
+        fs::set_permissions(&envelope, fs::Permissions::from_mode(0o600))
+            .expect("make disposable envelope writable");
         let length = fs::metadata(&envelope).expect("envelope metadata").len();
         OpenOptions::new()
             .write(true)
