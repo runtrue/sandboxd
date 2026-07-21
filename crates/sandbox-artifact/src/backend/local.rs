@@ -123,6 +123,27 @@ fn read_master_key(path: &Path) -> Result<[u8; 32], ArtifactError> {
 }
 
 impl ArtifactStore for LocalArtifactStore {
+    fn snapshot_portability(&self) -> runtrue_sandbox_core::SnapshotPortability {
+        runtrue_sandbox_core::SnapshotPortability::SameWorker
+    }
+
+    fn publish_transfer_grant(
+        &self,
+        scope: &crate::ArtifactScope,
+        snapshot_id: &runtrue_sandbox_core::SnapshotId,
+    ) -> Result<crate::SnapshotTransferGrant, ArtifactError> {
+        self.repository.publish_transfer_grant(scope, snapshot_id)
+    }
+
+    fn claim_transfer(
+        &self,
+        scope: &crate::ArtifactScope,
+        snapshot_id: &runtrue_sandbox_core::SnapshotId,
+        target: &runtrue_sandbox_core::RestoreTarget,
+    ) -> Result<crate::SnapshotTransferClaim, ArtifactError> {
+        self.repository.claim_transfer(scope, snapshot_id, target)
+    }
+
     fn publish(
         &self,
         publication: crate::SnapshotPublication,
@@ -433,6 +454,7 @@ fn random_suffix() -> String {
 fn scope_prefix_from_key(key: &str) -> Result<&str, ArtifactError> {
     key.split_once("/objects/")
         .or_else(|| key.split_once("/snapshots/"))
+        .or_else(|| key.split_once("/transfers/"))
         .map(|(scope, _)| scope)
         .filter(|scope| !scope.is_empty())
         .ok_or_else(|| ArtifactError::Invalid("artifact key has no tenant scope".to_owned()))

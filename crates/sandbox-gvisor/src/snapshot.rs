@@ -61,7 +61,9 @@ pub struct SnapshotSummary {
     pub size_bytes: u64,
     pub transferred_bytes: u64,
     pub reused_objects: usize,
+    pub checkpoint_millis: u128,
     pub publish_millis: u128,
+    pub source_cleanup_millis: u128,
     pub runtime_configuration_digest: String,
 }
 
@@ -473,7 +475,9 @@ pub(super) fn publish(
         size_bytes: metrics.logical_bytes,
         transferred_bytes: metrics.transferred_bytes,
         reused_objects: metrics.reused_objects,
+        checkpoint_millis: 0,
         publish_millis: metrics.publish_millis,
+        source_cleanup_millis: 0,
         runtime_configuration_digest: metadata.runtime_configuration_digest.clone(),
     })
 }

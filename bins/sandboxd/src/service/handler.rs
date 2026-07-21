@@ -5,12 +5,15 @@ use crate::{
     protocol::Operation,
     state::DaemonState,
 };
-use runtrue_sandbox_core::{BackendCapabilities, BackendKind, SandboxId};
+use runtrue_sandbox_core::{BackendCapabilities, BackendKind, RestoreTarget, SandboxId};
 use runtrue_sandbox_gvisor::executor;
 use runtrue_sandbox_oci::{SandboxError, TopologyLock};
 use serde::Serialize;
 use serde_json::Value;
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 pub(crate) fn handle(
     operation: Operation,
@@ -28,7 +31,7 @@ pub(crate) fn handle(
             .requests += 1;
     }
     match operation {
-        Operation::Ping => Ok(capabilities()),
+        Operation::Ping => Ok(capabilities(daemon)),
         Operation::Stats => metrics::collect(daemon, context),
         Operation::Admit { topology } => admit(daemon, &topology),
         Operation::Run {
@@ -62,7 +65,7 @@ pub(crate) fn handle(
     }
 }
 
-fn capabilities() -> Value {
+fn capabilities(daemon: &DaemonState) -> Value {
     serde_json::json!({
         "status": "ready",
         "protocol_versions": [1, 2],
@@ -71,7 +74,10 @@ fn capabilities() -> Value {
             {
                 "kind": BackendKind::Gvisor,
                 "status": "available",
-                "capabilities": BackendCapabilities::gvisor_portable_snapshot(64),
+                "capabilities": BackendCapabilities::gvisor_snapshot(
+                    64,
+                    daemon.artifact_store.snapshot_portability(),
+                ),
             }
         ]
     })
@@ -209,12 +215,22 @@ fn restore(
         )));
     }
     let _reservation = ProjectReservation::acquire(daemon, &key)?;
-    let epoch = daemon.assignments.begin(&key, context.assignment_epoch())?;
+    let epoch = daemon
+        .assignments
+        .begin_restore(&key, context.assignment_epoch(), &snapshot_id)?;
     let admitted = match admit_topology(daemon, &topology) {
         Ok(admitted) => admitted,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
     };
     let runtime_project = key.runtime_project(epoch);
+    let restore_target = RestoreTarget {
+        tenant_id: key.scope.tenant_id.clone(),
+        workspace_id: key.scope.workspace_id.clone(),
+        sandbox_id: key.sandbox_id.clone(),
+        worker_id: daemon.worker_id.clone(),
+        assignment_epoch: epoch,
+        artifact_portability: daemon.artifact_store.snapshot_portability(),
+    };
     let instance = match executor::restore_admitted(
         &topology,
         &runtime_project,
@@ -224,6 +240,7 @@ fn restore(
         daemon.artifact_store.as_ref(),
         &context.scope().artifact_scope(),
         &snapshot_id,
+        &restore_target,
         &daemon.runsc,
         &daemon.ip,
         &admitted,
@@ -282,15 +299,22 @@ fn stop(
     let epoch = daemon
         .assignments
         .require_current(&key, context.assignment_epoch())?;
-    let value = with_key(daemon, &key, context.is_operator(), |instance| {
-        instance.stop()
-    })?;
-    let assignment_result = daemon
+    let instance = daemon
+        .sandboxes
+        .lock()
+        .expect("sandbox lock")
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| SandboxError::Runtime(format!("sandbox `{sandbox}` does not exist")))?;
+    let mut instance = instance.lock().expect("sandbox instance lock");
+    daemon.assignments.require_current(&key, Some(epoch))?;
+    let status = instance.stop()?;
+    daemon
         .assignments
-        .mark(&key, epoch, AssignmentState::Stopped);
+        .mark(&key, epoch, AssignmentState::Stopped)?;
+    drop(instance);
     daemon.sandboxes.lock().expect("sandbox lock").remove(&key);
-    assignment_result?;
-    Ok(value)
+    scoped_value(status, &key, context.is_operator())
 }
 
 fn logs(
@@ -324,8 +348,19 @@ fn snapshot(
         .get(&key)
         .cloned()
         .ok_or_else(|| SandboxError::Runtime(format!("sandbox `{sandbox}` does not exist")))?;
-    let summary = instance.lock().expect("sandbox instance lock").snapshot(
-        snapshot_id,
+    let stop_and_move = mode == runtrue_sandbox_core::SnapshotMode::StopAndMove;
+    let mut instance = instance.lock().expect("sandbox instance lock");
+    daemon.assignments.require_current(&key, Some(epoch))?;
+    let mut source_fence_millis = 0;
+    if stop_and_move {
+        let fence_started = Instant::now();
+        daemon
+            .assignments
+            .begin_fencing(&key, epoch, &snapshot_id)?;
+        source_fence_millis = fence_started.elapsed().as_millis();
+    }
+    let result = instance.snapshot(
+        snapshot_id.clone(),
         &daemon.snapshot_staging_root,
         mode,
         daemon.artifact_store.as_ref(),
@@ -336,17 +371,54 @@ fn snapshot(
             source_worker: daemon.worker_id.clone(),
             source_assignment_epoch: epoch,
         },
-    )?;
-    if mode == runtrue_sandbox_core::SnapshotMode::StopAndMove {
+    );
+    let summary = match result {
+        Ok(summary) => summary,
+        Err(error) if stop_and_move && instance.is_executable() => {
+            daemon
+                .assignments
+                .mark(&key, epoch, AssignmentState::Active)?;
+            return Err(error);
+        }
+        Err(error) if stop_and_move => {
+            drop(instance);
+            daemon.sandboxes.lock().expect("sandbox lock").remove(&key);
+            return Err(mark_failed(daemon, &key, epoch, error));
+        }
+        Err(error) => return Err(error),
+    };
+    drop(instance);
+    let mut transfer_grant_millis = 0;
+    if stop_and_move {
+        let grant_started = Instant::now();
+        if let Err(error) = daemon
+            .artifact_store
+            .publish_transfer_grant(&key.scope.artifact_scope(), &snapshot_id)
+        {
+            daemon.sandboxes.lock().expect("sandbox lock").remove(&key);
+            return Err(mark_failed(
+                daemon,
+                &key,
+                epoch,
+                SandboxError::Runtime(format!("publish snapshot transfer grant: {error}")),
+            ));
+        }
+        transfer_grant_millis = grant_started.elapsed().as_millis();
         let assignment_result = daemon
             .assignments
-            .mark(&key, epoch, AssignmentState::Stopped);
+            .mark_transferable(&key, epoch, &snapshot_id);
         daemon.sandboxes.lock().expect("sandbox lock").remove(&key);
         assignment_result?;
     }
     let mut value = serde_json::to_value(summary)
         .map_err(|error| SandboxError::Runtime(format!("encode snapshot result: {error}")))?;
     value["source_sandbox"] = Value::String(key.sandbox_id.as_str().to_owned());
+    if stop_and_move {
+        value["source_fence_millis"] = serde_json::to_value(source_fence_millis)
+            .map_err(|error| SandboxError::Runtime(format!("encode fence metrics: {error}")))?;
+        value["transfer_grant_millis"] = serde_json::to_value(transfer_grant_millis)
+            .map_err(|error| SandboxError::Runtime(format!("encode grant metrics: {error}")))?;
+    }
     Ok(value)
 }
 
@@ -361,15 +433,16 @@ where
     T: Serialize,
 {
     let key = sandbox_key(context, sandbox)?;
-    daemon
+    let epoch = daemon
         .assignments
         .require_current(&key, context.assignment_epoch())?;
-    with_key(daemon, &key, context.is_operator(), operation)
+    with_key(daemon, &key, epoch, context.is_operator(), operation)
 }
 
 fn with_key<F, T>(
     daemon: &DaemonState,
     key: &SandboxKey,
+    expected_epoch: runtrue_sandbox_core::AssignmentEpoch,
     operator: bool,
     operation: F,
 ) -> Result<Value, SandboxError>
@@ -387,6 +460,9 @@ where
             SandboxError::Runtime(format!("sandbox `{}` does not exist", key.sandbox_id))
         })?;
     let mut instance = instance.lock().expect("sandbox instance lock");
+    daemon
+        .assignments
+        .require_current(key, Some(expected_epoch))?;
     let result = operation(&mut instance)?;
     scoped_value(result, key, operator)
 }

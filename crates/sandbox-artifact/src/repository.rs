@@ -3,9 +3,12 @@ use crate::{
     crypto::{describe, maximum_envelope_bytes, open, seal, EnvelopeKey},
     error::io_error,
     ArtifactError, ArtifactLimits, ArtifactScope, GarbageCollectionReport, MaterializedSnapshot,
-    PublicationMetrics, SnapshotPublication,
+    PublicationMetrics, SnapshotPublication, SnapshotTransferClaim, SnapshotTransferGrant,
 };
-use runtrue_sandbox_core::{ArtifactDescriptor, SnapshotId, SnapshotManifest, SnapshotObject};
+use runtrue_sandbox_core::{
+    ArtifactDescriptor, RestoreTarget, SnapshotId, SnapshotManifest, SnapshotObject,
+    SnapshotPortability,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -24,6 +27,21 @@ const MAXIMUM_POINTER_BYTES: u64 = 64 * 1024;
 const MAXIMUM_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
 pub trait ArtifactStore: Send + Sync {
+    fn snapshot_portability(&self) -> SnapshotPortability;
+
+    fn publish_transfer_grant(
+        &self,
+        scope: &ArtifactScope,
+        snapshot_id: &SnapshotId,
+    ) -> Result<SnapshotTransferGrant, ArtifactError>;
+
+    fn claim_transfer(
+        &self,
+        scope: &ArtifactScope,
+        snapshot_id: &SnapshotId,
+        target: &RestoreTarget,
+    ) -> Result<SnapshotTransferClaim, ArtifactError>;
+
     fn publish(
         &self,
         publication: SnapshotPublication,
@@ -248,6 +266,52 @@ impl ArtifactRepository {
             reused_objects,
             publish_millis: started.elapsed().as_millis(),
         })
+    }
+
+    pub(crate) fn publish_transfer_grant(
+        &self,
+        scope: &ArtifactScope,
+        snapshot_id: &SnapshotId,
+    ) -> Result<SnapshotTransferGrant, ArtifactError> {
+        let deadline = deadline(Instant::now(), self.limits.operation_timeout)?;
+        let _permit = self.operations.acquire(deadline)?;
+        let temporary = tempfile::Builder::new()
+            .prefix("sandbox-artifact-transfer-")
+            .tempdir()
+            .map_err(|error| io_error("artifact transfer staging", error))?;
+        let (manifest, _) = self.load_manifest(scope, snapshot_id, temporary.path(), deadline)?;
+        crate::transfer::publish_grant(
+            self.backend.as_ref(),
+            &self.envelope_key,
+            scope,
+            &manifest,
+            temporary.path(),
+            deadline,
+        )
+    }
+
+    pub(crate) fn claim_transfer(
+        &self,
+        scope: &ArtifactScope,
+        snapshot_id: &SnapshotId,
+        target: &RestoreTarget,
+    ) -> Result<SnapshotTransferClaim, ArtifactError> {
+        let deadline = deadline(Instant::now(), self.limits.operation_timeout)?;
+        let _permit = self.operations.acquire(deadline)?;
+        let temporary = tempfile::Builder::new()
+            .prefix("sandbox-artifact-claim-")
+            .tempdir()
+            .map_err(|error| io_error("artifact claim staging", error))?;
+        let (manifest, _) = self.load_manifest(scope, snapshot_id, temporary.path(), deadline)?;
+        crate::transfer::claim(
+            self.backend.as_ref(),
+            &self.envelope_key,
+            scope,
+            &manifest,
+            target,
+            temporary.path(),
+            deadline,
+        )
     }
 
     pub(crate) fn materialize(
@@ -850,8 +914,32 @@ mod tests {
             ArtifactLimits::default(),
         )
         .expect("local store");
+        assert_eq!(
+            store.snapshot_portability(),
+            SnapshotPortability::SameWorker
+        );
         let fixture = fixture("snapshot-local", "tenant-a");
         assert_conformance(&store, &fixture, &directory.path().join("materialized"));
+        let grant = store
+            .publish_transfer_grant(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+            )
+            .expect("local transfer grant");
+        store
+            .claim_transfer(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+                &RestoreTarget {
+                    tenant_id: grant.tenant_id,
+                    workspace_id: grant.workspace_id,
+                    sandbox_id: grant.sandbox_id,
+                    worker_id: WorkerId::parse("worker-b").expect("worker"),
+                    assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
+                    artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+                },
+            )
+            .expect("local transfer claim contract");
     }
 
     #[test]
@@ -1056,6 +1144,115 @@ mod tests {
             )
             .is_err());
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn transfer_claim_has_one_destination_and_is_idempotent_for_its_owner() {
+        let backend = Arc::new(FaultBackend::new(usize::MAX));
+        let repository = ArtifactRepository::new(backend, MASTER_KEY, ArtifactLimits::default())
+            .expect("artifact repository");
+        let fixture = fixture("snapshot-transfer", "tenant-a");
+        repository
+            .publish(fixture.publication.clone())
+            .expect("publish snapshot");
+        let grant = repository
+            .publish_transfer_grant(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+            )
+            .expect("publish transfer grant");
+        assert_eq!(grant.source_assignment_epoch.get(), 7);
+        let target = RestoreTarget {
+            tenant_id: grant.tenant_id.clone(),
+            workspace_id: grant.workspace_id.clone(),
+            sandbox_id: grant.sandbox_id.clone(),
+            worker_id: WorkerId::parse("worker-b").expect("worker"),
+            assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
+            artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+        };
+        let claim = repository
+            .claim_transfer(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+                &target,
+            )
+            .expect("claim transfer");
+        assert_eq!(claim.destination_worker, target.worker_id);
+        assert_eq!(
+            repository
+                .claim_transfer(
+                    &fixture.publication.scope,
+                    &fixture.publication.manifest.snapshot_id,
+                    &target,
+                )
+                .expect("repeat owner claim"),
+            claim
+        );
+
+        let competing = RestoreTarget {
+            worker_id: WorkerId::parse("worker-c").expect("worker"),
+            assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(9).expect("epoch"),
+            ..target
+        };
+        assert!(matches!(
+            repository.claim_transfer(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+                &competing,
+            ),
+            Err(ArtifactError::AlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn live_snapshot_cannot_receive_a_transfer_grant() {
+        let backend = Arc::new(FaultBackend::new(usize::MAX));
+        let repository = ArtifactRepository::new(backend, MASTER_KEY, ArtifactLimits::default())
+            .expect("artifact repository");
+        let mut fixture = fixture("snapshot-live", "tenant-a");
+        fixture.publication.manifest.mode = SnapshotMode::Live;
+        repository
+            .publish(fixture.publication.clone())
+            .expect("publish snapshot");
+        assert!(matches!(
+            repository.publish_transfer_grant(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+            ),
+            Err(ArtifactError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn interrupted_transfer_grant_never_becomes_claimable() {
+        let backend = Arc::new(FaultBackend::new(6));
+        let repository = ArtifactRepository::new(backend, MASTER_KEY, ArtifactLimits::default())
+            .expect("artifact repository");
+        let fixture = fixture("snapshot-transfer-interrupted", "tenant-a");
+        repository
+            .publish(fixture.publication.clone())
+            .expect("publish snapshot");
+        assert!(repository
+            .publish_transfer_grant(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+            )
+            .is_err());
+        let target = RestoreTarget {
+            tenant_id: fixture.publication.manifest.tenant_id.clone(),
+            workspace_id: fixture.publication.manifest.workspace_id.clone(),
+            sandbox_id: fixture.publication.manifest.sandbox_id.clone(),
+            worker_id: WorkerId::parse("worker-b").expect("worker"),
+            assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
+            artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
+        };
+        assert!(repository
+            .claim_transfer(
+                &fixture.publication.scope,
+                &fixture.publication.manifest.snapshot_id,
+                &target,
+            )
+            .is_err());
     }
 
     #[test]

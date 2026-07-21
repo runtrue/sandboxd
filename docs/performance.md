@@ -66,10 +66,14 @@ gVisor worker.
 Snapshot and restore responses retain storage measurements from the real
 artifact path. Snapshot results include object count, logical bytes,
 transferred bytes, reused objects, and publication latency. A sandbox created
-by restore includes transferred bytes and materialization latency in its status.
-These values cover hashing, envelope encryption, provider transfer, verified
-decryption, and immutable local publication; they do not include runsc's
-checkpoint or process-restore time.
+by restore includes transferred bytes, materialization, cohort validation,
+transfer claim, runtime restore, and total restore latency in its status.
+Snapshot responses also retain checkpoint and source-cleanup latency; a
+stop-and-move response adds durable-fence and transfer-grant latency. Storage
+values cover hashing, envelope encryption, provider transfer, verified
+decryption, and immutable local publication. Runtime restore ends when runsc
+reports all selected services restored. Guest-level time to first instruction
+requires an instrumented workload and is not inferred from that signal.
 
 The local lifecycle fixture prints these fields while exercising both a live
 copy and stop-and-move:
@@ -95,6 +99,19 @@ One local run on the validated x86-64 cohort on 2026-07-20 produced:
 Both publications reused one metadata object. The same checkout produced a
 3,159,488-byte release binary. `main` before the artifact-store change was
 2,864,456 bytes. These are single-host reference values, not release thresholds.
+
+After adding the fenced migration protocol, one local run on the same class of
+worker on 2026-07-21 produced:
+
+| Mode | Fence | Checkpoint | Publish | Source cleanup | Materialize | Cohort check | Claim | Runtime restore | Total restore |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| live | n/a | 222 ms | 283 ms | n/a | 170 ms | 21 ms | n/a | 641 ms | 836 ms |
+| stop-and-move | 1 ms | 161 ms | 292 ms | 120 ms | 169 ms | 21 ms | 0 ms | 575 ms | 768 ms |
+
+This run used the local provider and therefore exercised a same-worker transfer
+grant and claim, not a cross-worker data transfer. The claim rounded below one
+millisecond. These measurements end when runsc reports restoration complete;
+they are not guest-level time to first instruction.
 
 GitHub-hosted runners have variable CPU and storage neighbors. The PR comment
 flags a possible regression when throughput falls by more than 10% or p99

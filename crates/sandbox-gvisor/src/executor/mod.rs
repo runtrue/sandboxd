@@ -78,6 +78,10 @@ pub struct GvisorSandboxStatus {
 pub struct SnapshotRestoreMetrics {
     pub transferred_bytes: u64,
     pub materialization_millis: u128,
+    pub cohort_check_millis: u128,
+    pub transfer_claim_millis: u128,
+    pub runtime_restore_millis: u128,
+    pub total_restore_millis: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -524,6 +528,15 @@ impl Resources {
 }
 
 impl GvisorSandbox {
+    #[must_use]
+    pub fn is_executable(&self) -> bool {
+        self.resources.is_some()
+            && matches!(
+                self.state,
+                GvisorSandboxState::Running | GvisorSandboxState::Paused
+            )
+    }
+
     pub fn status(&self) -> Result<GvisorSandboxStatus, SandboxError> {
         let mut running_services = 0;
         let mut paused_services = 0;

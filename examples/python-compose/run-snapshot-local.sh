@@ -13,7 +13,6 @@ state_root="$run_root/state"
 daemon_log="$run_root/daemon.log"
 source_sandbox="ss-$$"
 live_restored_sandbox="sl-$$"
-move_restored_sandbox="sm-$$"
 live_snapshot="snapshot-live-$$"
 move_snapshot="snapshot-move-$$"
 
@@ -39,7 +38,6 @@ cleanup() {
   if [[ -S "$socket" ]]; then
     "$daemon" stop --socket "$socket" --sandbox "$source_sandbox" >/dev/null 2>&1 || true
     "$daemon" stop --socket "$socket" --sandbox "$live_restored_sandbox" >/dev/null 2>&1 || true
-    "$daemon" stop --socket "$socket" --sandbox "$move_restored_sandbox" >/dev/null 2>&1 || true
     if "$daemon" shutdown --socket "$socket" >/dev/null 2>&1; then
       shutdown_ok=true
     fi
@@ -152,8 +150,12 @@ counter_before_move=$(/usr/local/bin/runsc --root="$source_runsc_root" "${runsc_
   exec --user=65534:65534 "rts-$source_runtime-client" /bin/cat /tmp/snapshot-counter)
 "$daemon" snapshot --socket "$socket" --sandbox "$source_sandbox" \
   --snapshot "$move_snapshot" --stop-after
+if "$daemon" inspect --socket "$socket" --sandbox "$source_sandbox" >/dev/null 2>&1; then
+  echo "source assignment remained executable after stop-and-move" >&2
+  exit 1
+fi
 move_restore=$("$daemon" restore --socket "$socket" --lock "$lock_path" \
-  --sandbox "$move_restored_sandbox" --snapshot "$move_snapshot" --timeout-seconds 30)
+  --sandbox "$source_sandbox" --snapshot "$move_snapshot" --timeout-seconds 30)
 printf '%s\n' "$move_restore"
 move_restored_runtime=$(sed -n 's/.*"runtime_project":"\([^"]*\)".*/\1/p' <<<"$move_restore")
 if [[ -z $move_restored_runtime ]]; then
@@ -170,9 +172,9 @@ if (( counter_after_move <= counter_before_move )); then
   exit 1
 fi
 
-"$daemon" inspect --socket "$socket" --sandbox "$move_restored_sandbox"
-"$daemon" pause --socket "$socket" --sandbox "$move_restored_sandbox" >/dev/null
-"$daemon" resume --socket "$socket" --sandbox "$move_restored_sandbox" >/dev/null
-"$daemon" stop --socket "$socket" --sandbox "$move_restored_sandbox" >/dev/null
+"$daemon" inspect --socket "$socket" --sandbox "$source_sandbox"
+"$daemon" pause --socket "$socket" --sandbox "$source_sandbox" >/dev/null
+"$daemon" resume --socket "$socket" --sandbox "$source_sandbox" >/dev/null
+"$daemon" stop --socket "$socket" --sandbox "$source_sandbox" >/dev/null
 printf 'snapshot_restore_passed live_source=%s live_copy=%s move_before=%s move_after=%s\n' \
   "$counter_after_live" "$live_restored_counter" "$counter_before_move" "$counter_after_move"

@@ -1,6 +1,6 @@
 use super::{
-    bundle, create_resources, runtime_id, validate_admitted, validate_project, GvisorSandbox,
-    GvisorSandboxState, ImmutableRootfs, Resources,
+    bundle, create_resources, process::Runsc, runtime_id, validate_admitted, validate_project,
+    GvisorSandbox, GvisorSandboxState, ImmutableRootfs, Resources,
 };
 use crate::{
     compiler::verify_lock,
@@ -9,7 +9,7 @@ use crate::{
     SandboxError,
 };
 use runtrue_sandbox_artifact::{ArtifactScope, ArtifactStore};
-use runtrue_sandbox_core::{LifecycleState, SnapshotId, SnapshotMode};
+use runtrue_sandbox_core::{LifecycleState, RestoreTarget, SnapshotId, SnapshotMode};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -26,10 +26,12 @@ pub fn restore_admitted(
     artifact_store: &dyn ArtifactStore,
     artifact_scope: &ArtifactScope,
     snapshot_id: &SnapshotId,
+    restore_target: &RestoreTarget,
     runsc_program: &Path,
     ip_program: &Path,
     admitted: &BTreeMap<String, ImmutableRootfs>,
 ) -> Result<GvisorSandbox, SandboxError> {
+    let restore_started = Instant::now();
     verify_lock(lock)?;
     validate_project(project)?;
     validate_admitted(lock, admitted)?;
@@ -41,12 +43,23 @@ pub fn restore_admitted(
     )?;
     let manifest = &restored.manifest;
     let metadata = &restored.metadata;
+    let cohort_started = Instant::now();
+    manifest
+        .validate_restore_target(restore_target)
+        .map_err(|error| SandboxError::Runtime(error.to_string()))?;
     if manifest.sandbox_spec_digest != lock.topology_digest
         || manifest.backend.kind != runtrue_sandbox_core::BackendKind::Gvisor
         || manifest.backend.implementation != "runsc"
+        || manifest.backend.state_format_version != 1
         || manifest.backend.implementation_version != metadata.runsc_version
         || manifest.backend.configuration_digest != metadata.runtime_configuration_digest
+        || manifest.restore_requirements.minimum_backend_version != metadata.runsc_version
         || manifest.restore_requirements.cpu_features_digest != metadata.cpu_features_digest
+        || !manifest
+            .restore_requirements
+            .required_cpu_features
+            .is_empty()
+        || !manifest.restore_requirements.preserves_internal_connections
         || manifest.mode != metadata.mode
         || manifest.created_unix_millis != metadata.created_unix_millis
         || manifest.restore_requirements.architecture != std::env::consts::ARCH
@@ -64,10 +77,33 @@ pub fn restore_admitted(
             "snapshot is incompatible with the requested topology or host".to_owned(),
         ));
     }
+    let preflight = tempfile::Builder::new()
+        .prefix("restore-cohort-")
+        .tempdir_in(snapshot_staging_root)
+        .map_err(|error| crate::io_error(snapshot_staging_root, error))?;
+    let preflight_runsc = Runsc::new(runsc_program, &preflight.path().join("runsc"))?;
+    if preflight_runsc.version()? != metadata.runsc_version
+        || preflight_runsc.configuration_digest() != metadata.runtime_configuration_digest
+        || preflight_runsc.cpu_features_digest()? != metadata.cpu_features_digest
+    {
+        return Err(SandboxError::Runtime(
+            "snapshot runtime or CPU compatibility check failed".to_owned(),
+        ));
+    }
+    let mut transfer_claim_millis = 0;
+    if manifest.source_worker != restore_target.worker_id {
+        let claim_started = Instant::now();
+        artifact_store
+            .claim_transfer(artifact_scope, snapshot_id, restore_target)
+            .map_err(|error| SandboxError::Runtime(format!("claim snapshot transfer: {error}")))?;
+        transfer_claim_millis = claim_started.elapsed().as_millis();
+    }
+    let cohort_check_millis = cohort_started.elapsed().as_millis();
     let rootfs_by_image = admitted
         .iter()
         .map(|(id, image)| (id.clone(), image.rootfs().to_owned()))
         .collect::<BTreeMap<_, _>>();
+    let runtime_started = Instant::now();
     let mut resources = create_resources(lock, project, state_root, runsc_program, ip_program)?;
     let compatibility = (|| {
         Ok::<_, SandboxError>(
@@ -114,6 +150,7 @@ pub fn restore_admitted(
             ))),
         };
     }
+    let runtime_restore_millis = runtime_started.elapsed().as_millis();
     Ok(GvisorSandbox {
         project: project.to_owned(),
         topology_digest: lock.topology_digest.clone(),
@@ -123,6 +160,10 @@ pub fn restore_admitted(
         snapshot_restore: Some(super::SnapshotRestoreMetrics {
             transferred_bytes: restored.transferred_bytes,
             materialization_millis: restored.materialization_millis,
+            cohort_check_millis,
+            transfer_claim_millis,
+            runtime_restore_millis,
+            total_restore_millis: restore_started.elapsed().as_millis(),
         }),
     })
 }
@@ -184,9 +225,11 @@ pub(super) fn snapshot(
             (service.clone(), state)
         })
         .collect();
+    let checkpoint_started = Instant::now();
     resources
         .runsc
         .checkpoint(&control_id, image_path, true, Duration::from_secs(60))?;
+    let checkpoint_millis = checkpoint_started.elapsed().as_millis();
     let root_service = resources
         .processes
         .iter()
@@ -207,10 +250,13 @@ pub(super) fn snapshot(
         ordered_services,
         service_states,
     )?;
-    let summary = snapshot::publish(artifact_store, publication, &metadata)?;
+    let mut summary = snapshot::publish(artifact_store, publication, &metadata)?;
+    summary.checkpoint_millis = checkpoint_millis;
     if mode == SnapshotMode::StopAndMove {
+        let cleanup_started = Instant::now();
         let mut resources = sandbox.resources.take().expect("resources still exist");
         resources.cleanup()?;
+        summary.source_cleanup_millis = cleanup_started.elapsed().as_millis();
         sandbox.paused_runtime_ids.clear();
         sandbox.state = GvisorSandboxState::Stopped;
     } else {
