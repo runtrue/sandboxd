@@ -19,6 +19,8 @@ pub(super) fn write_bundle(
     network_namespace: &str,
     hosts: &Path,
     resolv: &Path,
+    http_proxy: Option<&str>,
+    no_proxy: Option<&str>,
     tmpfs_bytes: u64,
     role: ContainerRole<'_>,
 ) -> Result<(), SandboxError> {
@@ -41,6 +43,15 @@ pub(super) fn write_bundle(
         ),
     ]);
     environment.extend(service.environment.clone());
+    if let Some(proxy) = http_proxy {
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            environment.insert(name.to_owned(), proxy.to_owned());
+        }
+    }
+    if let Some(no_proxy) = no_proxy {
+        environment.insert("NO_PROXY".to_owned(), no_proxy.to_owned());
+        environment.insert("no_proxy".to_owned(), no_proxy.to_owned());
+    }
     let environment = environment
         .into_iter()
         .map(|(name, value)| format!("{name}={value}"))
@@ -181,6 +192,8 @@ mod tests {
             "test-netns",
             &hosts,
             &resolv,
+            None,
+            None,
             1024,
             ContainerRole::Sandbox,
         )

@@ -7,4 +7,8 @@ pub mod provider;
 
 pub use docker::Docker;
 pub use error::{io_error, SandboxError};
-pub use model::{LockedDescriptor, LockedImage, RootFilesystemMode, SandboxPolicy, TopologyLock};
+pub use model::{
+    is_protected_destination, DnsPolicy, EgressLimits, HttpEgressRule, HttpScheme, IngressRule,
+    LockedDescriptor, LockedImage, NetworkPolicy, NetworkProfile, RootFilesystemMode,
+    SandboxPolicy, TcpEgressRule, TopologyLock,
+};

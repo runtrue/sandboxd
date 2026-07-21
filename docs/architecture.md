@@ -191,14 +191,69 @@ can retry deletion of runsc, network, and cgroup materializations.
 
 ## Networking
 
-Each sandbox receives one host network namespace and one private bridge/veth
-attachment. No default route, NAT rule, nameserver, or host address is
-installed. Service names resolve to shared loopback.
+Each sandbox receives one host network namespace, one private bridge/veth
+attachment, and one nftables table whose name is derived from the assignment's
+runtime identity. The `none` profile is the default: it installs no default
+route, host address, NAT rule, or nameserver and retains the original no-egress
+behavior.
+
+An explicit top-level `x-runtrue-network` policy is canonicalized into the
+topology digest. `http_connect` installs a sandbox-local policy resolver and an
+HTTP/CONNECT proxy. The OCI environment points HTTP clients at that proxy, and
+nftables drops every direct guest input or forwarded packet. The proxy matches
+complete lower-case DNS labels, schemes, and ports, rejects IP literals, pins a
+filtered public resolution for each connection, and reapplies policy when a
+redirect causes a new request. Loopback, link-local, private, carrier-grade NAT,
+metadata, multicast, reserved, and documentation destinations are never valid
+HTTP proxy targets.
+
+`restricted_tcp` is intended only for a signer-approved topology. Its canonical
+destination CIDR and port rules are rendered into the sandbox nftables table;
+all unmatched forwarding is dropped. DNS and DNS-over-TLS ports cannot be added
+to raw TCP rules. The per-sandbox policy resolver filters every synthesized
+answer against the authorized CIDRs. nftables connection-count, byte-quota, and
+rate rules are applied before destination accepts. HTTP proxy traffic uses the
+same limits in its relay. gVisor TBF was not selected because one Sentry owns the
+whole network stack and the required accounting boundary is the complete
+sandbox; enforcing the ceiling in the host policy path also covers traffic after
+it leaves the Sentry.
+
+Ingress declarations contain only a guest service identity and container port.
+The worker allocates loopback host endpoints and 256-bit bearer credentials;
+caller-selected host addresses and ports are not represented in the lock.
+Authorization is removed before forwarding. Pause and fencing deactivate new
+and existing relays, resume reactivates the current assignment, and stop or
+move drops the listeners. Restore allocates a new endpoint and credential under
+the destination assignment epoch, so a stale source mapping cannot become the
+new route. A deployment may place its own authenticated edge in front of the
+worker-loopback endpoint.
 
 The containers share the Sentry network stack and port namespace. This is
 pod-style networking, not independent Docker Compose network namespaces. Two
-services that bind the same address and port conflict. Port publishing and
-external networking are not part of the accepted topology.
+services that bind the same address and port conflict, and every network policy
+therefore applies to the complete sandbox rather than an individual service.
+
+For example, an HTTPS-only profile with one published guest port is:
+
+```yaml
+x-runtrue-network:
+  profile: http_connect
+  http_rules:
+    - domains: [api.example.com, "*.services.example"]
+      schemes: [https]
+      ports: [443]
+  dns:
+    maximum_queries: 256
+    maximum_response_bytes: 4096
+    maximum_total_bytes: 1048576
+  limits:
+    maximum_connections: 32
+    maximum_bytes: 67108864
+    bandwidth_bytes_per_second: 8388608
+  ingress:
+    - service: api
+      container_port: 8080
+```
 
 ## Resource containment
 

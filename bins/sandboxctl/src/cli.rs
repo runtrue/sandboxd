@@ -72,5 +72,7 @@ pub(crate) enum Command {
         runsc: PathBuf,
         #[arg(long, default_value = "/usr/sbin/ip")]
         ip: PathBuf,
+        #[arg(long, default_value = "/usr/sbin/nft")]
+        nft: PathBuf,
     },
 }
