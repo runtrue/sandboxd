@@ -17,6 +17,8 @@ use nix::{
     poll::{poll, PollFd, PollFlags},
 };
 use runtrue_sandbox_artifact::{ArtifactLimits, ArtifactStore, LocalArtifactStore};
+#[cfg(feature = "s3-artifacts")]
+use runtrue_sandbox_artifact::{S3ArtifactConfig, S3ArtifactStore};
 use runtrue_sandbox_gvisor::executor;
 use runtrue_sandbox_oci::{
     io_error,
@@ -70,14 +72,55 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
     let assignments = AssignmentLedger::open(&control_root)?;
     assignments.reconcile_after_recovery()?;
     let audit = AuditLog::open(&control_root)?;
-    let key_path = config
-        .artifact_master_key
-        .unwrap_or_else(|| control_root.join("artifact-master.key"));
-    let artifact_store: Arc<dyn ArtifactStore> = Arc::new(
-        LocalArtifactStore::open(artifact_root, &key_path, ArtifactLimits::default()).map_err(
-            |error| SandboxError::Runtime(format!("open local artifact store: {error}")),
-        )?,
-    );
+    let artifact_store: Arc<dyn ArtifactStore> = if let Some(bucket) = &config.artifact_s3_bucket {
+        #[cfg(not(feature = "s3-artifacts"))]
+        {
+            let _ = (
+                bucket,
+                &config.artifact_s3_region,
+                &config.artifact_s3_prefix,
+            );
+            return Err(SandboxError::Runtime(
+                "this sandboxd build does not include S3 artifact support".to_owned(),
+            ));
+        }
+        #[cfg(feature = "s3-artifacts")]
+        {
+            let key_path = config
+                .artifact_master_key
+                .as_deref()
+                .expect("S3 artifact master key is validated");
+            Arc::new(
+                S3ArtifactStore::open(
+                    S3ArtifactConfig {
+                        bucket: bucket.clone(),
+                        region: config.artifact_s3_region.clone(),
+                        endpoint: config.artifact_s3_endpoint.clone(),
+                        key_prefix: config.artifact_s3_prefix.clone(),
+                        virtual_hosted: config.artifact_s3_virtual_hosted,
+                        allow_http_for_local_testing: config
+                            .artifact_s3_allow_http_for_local_testing,
+                        credentials_file: config.artifact_s3_credentials_file.clone(),
+                    },
+                    key_path,
+                    ArtifactLimits::default(),
+                )
+                .map_err(|error| {
+                    SandboxError::Runtime(format!("open S3 artifact store: {error}"))
+                })?,
+            )
+        }
+    } else {
+        let key_path = config
+            .artifact_master_key
+            .clone()
+            .unwrap_or_else(|| control_root.join("artifact-master.key"));
+        Arc::new(
+            LocalArtifactStore::open(artifact_root, &key_path, ArtifactLimits::default()).map_err(
+                |error| SandboxError::Runtime(format!("open local artifact store: {error}")),
+            )?,
+        )
+    };
     let work_orders = config
         .work_order_key
         .as_deref()

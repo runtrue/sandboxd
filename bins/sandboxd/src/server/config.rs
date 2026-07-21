@@ -9,6 +9,13 @@ pub(crate) struct ServerConfig {
     pub(crate) work_order_key: Option<PathBuf>,
     pub(crate) worker_id: WorkerId,
     pub(crate) artifact_master_key: Option<PathBuf>,
+    pub(crate) artifact_s3_bucket: Option<String>,
+    pub(crate) artifact_s3_region: String,
+    pub(crate) artifact_s3_endpoint: Option<String>,
+    pub(crate) artifact_s3_prefix: String,
+    pub(crate) artifact_s3_virtual_hosted: bool,
+    pub(crate) artifact_s3_allow_http_for_local_testing: bool,
+    pub(crate) artifact_s3_credentials_file: Option<PathBuf>,
     pub(crate) state_root: PathBuf,
     pub(crate) image_store: PathBuf,
     pub(crate) ctr: PathBuf,
@@ -58,6 +65,21 @@ impl ServerConfig {
                 "I/O timeout must be between 1 and 60 seconds".to_owned(),
             ));
         }
+        if self.artifact_s3_bucket.is_some() && self.artifact_master_key.is_none() {
+            return Err(SandboxError::Runtime(
+                "S3 artifact storage requires an explicit shared artifact master key".to_owned(),
+            ));
+        }
+        if self.artifact_s3_bucket.is_none()
+            && (self.artifact_s3_endpoint.is_some()
+                || self.artifact_s3_virtual_hosted
+                || self.artifact_s3_allow_http_for_local_testing
+                || self.artifact_s3_credentials_file.is_some())
+        {
+            return Err(SandboxError::Runtime(
+                "S3 artifact options require --artifact-s3-bucket".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -74,6 +96,13 @@ mod tests {
             work_order_key: Some(PathBuf::from("/etc/sandboxd/work-order.key")),
             worker_id: WorkerId::parse("worker-a").expect("worker ID"),
             artifact_master_key: None,
+            artifact_s3_bucket: None,
+            artifact_s3_region: "us-east-1".to_owned(),
+            artifact_s3_endpoint: None,
+            artifact_s3_prefix: "runtrue-sandboxd/v1".to_owned(),
+            artifact_s3_virtual_hosted: false,
+            artifact_s3_allow_http_for_local_testing: false,
+            artifact_s3_credentials_file: None,
             state_root: PathBuf::from("/var/lib/sandboxd/state"),
             image_store: PathBuf::from("/var/lib/sandboxd/images"),
             ctr: PathBuf::from("/usr/bin/ctr"),
@@ -101,5 +130,19 @@ mod tests {
         let mut incomplete = config();
         incomplete.work_order_key = None;
         assert!(incomplete.validate().is_err());
+    }
+
+    #[test]
+    fn s3_artifacts_require_an_explicit_shared_master_key() {
+        let mut s3 = config();
+        s3.artifact_s3_bucket = Some("sandbox-artifacts".to_owned());
+        assert!(s3.validate().is_err());
+
+        s3.artifact_master_key = Some(PathBuf::from("/etc/sandboxd/artifact-master.key"));
+        s3.validate().expect("complete S3 configuration");
+
+        let mut stray_endpoint = config();
+        stray_endpoint.artifact_s3_endpoint = Some("https://s3.example.com".to_owned());
+        assert!(stray_endpoint.validate().is_err());
     }
 }

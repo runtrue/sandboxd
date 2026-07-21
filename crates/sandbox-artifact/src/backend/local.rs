@@ -44,7 +44,7 @@ impl LocalArtifactStore {
     }
 }
 
-fn load_or_create_master_key(path: &Path) -> Result<[u8; 32], ArtifactError> {
+pub(super) fn load_or_create_master_key(path: &Path) -> Result<[u8; 32], ArtifactError> {
     if !path.is_absolute() {
         return Err(ArtifactError::Invalid(
             "artifact master-key path must be absolute".to_owned(),
@@ -85,7 +85,7 @@ fn load_or_create_master_key(path: &Path) -> Result<[u8; 32], ArtifactError> {
     read_master_key(path)
 }
 
-fn read_master_key(path: &Path) -> Result<[u8; 32], ArtifactError> {
+pub(super) fn read_master_key(path: &Path) -> Result<[u8; 32], ArtifactError> {
     if !path.is_absolute() {
         return Err(ArtifactError::Invalid(
             "artifact master-key path must be absolute".to_owned(),

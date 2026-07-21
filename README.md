@@ -30,10 +30,11 @@ restore.
   transfer grants and one-winner destination claims; and
 - local restore under a new sandbox identity.
 
-The daemon derives snapshot portability from the configured artifact provider;
-the current local provider reports `same_worker`. The backend-neutral contracts
-reserve stable identities for both `gvisor` and `marcovm`; this repository
-contains a gVisor executor only.
+The daemon derives snapshot portability from the configured artifact provider.
+The default local provider reports `same_worker`; the S3-compatible provider
+reports `cross_worker_same_backend`. The backend-neutral contracts reserve
+stable identities for both `gvisor` and `marcovm`; this repository contains a
+gVisor executor only.
 
 ## Execution model
 
@@ -82,8 +83,8 @@ independent guest CPU or memory guarantees.
   capability records, and snapshot contracts.
 - `sandbox-runtime` defines backend and live-instance interfaces.
 - `sandbox-artifact` owns encrypted content-addressed publication, verified
-  materialization, references, garbage collection, and the local storage
-  provider.
+  materialization, references, garbage collection, and local or S3-compatible
+  storage providers.
 - `sandbox-oci` owns Compose validation, topology locks, the backend-neutral
   image-provider contract, and the containerd provider.
 - `sandbox-gvisor` owns runsc execution, OCI bundles, host resources, portable
@@ -96,7 +97,7 @@ Detailed documentation covers [architecture and isolation](docs/architecture.md)
 ## Validated host cohort
 
 - Linux x86-64 with cgroup v2 and the `cpu`, `memory`, and `pids` controllers;
-- Rust 1.94;
+- Rust 1.97.1;
 - gVisor `runsc` release `20260714.0` using the systrap platform;
 - containerd 2.2.2 with the overlayfs snapshotter and `ctr` client;
 - util-linux `losetup`, e2fsprogs `mkfs.ext4`, and available loop devices;
@@ -104,6 +105,34 @@ Detailed documentation covers [architecture and isolation](docs/architecture.md)
 - outbound HTTPS access to the OCI registries used during preparation.
 
 The worker requires root for cgroup and network namespace management.
+
+## S3 artifact storage
+
+Pass `--artifact-s3-bucket` to opt into shared S3-compatible artifact storage.
+The provider uses `s3-wire`, reads the standard `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` variables, and uses
+HTTPS by default. Every worker in a migration pool must receive the same
+owner-only 32-byte `--artifact-master-key` file and the same bucket and prefix,
+while retaining a distinct `--worker-id` and local state root.
+
+```bash
+sudo --preserve-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN \
+  runtrue-sandboxd serve \
+  --worker-id worker-a \
+  --artifact-master-key /etc/runtrue-sandboxd/artifact-master.key \
+  --artifact-s3-bucket sandbox-artifacts \
+  --artifact-s3-region us-east-1
+```
+
+Custom compatible endpoints use `--artifact-s3-endpoint`. Plain HTTP remains
+disabled unless `--artifact-s3-allow-http-for-local-testing` is explicitly set;
+that exception is intended only for a trusted local test endpoint. Tenant and
+workspace identifiers are hashed before they enter remote object keys. For
+rotating temporary credentials, pass an absolute owner-only JSON file with
+`access_key_id`, `secret_access_key`, and optional `session_token` fields through
+`--artifact-s3-credentials-file`; it is re-read for every signed request and is
+never copied into artifact metadata. Local-only builds can omit the remote
+dependency cohort with `cargo build -p runtrue-sandboxd --no-default-features`.
 
 ## Run locally
 
@@ -133,6 +162,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo audit
 cargo deny check advisories licenses bans sources
+./tools/test-s3-artifacts.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/performance/tests
 shellcheck tools/performance/run-control-plane.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
