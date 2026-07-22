@@ -292,6 +292,58 @@ struct AttachmentRecord {
     snapshot_policy: VolumeSnapshotPolicy,
 }
 
+fn record_freeze<Freeze, Persist, Thaw>(
+    record: &mut VolumeRecord,
+    freeze: Freeze,
+    persist: Persist,
+    thaw: Thaw,
+) -> Result<(), VolumeError>
+where
+    Freeze: FnOnce() -> Result<(), VolumeError>,
+    Persist: FnOnce(&VolumeRecord) -> Result<(), VolumeError>,
+    Thaw: FnOnce() -> Result<(), VolumeError>,
+{
+    if record.frozen {
+        return Ok(());
+    }
+    freeze()?;
+    record.frozen = true;
+    if let Err(error) = persist(record) {
+        let thaw = thaw();
+        if thaw.is_ok() {
+            record.frozen = false;
+        }
+        return match thaw {
+            Ok(()) => Err(error),
+            Err(thaw_error) => Err(VolumeError::Mount(format!(
+                "record frozen volume failed: {error}; unfreeze failed: {thaw_error}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+fn record_thaw<Thaw, Persist>(
+    record: &mut VolumeRecord,
+    thaw: Thaw,
+    persist: Persist,
+) -> Result<(), VolumeError>
+where
+    Thaw: FnOnce() -> Result<(), VolumeError>,
+    Persist: FnOnce(&VolumeRecord) -> Result<(), VolumeError>,
+{
+    if !record.frozen {
+        return Ok(());
+    }
+    thaw()?;
+    record.frozen = false;
+    if let Err(error) = persist(record) {
+        record.frozen = true;
+        return Err(error);
+    }
+    Ok(())
+}
+
 impl LocalVolumeProvider {
     pub fn open(config: LocalVolumeConfig) -> Result<Self, VolumeError> {
         Self::open_with_secret_resolver(config, None)
@@ -844,17 +896,34 @@ impl LocalVolumeProvider {
     }
 
     fn thaw(&self, directory: &Path, record: &mut VolumeRecord) -> Result<(), VolumeError> {
-        if record.frozen {
-            let data = directory.join("data");
-            self.run_external(
-                &self.config.fsfreeze_program,
-                &["--unfreeze", data.to_string_lossy().as_ref()],
-                "unfreeze named volume",
-            )?;
-            record.frozen = false;
-            self.write_record(directory, record)?;
+        if !record.frozen {
+            return Ok(());
         }
-        Ok(())
+        let data = directory.join("data");
+        let mounted = is_mount(&data)?;
+        record_thaw(
+            record,
+            || {
+                if mounted {
+                    self.unfreeze(&data, "unfreeze named volume")
+                } else {
+                    Ok(())
+                }
+            },
+            |record| self.write_record(directory, record),
+        )
+    }
+
+    fn recover_named_mount(&self, directory: &Path) -> Result<(), VolumeError> {
+        let data = directory.join("data");
+        if !is_mount(&data)? {
+            return Ok(());
+        }
+        let thaw = self.unfreeze(&data, "unfreeze volume during recovery");
+        let unmount = umount(&data).map_err(|error| {
+            VolumeError::Mount(format!("unmount volume during recovery: {error}"))
+        });
+        finish_mount_recovery(thaw, unmount)
     }
 
     fn unmount_storage(&self, directory: &Path) -> Result<(), VolumeError> {
@@ -1047,7 +1116,7 @@ impl LocalVolumeProvider {
             .map_err(|error| io_error(directory, error))
     }
 
-    fn run_external(
+    fn run_external_status(
         &self,
         program: &Path,
         arguments: &[&str],
@@ -1055,6 +1124,7 @@ impl LocalVolumeProvider {
     ) -> Result<std::process::Output, VolumeError> {
         let mut child = Command::new(program)
             .args(arguments)
+            .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1113,18 +1183,38 @@ impl LocalVolumeProvider {
                 "{operation} output exceeded its byte limit{suffix}"
             )));
         }
-        if !status.success() {
-            return Err(VolumeError::Mount(format!(
-                "{operation} exited {}: {}",
-                status,
-                format_stderr(&stderr.bytes, stderr.truncated)
-            )));
-        }
         Ok(std::process::Output {
             status,
             stdout: stdout.bytes,
             stderr: stderr.bytes,
         })
+    }
+
+    fn run_external(
+        &self,
+        program: &Path,
+        arguments: &[&str],
+        operation: &str,
+    ) -> Result<std::process::Output, VolumeError> {
+        let output = self.run_external_status(program, arguments, operation)?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err(external_status_error(operation, &output))
+        }
+    }
+
+    fn unfreeze(&self, data: &Path, operation: &str) -> Result<(), VolumeError> {
+        let output = self.run_external_status(
+            &self.config.fsfreeze_program,
+            &["--unfreeze", data.to_string_lossy().as_ref()],
+            operation,
+        )?;
+        if output.status.success() || is_already_thawed(&output) {
+            Ok(())
+        } else {
+            Err(external_status_error(operation, &output))
+        }
     }
 
     fn release_attachment_locked(&self, attachment: &VolumeAttachment) -> Result<(), VolumeError> {
@@ -1292,25 +1382,19 @@ impl VolumeProvider for LocalVolumeProvider {
                     "cannot freeze an unmounted named volume".to_owned(),
                 ));
             }
-            self.run_external(
-                &self.config.fsfreeze_program,
-                &["--freeze", data.to_string_lossy().as_ref()],
-                "freeze named volume",
+            record_freeze(
+                &mut record,
+                || {
+                    self.run_external(
+                        &self.config.fsfreeze_program,
+                        &["--freeze", data.to_string_lossy().as_ref()],
+                        "freeze named volume",
+                    )?;
+                    Ok(())
+                },
+                |record| self.write_record(&directory, record),
+                || self.unfreeze(&data, "unfreeze named volume after record failure"),
             )?;
-            record.frozen = true;
-            if let Err(error) = self.write_record(&directory, &record) {
-                let thaw = self.run_external(
-                    &self.config.fsfreeze_program,
-                    &["--unfreeze", data.to_string_lossy().as_ref()],
-                    "unfreeze named volume after record failure",
-                );
-                return match thaw {
-                    Ok(_) => Err(error),
-                    Err(thaw_error) => Err(VolumeError::Mount(format!(
-                        "record frozen volume failed: {error}; unfreeze failed: {thaw_error}"
-                    ))),
-                };
-            }
         }
         Ok(())
     }
@@ -1528,15 +1612,11 @@ impl VolumeProvider for LocalVolumeProvider {
             }
             report.cleared_attachments += record.attachments.len();
             record.attachments.clear();
-            if record.frozen && is_mount(&entry.path().join("data"))? {
-                self.run_external(
-                    &self.config.fsfreeze_program,
-                    &[
-                        "--unfreeze",
-                        entry.path().join("data").to_string_lossy().as_ref(),
-                    ],
-                    "unfreeze volume during recovery",
-                )?;
+            if matches!(
+                record.persistence_class,
+                VolumePersistenceClass::Ephemeral | VolumePersistenceClass::Persistent
+            ) {
+                self.recover_named_mount(&entry.path())?;
             }
             record.frozen = false;
             match record.persistence_class {
@@ -1712,6 +1792,35 @@ fn format_stderr(stderr: &[u8], truncated: bool) -> String {
     format!("{}{suffix}", String::from_utf8_lossy(stderr).trim())
 }
 
+fn external_status_error(operation: &str, output: &std::process::Output) -> VolumeError {
+    VolumeError::Mount(format!(
+        "{operation} exited {}: {}",
+        output.status,
+        format_stderr(&output.stderr, false)
+    ))
+}
+
+fn is_already_thawed(output: &std::process::Output) -> bool {
+    output.status.code() == Some(1)
+        && String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .next_back()
+            .is_some_and(|line| line.ends_with(": Invalid argument"))
+}
+
+fn finish_mount_recovery(
+    thaw: Result<(), VolumeError>,
+    unmount: Result<(), VolumeError>,
+) -> Result<(), VolumeError> {
+    match (thaw, unmount) {
+        (_, Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(thaw_error), Err(unmount_error)) => Err(VolumeError::Mount(format!(
+            "unfreeze volume during recovery failed: {thaw_error}; {unmount_error}"
+        ))),
+    }
+}
+
 fn digest_file(path: &Path) -> Result<(String, u64), VolumeError> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -1771,12 +1880,136 @@ fn verify_artifact(path: &Path, expected: &str) -> Result<u64, VolumeError> {
 mod tests {
     use super::*;
     use runtrue_sandbox_core::{TenantId, VolumeId, WorkspaceId};
+    use std::cell::RefCell;
+    use std::os::unix::process::ExitStatusExt as _;
 
     fn scope(tenant: &str) -> VolumeScope {
         VolumeScope::new(
             TenantId::parse(tenant).expect("tenant"),
             WorkspaceId::parse("workspace-a").expect("workspace"),
         )
+    }
+
+    fn test_record(frozen: bool) -> VolumeRecord {
+        VolumeRecord {
+            schema_version: RECORD_VERSION,
+            provider_id: LOCAL_VOLUME_PROVIDER_ID.to_owned(),
+            key: "a".repeat(64),
+            tenant_id: "tenant-a".to_owned(),
+            workspace_id: "workspace-a".to_owned(),
+            volume_id: "database".to_owned(),
+            persistence_class: VolumePersistenceClass::Persistent,
+            quota_bytes: runtrue_sandbox_core::MINIMUM_NAMED_VOLUME_BYTES,
+            content_digest: None,
+            frozen,
+            attachments: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn freeze_record_fault_thaws_before_returning_the_write_error() {
+        let mut record = test_record(false);
+        let operations = RefCell::new(Vec::new());
+
+        let error = record_freeze(
+            &mut record,
+            || {
+                operations.borrow_mut().push("freeze");
+                Ok(())
+            },
+            |record| {
+                assert!(record.frozen);
+                operations.borrow_mut().push("persist");
+                Err(VolumeError::Invalid("injected record fault".to_owned()))
+            },
+            || {
+                operations.borrow_mut().push("thaw");
+                Ok(())
+            },
+        )
+        .expect_err("record fault must be returned");
+
+        assert_eq!(operations.into_inner(), vec!["freeze", "persist", "thaw"]);
+        assert!(!record.frozen);
+        assert!(error.to_string().contains("injected record fault"));
+    }
+
+    #[test]
+    fn freeze_record_fault_preserves_the_compensation_error() {
+        let mut record = test_record(false);
+
+        let error = record_freeze(
+            &mut record,
+            || Ok(()),
+            |_| Err(VolumeError::Invalid("injected record fault".to_owned())),
+            || Err(VolumeError::Mount("injected thaw fault".to_owned())),
+        )
+        .expect_err("both failures must be returned");
+        let message = error.to_string();
+
+        assert!(record.frozen);
+        assert!(message.contains("injected record fault"));
+        assert!(message.contains("injected thaw fault"));
+    }
+
+    #[test]
+    fn thaw_record_fault_can_be_retried_after_the_filesystem_is_already_thawed() {
+        let mut record = test_record(true);
+        let thaw_calls = RefCell::new(0_u32);
+
+        let error = record_thaw(
+            &mut record,
+            || {
+                *thaw_calls.borrow_mut() += 1;
+                Ok(())
+            },
+            |_| Err(VolumeError::Invalid("injected record fault".to_owned())),
+        )
+        .expect_err("record fault must be returned");
+        assert!(record.frozen);
+        assert!(error.to_string().contains("injected record fault"));
+
+        record_thaw(
+            &mut record,
+            || {
+                *thaw_calls.borrow_mut() += 1;
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .expect("already-thawed retry");
+        assert!(!record.frozen);
+        assert_eq!(thaw_calls.into_inner(), 2);
+    }
+
+    #[test]
+    fn unfreeze_treats_only_einval_as_already_thawed() {
+        let already_thawed = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"fsfreeze: /volume: unfreeze failed: Invalid argument\n".to_vec(),
+        };
+        let other_failure = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"fsfreeze: /volume: unfreeze failed: Operation not permitted\n".to_vec(),
+        };
+
+        assert!(is_already_thawed(&already_thawed));
+        assert!(!is_already_thawed(&other_failure));
+    }
+
+    #[test]
+    fn recovery_accepts_a_thaw_error_only_after_a_safe_unmount() {
+        let thaw_error = || VolumeError::Mount("injected thaw fault".to_owned());
+        let unmount_error = || VolumeError::Mount("injected unmount fault".to_owned());
+
+        finish_mount_recovery(Err(thaw_error()), Ok(())).expect("safe unmount");
+        let error = finish_mount_recovery(Err(thaw_error()), Err(unmount_error()))
+            .expect_err("unsafe recovery must fail");
+        let message = error.to_string();
+        assert!(message.contains("injected thaw fault"));
+        assert!(message.contains("injected unmount fault"));
     }
 
     #[test]
