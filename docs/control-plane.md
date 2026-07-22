@@ -193,8 +193,9 @@ not expose shared image-cache contents or global counters.
 
 Protocol v2 is used by current local commands and is required on the workload
 socket. Signed requests use work-order schema 4, which adds `maximum_volumes`
-and `maximum_volume_bytes` to the canonical HMAC payload. The daemon sums each
-top-level volume quota once, even when several containers attach the same named
+and `maximum_volume_bytes` to the canonical HMAC payload. The daemon verifies
+each service mount against its top-level volume definition and sums each volume
+in the executable set once, even when several containers attach the same named
 volume. The same schema adds the versioned `allowed_guest_profiles` ceiling.
 Protocol v1 requests without an authorization object remain accepted only from
 UID 0 on the operator socket. This is an explicit migration path, not a
