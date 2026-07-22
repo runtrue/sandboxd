@@ -55,6 +55,11 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 
+artifact_digest=sha256:507aa5df7f283c70ea39528e7d0a27f2e29a7c685d9e0f360a89169d68713b64
+"$binary" publish-artifact --socket "$socket" \
+  --source "$example_dir/artifact-volume.txt" --digest "$artifact_digest"
+"$binary" publish-artifact --socket "$socket" \
+  --source "$example_dir/artifact-volume.txt" --digest "$artifact_digest"
 "$binary" admit --socket "$socket" --lock "$lock_path"
 "$binary" admit --socket "$socket" --lock "$compat_lock_path"
 "$binary" run --socket "$socket" --lock "$compat_lock_path" \
@@ -68,4 +73,5 @@ sleep 1
 "$binary" resume --socket "$socket" --sandbox "$sandbox"
 "$binary" inspect --socket "$socket" --sandbox "$sandbox"
 "$binary" stop --socket "$socket" --sandbox "$sandbox"
+"$binary" garbage-collect-artifacts --socket "$socket" --minimum-age-seconds 0
 "$binary" stats --socket "$socket"

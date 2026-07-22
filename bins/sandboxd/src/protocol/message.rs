@@ -5,6 +5,7 @@ use runtrue_sandbox_oci::TopologyLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+use std::path::PathBuf;
 
 pub(crate) const PROTOCOL_VERSION: u32 = 2;
 pub(crate) const LEGACY_OPERATOR_PROTOCOL_VERSION: u32 = 1;
@@ -84,6 +85,13 @@ pub(crate) enum Operation {
         snapshot: String,
         mode: SnapshotMode,
     },
+    PublishArtifact {
+        source: PathBuf,
+        digest: String,
+    },
+    GarbageCollectArtifacts {
+        minimum_age_seconds: u64,
+    },
     Shutdown,
 }
 
@@ -102,7 +110,9 @@ impl Operation {
             Self::Stop { .. } => WorkOrderOperation::Stop,
             Self::Logs { .. } => WorkOrderOperation::Logs,
             Self::Snapshot { .. } => WorkOrderOperation::Snapshot,
-            Self::Shutdown => return None,
+            Self::PublishArtifact { .. }
+            | Self::GarbageCollectArtifacts { .. }
+            | Self::Shutdown => return None,
         })
     }
 
@@ -117,7 +127,12 @@ impl Operation {
             | Self::Stop { sandbox }
             | Self::Logs { sandbox, .. }
             | Self::Snapshot { sandbox, .. } => Some(sandbox),
-            Self::Ping | Self::Stats | Self::Admit { .. } | Self::Shutdown => None,
+            Self::Ping
+            | Self::Stats
+            | Self::Admit { .. }
+            | Self::PublishArtifact { .. }
+            | Self::GarbageCollectArtifacts { .. }
+            | Self::Shutdown => None,
         }
     }
 
@@ -142,7 +157,17 @@ impl Operation {
             | Self::Run { topology, .. }
             | Self::Create { topology, .. }
             | Self::Restore { topology, .. } => Some(topology),
-            _ => None,
+            Self::Ping
+            | Self::Stats
+            | Self::Inspect { .. }
+            | Self::Pause { .. }
+            | Self::Resume { .. }
+            | Self::Stop { .. }
+            | Self::Logs { .. }
+            | Self::Snapshot { .. }
+            | Self::PublishArtifact { .. }
+            | Self::GarbageCollectArtifacts { .. }
+            | Self::Shutdown => None,
         }
     }
 }
@@ -216,5 +241,23 @@ mod tests {
             first.digest().expect("digest"),
             second.digest().expect("digest")
         );
+    }
+
+    #[test]
+    fn artifact_maintenance_is_operator_only_and_has_no_tenant_topology() {
+        let publication = Operation::PublishArtifact {
+            source: PathBuf::from("/operator/staging/dataset"),
+            digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let collection = Operation::GarbageCollectArtifacts {
+            minimum_age_seconds: 86_400,
+        };
+        for operation in [&publication, &collection] {
+            assert!(operation.work_order_operation().is_none());
+            assert!(operation.topology().is_none());
+            assert!(operation.sandbox().is_none());
+        }
+        let encoded = serde_json::to_value(&publication).expect("encode publication");
+        assert_eq!(encoded["kind"], "publish_artifact");
     }
 }

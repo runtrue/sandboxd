@@ -1,7 +1,8 @@
 use crate::{
-    error::io_error, model::validate_handle_spec, AttachmentOwner, MountedVolume, SecretResolver,
-    VolumeAttachment, VolumeCleanupReport, VolumeError, VolumeHandle, VolumeProvider,
-    VolumeProviderCapabilities, VolumeScope, VolumeSnapshot,
+    error::io_error, model::validate_handle_spec, ArtifactGarbageCollectionReport,
+    ArtifactPublication, ArtifactPublicationStatus, ArtifactVolumeStore, AttachmentOwner,
+    MountedVolume, SecretResolver, VolumeAttachment, VolumeCleanupReport, VolumeError,
+    VolumeHandle, VolumeProvider, VolumeProviderCapabilities, VolumeScope, VolumeSnapshot,
 };
 use nix::libc;
 use nix::mount::{mount, umount, MsFlags};
@@ -21,7 +22,7 @@ use std::{
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tempfile::Builder;
 use zeroize::Zeroizing;
@@ -261,34 +262,53 @@ impl LocalVolumeProvider {
         &self,
         source: &Path,
         expected_digest: &str,
-    ) -> Result<PathBuf, VolumeError> {
+    ) -> Result<ArtifactPublication, VolumeError> {
+        self.publish_artifact_impl(source, expected_digest)
+    }
+
+    fn publish_artifact_impl(
+        &self,
+        source: &Path,
+        expected_digest: &str,
+    ) -> Result<ArtifactPublication, VolumeError> {
         let _guard = self.operations.lock().expect("volume operation lock");
-        let destination = self.artifact_path(expected_digest).ok_or_else(|| {
+        let canonical_digest = canonical_artifact_digest(expected_digest).ok_or_else(|| {
             VolumeError::Invalid("artifact digest is not a sha256 identity".to_owned())
         })?;
-        if destination.exists() {
-            verify_artifact(&destination, expected_digest)?;
-            return Ok(destination);
-        }
-        let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
-        if !metadata.file_type().is_file() {
-            return Err(VolumeError::Invalid(
-                "artifact source must be a regular file".to_owned(),
-            ));
-        }
+        let destination = self
+            .artifact_path(&canonical_digest)
+            .expect("canonical artifact digest");
         let artifact_root = self.config.root.join("artifacts");
+        if destination.exists() {
+            let size_bytes = verify_artifact(&destination, &canonical_digest)?;
+            sync_directory(&artifact_root)?;
+            return Ok(ArtifactPublication {
+                digest: canonical_digest,
+                size_bytes,
+                status: ArtifactPublicationStatus::Reused,
+            });
+        }
         let mut input = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(source)
             .map_err(|error| io_error(source, error))?;
+        if !input
+            .metadata()
+            .map_err(|error| io_error(source, error))?
+            .is_file()
+        {
+            return Err(VolumeError::Invalid(
+                "artifact source must be a regular file".to_owned(),
+            ));
+        }
         let mut temporary = Builder::new()
             .prefix(".artifact-")
             .tempfile_in(&artifact_root)
             .map_err(|error| io_error(&artifact_root, error))?;
         let mut digest = Sha256::new();
         let mut bytes = 0_u64;
-        let mut buffer = [0_u8; 1024 * 1024];
+        let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             let read = input
                 .read(&mut buffer)
@@ -310,7 +330,7 @@ impl LocalVolumeProvider {
                 .map_err(|error| io_error(&artifact_root, error))?;
         }
         let actual = format!("sha256:{}", hex::encode(digest.finalize()));
-        if actual != expected_digest {
+        if actual != canonical_digest {
             return Err(VolumeError::Integrity(
                 "artifact source does not match its expected digest".to_owned(),
             ));
@@ -325,21 +345,109 @@ impl LocalVolumeProvider {
             })
             .and_then(|()| temporary.as_file_mut().sync_all())
             .map_err(|error| io_error(&artifact_root, error))?;
-        temporary
-            .persist_noclobber(&destination)
-            .map_err(|error| io_error(&destination, error.error))?;
-        File::open(&artifact_root)
-            .and_then(|root| root.sync_all())
-            .map_err(|error| io_error(&artifact_root, error))?;
-        Ok(destination)
+        match temporary.persist_noclobber(&destination) {
+            Ok(_) => {
+                sync_directory(&artifact_root)?;
+                Ok(ArtifactPublication {
+                    digest: canonical_digest,
+                    size_bytes: bytes,
+                    status: ArtifactPublicationStatus::Published,
+                })
+            }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let size_bytes = verify_artifact(&destination, &canonical_digest)?;
+                sync_directory(&artifact_root)?;
+                Ok(ArtifactPublication {
+                    digest: canonical_digest,
+                    size_bytes,
+                    status: ArtifactPublicationStatus::Reused,
+                })
+            }
+            Err(error) => Err(io_error(&destination, error.error)),
+        }
     }
 
     #[must_use]
     pub fn artifact_path(&self, digest: &str) -> Option<PathBuf> {
-        digest
-            .strip_prefix("sha256:")
-            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        canonical_artifact_digest(digest)
+            .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_owned))
             .map(|value| self.config.root.join("artifacts").join(value))
+    }
+
+    pub fn garbage_collect_artifacts(
+        &self,
+        minimum_age: Duration,
+    ) -> Result<ArtifactGarbageCollectionReport, VolumeError> {
+        self.garbage_collect_artifacts_impl(minimum_age)
+    }
+
+    fn garbage_collect_artifacts_impl(
+        &self,
+        minimum_age: Duration,
+    ) -> Result<ArtifactGarbageCollectionReport, VolumeError> {
+        let _guard = self.operations.lock().expect("volume operation lock");
+        let mut referenced = BTreeSet::new();
+        let volume_root = self.config.root.join("volumes");
+        for entry in fs::read_dir(&volume_root).map_err(|error| io_error(&volume_root, error))? {
+            let entry = entry.map_err(|error| io_error(&volume_root, error))?;
+            let record = self.read_record(&entry.path())?;
+            if record.persistence_class == VolumePersistenceClass::Artifact {
+                if let Some(digest) = record.content_digest {
+                    let digest = canonical_artifact_digest(&digest).ok_or_else(|| {
+                        VolumeError::Integrity(
+                            "artifact volume record contains a malformed digest".to_owned(),
+                        )
+                    })?;
+                    referenced.insert(digest);
+                }
+            }
+        }
+
+        let artifact_root = self.config.root.join("artifacts");
+        let now = SystemTime::now();
+        let mut report = ArtifactGarbageCollectionReport::default();
+        for entry in
+            fs::read_dir(&artifact_root).map_err(|error| io_error(&artifact_root, error))?
+        {
+            let entry = entry.map_err(|error| io_error(&artifact_root, error))?;
+            let name = entry.file_name().into_string().map_err(|_| {
+                VolumeError::Integrity("artifact store contains a non-UTF-8 entry".to_owned())
+            })?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|error| io_error(entry.path(), error))?;
+            if !metadata.file_type().is_file() {
+                return Err(VolumeError::Integrity(
+                    "artifact store contains a non-regular entry".to_owned(),
+                ));
+            }
+            let old_enough = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= minimum_age);
+            if name.starts_with(".artifact-") {
+                if old_enough {
+                    fs::remove_file(entry.path()).map_err(|error| io_error(entry.path(), error))?;
+                    report.removed_staging_files += 1;
+                } else {
+                    report.retained_staging_files += 1;
+                }
+                continue;
+            }
+            let digest = canonical_artifact_digest(&format!("sha256:{name}")).ok_or_else(|| {
+                VolumeError::Integrity("artifact store contains an unexpected entry".to_owned())
+            })?;
+            if referenced.contains(&digest) || !old_enough {
+                report.retained_artifacts += 1;
+            } else {
+                fs::remove_file(entry.path()).map_err(|error| io_error(entry.path(), error))?;
+                report.removed_artifacts += 1;
+            }
+        }
+        if report.removed_artifacts > 0 || report.removed_staging_files > 0 {
+            sync_directory(&artifact_root)?;
+        }
+        Ok(report)
     }
 
     fn create_locked(
@@ -981,6 +1089,23 @@ impl LocalVolumeProvider {
     }
 }
 
+impl ArtifactVolumeStore for LocalVolumeProvider {
+    fn publish_artifact(
+        &self,
+        source: &Path,
+        expected_digest: &str,
+    ) -> Result<ArtifactPublication, VolumeError> {
+        self.publish_artifact_impl(source, expected_digest)
+    }
+
+    fn garbage_collect_artifacts(
+        &self,
+        minimum_age: Duration,
+    ) -> Result<ArtifactGarbageCollectionReport, VolumeError> {
+        self.garbage_collect_artifacts_impl(minimum_age)
+    }
+}
+
 impl VolumeProvider for LocalVolumeProvider {
     fn provider_id(&self) -> &str {
         LOCAL_VOLUME_PROVIDER_ID
@@ -1433,6 +1558,12 @@ fn create_private_directory(path: &Path) -> Result<(), VolumeError> {
         .map_err(|error| io_error(path, error))
 }
 
+fn sync_directory(path: &Path) -> Result<(), VolumeError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_error(path, error))
+}
+
 fn validate_secret_name(name: &str) -> Result<(), VolumeError> {
     if name.is_empty()
         || name.len() > 255
@@ -1525,7 +1656,7 @@ fn digest_file(path: &Path) -> Result<(String, u64), VolumeError> {
         .map_err(|error| io_error(path, error))?;
     let mut digest = Sha256::new();
     let mut size = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -1541,7 +1672,14 @@ fn digest_file(path: &Path) -> Result<(String, u64), VolumeError> {
     Ok((format!("sha256:{}", hex::encode(digest.finalize())), size))
 }
 
-fn verify_artifact(path: &Path, expected: &str) -> Result<(), VolumeError> {
+fn canonical_artifact_digest(digest: &str) -> Option<String> {
+    digest
+        .strip_prefix("sha256:")
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|value| format!("sha256:{}", value.to_ascii_lowercase()))
+}
+
+fn verify_artifact(path: &Path, expected: &str) -> Result<u64, VolumeError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             VolumeError::NotFound(expected.to_owned())
@@ -1554,13 +1692,15 @@ fn verify_artifact(path: &Path, expected: &str) -> Result<(), VolumeError> {
             "artifact must be an immutable regular file".to_owned(),
         ));
     }
-    let (actual, _) = digest_file(path)?;
-    if actual != expected {
+    let canonical_expected = canonical_artifact_digest(expected)
+        .ok_or_else(|| VolumeError::Integrity("artifact content digest is malformed".to_owned()))?;
+    let (actual, size_bytes) = digest_file(path)?;
+    if actual != canonical_expected {
         return Err(VolumeError::Integrity(
             "artifact content digest does not match the volume specification".to_owned(),
         ));
     }
-    Ok(())
+    Ok(size_bytes)
 }
 
 #[cfg(test)]
@@ -1634,9 +1774,19 @@ mod tests {
         let provider =
             LocalVolumeProvider::open(LocalVolumeConfig::new(temporary.path().join("provider")))
                 .expect("provider");
-        provider
+        let publication = provider
             .publish_artifact(&source, &digest)
             .expect("published artifact");
+        assert_eq!(publication.digest, digest);
+        assert_eq!(publication.size_bytes, 7);
+        assert_eq!(publication.status, ArtifactPublicationStatus::Published);
+        assert_eq!(
+            provider
+                .publish_artifact(&source, &digest)
+                .expect("idempotent publication")
+                .status,
+            ArtifactPublicationStatus::Reused
+        );
         let specification = VolumeSpec {
             schema_version: runtrue_sandbox_core::VOLUME_SPEC_VERSION,
             volume_id: VolumeId::parse("dataset").expect("volume"),
@@ -1674,6 +1824,60 @@ mod tests {
             0
         );
         provider.unmount(&mounted).expect("unmounted artifact");
+    }
+
+    #[test]
+    fn artifact_garbage_collection_preserves_live_volume_references() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let provider =
+            LocalVolumeProvider::open(LocalVolumeConfig::new(temporary.path().join("provider")))
+                .expect("provider");
+        let referenced_source = temporary.path().join("referenced");
+        let unused_source = temporary.path().join("unused");
+        fs::write(&referenced_source, b"referenced").expect("referenced source");
+        fs::write(&unused_source, b"unused").expect("unused source");
+        let referenced_digest = format!("sha256:{}", hex::encode(Sha256::digest(b"referenced")));
+        let unused_digest = format!("sha256:{}", hex::encode(Sha256::digest(b"unused")));
+        provider
+            .publish_artifact(&referenced_source, &referenced_digest)
+            .expect("publish referenced artifact");
+        provider
+            .publish_artifact(&unused_source, &unused_digest)
+            .expect("publish unused artifact");
+        let specification = VolumeSpec {
+            schema_version: runtrue_sandbox_core::VOLUME_SPEC_VERSION,
+            volume_id: VolumeId::parse("referenced").expect("volume"),
+            destination: "/opt/referenced".to_owned(),
+            read_only: true,
+            persistence_class: VolumePersistenceClass::Artifact,
+            snapshot_policy: VolumeSnapshotPolicy::Excluded,
+            quota_bytes: 0,
+            content_digest: Some(referenced_digest.clone()),
+        };
+        let handle = provider
+            .create(&scope("tenant-a"), &specification)
+            .expect("artifact handle");
+
+        let first = provider
+            .garbage_collect_artifacts(Duration::ZERO)
+            .expect("first garbage collection");
+        assert_eq!(first.removed_artifacts, 1);
+        assert_eq!(first.retained_artifacts, 1);
+        assert!(!provider
+            .artifact_path(&unused_digest)
+            .expect("unused artifact path")
+            .exists());
+        assert!(provider
+            .artifact_path(&referenced_digest)
+            .expect("referenced artifact path")
+            .exists());
+
+        provider.delete(&handle).expect("delete artifact handle");
+        let second = provider
+            .garbage_collect_artifacts(Duration::ZERO)
+            .expect("second garbage collection");
+        assert_eq!(second.removed_artifacts, 1);
+        assert_eq!(second.retained_artifacts, 0);
     }
 
     #[test]

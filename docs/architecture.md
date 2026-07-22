@@ -177,6 +177,14 @@ stale ownership, mounts, and loop devices after daemon or worker failure.
 
 Artifact volumes resolve a provider-owned regular file by its SHA-256 digest,
 verify it is immutable, and expose it only through a read-only bind mount.
+The root-only operator control path ingests a host file by expected digest. It
+streams and verifies SHA-256 before an fsynced no-clobber rename, making
+publication atomic and idempotent without recording the source path in tenant
+topology, handles, or metadata. Operator-triggered garbage collection removes
+only objects older than its grace period that have no live artifact-volume
+record; publication, handle creation, and collection use the same provider
+operation lock. The provider store is a cache, so operators retain the external
+source of truth and can safely republish an object by digest.
 Secret volumes resolve bounded owner-only files under
 `secret-source/tenants/<tenant>/workspaces/<workspace>/<volume>`, reject
 symlinks and special files, copy the bytes into a size-bounded tmpfs, and expose

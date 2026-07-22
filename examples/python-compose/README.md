@@ -8,6 +8,11 @@ client resolves `server`, verifies its HTTP response, and exits. The lifecycle
 script then pauses the remaining server, inspects it, resumes it, stops the
 complete sandbox, and verifies cleanup.
 
+The lifecycle also publishes `artifact-volume.txt` twice through the operator
+socket, proving publication is idempotent, mounts the verified digest into the
+client without putting its host source path in Compose or the topology lock,
+and garbage-collects the unreferenced object after the sandbox stops.
+
 ```bash
 sudo ./examples/python-compose/run-local.sh
 sudo ./examples/python-compose/run-snapshot-local.sh

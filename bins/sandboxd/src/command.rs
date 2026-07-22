@@ -4,7 +4,7 @@ use crate::{
     protocol::Operation,
     server,
 };
-use runtrue_sandbox_oci::SandboxError;
+use runtrue_sandbox_oci::{io_error, SandboxError};
 
 pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
     match cli.command {
@@ -175,6 +175,24 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 } else {
                     runtrue_sandbox_core::SnapshotMode::Live
                 },
+            },
+        ),
+        Command::PublishArtifact {
+            socket,
+            source,
+            digest,
+        } => {
+            let source =
+                std::fs::canonicalize(&source).map_err(|error| io_error(&source, error))?;
+            client::send(&socket, Operation::PublishArtifact { source, digest })
+        }
+        Command::GarbageCollectArtifacts {
+            socket,
+            minimum_age_seconds,
+        } => client::send(
+            &socket,
+            Operation::GarbageCollectArtifacts {
+                minimum_age_seconds,
             },
         ),
         Command::Shutdown { socket } => client::send(&socket, Operation::Shutdown),

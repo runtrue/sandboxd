@@ -61,6 +61,12 @@ pub(crate) fn handle(
             snapshot: snapshot_id,
             mode,
         } => snapshot(daemon, context, &sandbox, &snapshot_id, mode),
+        Operation::PublishArtifact { source, digest } => {
+            publish_artifact(daemon, context, &source, &digest)
+        }
+        Operation::GarbageCollectArtifacts {
+            minimum_age_seconds,
+        } => garbage_collect_artifacts(daemon, context, minimum_age_seconds),
         Operation::Shutdown => shutdown(daemon, context),
     }
 }
@@ -559,6 +565,53 @@ fn validate_timeout(timeout_ms: u64) -> Result<(), SandboxError> {
         ));
     }
     Ok(())
+}
+
+fn publish_artifact(
+    daemon: &DaemonState,
+    context: &AccessContext,
+    source: &std::path::Path,
+    digest: &str,
+) -> Result<Value, SandboxError> {
+    if !context.is_operator() {
+        return Err(SandboxError::Runtime(
+            "artifact publication is restricted to the operator endpoint".to_owned(),
+        ));
+    }
+    let publication = daemon
+        .artifact_volume_store
+        .publish_artifact(source, digest)
+        .map_err(|error| SandboxError::Runtime(format!("publish artifact volume: {error}")))?;
+    serde_json::to_value(publication)
+        .map_err(|error| SandboxError::Runtime(format!("encode artifact publication: {error}")))
+}
+
+fn garbage_collect_artifacts(
+    daemon: &DaemonState,
+    context: &AccessContext,
+    minimum_age_seconds: u64,
+) -> Result<Value, SandboxError> {
+    if !context.is_operator() {
+        return Err(SandboxError::Runtime(
+            "artifact garbage collection is restricted to the operator endpoint".to_owned(),
+        ));
+    }
+    if minimum_age_seconds > 31_536_000 {
+        return Err(SandboxError::Runtime(
+            "artifact garbage-collection grace cannot exceed one year".to_owned(),
+        ));
+    }
+    let report = daemon
+        .artifact_volume_store
+        .garbage_collect_artifacts(Duration::from_secs(minimum_age_seconds))
+        .map_err(|error| {
+            SandboxError::Runtime(format!("garbage collect artifact volumes: {error}"))
+        })?;
+    serde_json::to_value(report).map_err(|error| {
+        SandboxError::Runtime(format!(
+            "encode artifact garbage-collection report: {error}"
+        ))
+    })
 }
 
 fn shutdown(daemon: &DaemonState, context: &AccessContext) -> Result<Value, SandboxError> {
