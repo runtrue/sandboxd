@@ -2,7 +2,7 @@ use super::{replay::ReplayCache, TenantScope, VerifiedTenant};
 use crate::protocol::{Operation, Request};
 use hmac::{Hmac, Mac as _};
 use runtrue_sandbox_core::{SignedWorkOrder, WorkOrderClaims};
-use runtrue_sandbox_oci::SandboxError;
+use runtrue_sandbox_oci::{compiler, SandboxError};
 use sha2::Sha256;
 use std::{
     fs,
@@ -135,17 +135,13 @@ fn enforce_resource_ceilings(
         ));
     }
     if let Some(topology) = operation.topology() {
+        let volume_usage = compiler::volume_resource_usage(topology)?;
         let output_bytes = u64::try_from(topology.policy.maximum_output_bytes).map_err(|_| {
             SandboxError::Runtime("topology output limit cannot be represented".to_owned())
         })?;
-        let volume_bytes = topology.volumes.values().try_fold(0_u64, |total, volume| {
-            total
-                .checked_add(volume.quota_bytes)
-                .ok_or_else(|| SandboxError::Runtime("topology volume quota overflow".to_owned()))
-        })?;
         if topology.services.len() > usize::from(ceilings.maximum_services)
-            || topology.volumes.len() > usize::from(ceilings.maximum_volumes)
-            || volume_bytes > ceilings.maximum_volume_bytes
+            || volume_usage.count > usize::from(ceilings.maximum_volumes)
+            || volume_usage.quota_bytes > ceilings.maximum_volume_bytes
             || !ceilings
                 .allowed_guest_profiles
                 .contains(&topology.policy.guest_profile)

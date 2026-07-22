@@ -351,6 +351,77 @@ pub fn verify_lock(lock: &TopologyLock) -> Result<(), SandboxError> {
         .network
         .validate(&lock.services)
         .map_err(SandboxError::Lock)?;
+    verify_service_volumes(lock)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolumeResourceUsage {
+    pub count: usize,
+    pub quota_bytes: u64,
+}
+
+pub fn volume_resource_usage(lock: &TopologyLock) -> Result<VolumeResourceUsage, SandboxError> {
+    verify_lock(lock)?;
+    let volume_ids = lock
+        .services
+        .values()
+        .flat_map(|service| service.volumes.iter())
+        .map(|volume| volume.volume_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let quota_bytes = volume_ids.iter().try_fold(0_u64, |total, volume_id| {
+        total
+            .checked_add(
+                lock.volumes
+                    .get(*volume_id)
+                    .expect("verified service volume definition")
+                    .quota_bytes,
+            )
+            .ok_or_else(|| SandboxError::Lock("topology volume quota overflow".to_owned()))
+    })?;
+    Ok(VolumeResourceUsage {
+        count: volume_ids.len(),
+        quota_bytes,
+    })
+}
+
+fn verify_service_volumes(lock: &TopologyLock) -> Result<(), SandboxError> {
+    for (service_name, service) in &lock.services {
+        if service.volumes.len() > 64 {
+            return Err(SandboxError::Lock(format!(
+                "service `{service_name}` has too many volume mounts"
+            )));
+        }
+        let mut destinations = BTreeSet::new();
+        for volume in &service.volumes {
+            volume.validate().map_err(|error| {
+                SandboxError::Lock(format!(
+                    "service `{service_name}` has an invalid volume: {error}"
+                ))
+            })?;
+            if !destinations.insert(volume.destination.as_str()) {
+                return Err(SandboxError::Lock(format!(
+                    "service `{service_name}` repeats volume destination `{}`",
+                    volume.destination
+                )));
+            }
+            let volume_id = volume.volume_id.as_str();
+            let definition = lock.volumes.get(volume_id).ok_or_else(|| {
+                SandboxError::Lock(format!(
+                    "service `{service_name}` references unknown volume `{volume_id}`"
+                ))
+            })?;
+            if volume.persistence_class != definition.persistence_class
+                || volume.snapshot_policy != definition.snapshot_policy
+                || volume.quota_bytes != definition.quota_bytes
+                || volume.content_digest != definition.content_digest
+            {
+                return Err(SandboxError::Lock(format!(
+                    "service `{service_name}` volume `{volume_id}` does not match its topology definition"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -567,6 +638,83 @@ services:
             .find("/host")
             .is_none());
         verify_lock(&lock).expect("verified lock");
+    }
+
+    fn shared_volume_lock() -> TopologyLock {
+        let input: ComposeInput = serde_yaml::from_str(
+            r#"
+name: x
+volumes:
+  shared:
+    persistence_class: persistent
+    quota_bytes: 8388608
+services:
+  first:
+    image: x
+    volumes:
+      - source: shared
+        target: /var/lib/first
+  second:
+    image: x
+    volumes:
+      - source: shared
+        target: /var/lib/second
+"#,
+        )
+        .expect("compose");
+        compile(input, |reference| Ok(image(reference))).expect("lock")
+    }
+
+    fn refresh_digest(lock: &mut TopologyLock) {
+        lock.topology_digest = digest(&lock.digest_input()).expect("digest");
+    }
+
+    #[test]
+    fn rejects_service_volume_without_a_topology_definition() {
+        let mut lock = shared_volume_lock();
+        lock.volumes.clear();
+        refresh_digest(&mut lock);
+        let error = verify_lock(&lock).expect_err("service-only volume must be rejected");
+        assert!(error
+            .to_string()
+            .contains("references unknown volume `shared`"));
+    }
+
+    #[test]
+    fn rejects_service_volume_quota_mismatch() {
+        let mut lock = shared_volume_lock();
+        lock.services
+            .get_mut("first")
+            .expect("first service")
+            .volumes[0]
+            .quota_bytes *= 2;
+        refresh_digest(&mut lock);
+        let error = verify_lock(&lock).expect_err("quota mismatch must be rejected");
+        assert!(error
+            .to_string()
+            .contains("volume `shared` does not match its topology definition"));
+    }
+
+    #[test]
+    fn rejects_service_volume_at_a_protected_destination() {
+        let mut lock = shared_volume_lock();
+        lock.services
+            .get_mut("first")
+            .expect("first service")
+            .volumes[0]
+            .destination = "/proc/runtime".to_owned();
+        refresh_digest(&mut lock);
+        let error = verify_lock(&lock).expect_err("protected destination must be rejected");
+        assert!(error
+            .to_string()
+            .contains("volume destination overlaps a protected guest mount"));
+    }
+
+    #[test]
+    fn shared_executable_volume_is_counted_once() {
+        let usage = volume_resource_usage(&shared_volume_lock()).expect("volume usage");
+        assert_eq!(usage.count, 1);
+        assert_eq!(usage.quota_bytes, 8 * 1024 * 1024);
     }
 
     #[test]
