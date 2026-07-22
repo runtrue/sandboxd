@@ -611,80 +611,14 @@ impl Resources {
         scope: &VolumeScope,
         snapshots: Option<&RestoredVolumes>,
     ) -> Result<(), SandboxError> {
-        let sandbox_id = SandboxId::parse(project.to_owned())
-            .map_err(|error| SandboxError::Runtime(error.to_string()))?;
-        let mut handles = BTreeMap::<VolumeId, VolumeHandle>::new();
-        let expected_snapshots = lock
-            .services
-            .values()
-            .flat_map(|service| service.volumes.iter())
-            .filter(|volume| {
-                matches!(
-                    volume.persistence_class,
-                    runtrue_sandbox_core::VolumePersistenceClass::Ephemeral
-                        | runtrue_sandbox_core::VolumePersistenceClass::Persistent
-                ) && volume.snapshot_policy != runtrue_sandbox_core::VolumeSnapshotPolicy::Excluded
-            })
-            .map(|volume| &volume.volume_id)
-            .collect::<BTreeSet<_>>();
-        if let Some(snapshots) = snapshots {
-            if snapshots.keys().collect::<BTreeSet<_>>() != expected_snapshots {
-                return Err(SandboxError::Runtime(
-                    "volume snapshot objects do not match the restore topology".to_owned(),
-                ));
-            }
-        }
-        for service_name in &lock.startup_order {
-            let container_id = ContainerId::parse(service_name.clone())
-                .map_err(|error| SandboxError::Runtime(error.to_string()))?;
-            let mut mounted = Vec::new();
-            for specification in &lock.services[service_name].volumes {
-                let handle = match handles.get(&specification.volume_id) {
-                    Some(handle) => handle.clone(),
-                    None => {
-                        let handle = match snapshots
-                            .and_then(|snapshots| snapshots.get(&specification.volume_id))
-                        {
-                            Some((snapshot, path)) => self
-                                .volume_provider
-                                .restore(scope, specification, snapshot, path)
-                                .map_err(volume_error)?,
-                            None => self
-                                .volume_provider
-                                .create(scope, specification)
-                                .map_err(volume_error)?,
-                        };
-                        handles.insert(specification.volume_id.clone(), handle.clone());
-                        handle
-                    }
-                };
-                let attachment = self
-                    .volume_provider
-                    .attach(
-                        &handle,
-                        AttachmentOwner {
-                            sandbox_id: sandbox_id.clone(),
-                            container_id: container_id.clone(),
-                        },
-                        specification,
-                    )
-                    .map_err(volume_error)?;
-                match self.volume_provider.mount(&attachment) {
-                    Ok(volume) => mounted.push(volume),
-                    Err(error) => {
-                        let cleanup = self.volume_provider.detach(&attachment);
-                        return match cleanup {
-                            Ok(()) => Err(volume_error(error)),
-                            Err(cleanup_error) => Err(SandboxError::Runtime(format!(
-                                "mount volume failed: {error}; detach failed: {cleanup_error}"
-                            ))),
-                        };
-                    }
-                }
-            }
-            self.service_volumes.insert(service_name.clone(), mounted);
-        }
-        Ok(())
+        prepare_service_volumes(
+            self.volume_provider.as_ref(),
+            &mut self.service_volumes,
+            lock,
+            project,
+            scope,
+            snapshots,
+        )
     }
 
     fn prepare_service_rootfs(
@@ -763,12 +697,10 @@ impl Resources {
             process.reap();
         }
         self.processes.clear();
-        for (_, volumes) in std::mem::take(&mut self.service_volumes) {
-            for volume in volumes {
-                if let Err(error) = self.volume_provider.unmount(&volume) {
-                    first_error.get_or_insert_with(|| volume_error(error));
-                }
-            }
+        if let Err(error) =
+            cleanup_service_volumes(self.volume_provider.as_ref(), &mut self.service_volumes)
+        {
+            first_error.get_or_insert(error);
         }
         for (_, rootfs) in std::mem::take(&mut self.service_rootfs) {
             if let Some(writable) = rootfs.writable {
@@ -802,6 +734,148 @@ impl Resources {
             Some(error) => Err(error),
             None => Ok(metrics),
         }
+    }
+}
+
+fn prepare_service_volumes(
+    volume_provider: &dyn VolumeProvider,
+    service_volumes: &mut BTreeMap<String, Vec<MountedVolume>>,
+    lock: &TopologyLock,
+    project: &str,
+    scope: &VolumeScope,
+    snapshots: Option<&RestoredVolumes>,
+) -> Result<(), SandboxError> {
+    let preparation = prepare_service_volumes_inner(
+        volume_provider,
+        service_volumes,
+        lock,
+        project,
+        scope,
+        snapshots,
+    );
+    match preparation {
+        Ok(()) => Ok(()),
+        Err(error) => match cleanup_service_volumes(volume_provider, service_volumes) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(SandboxError::Runtime(format!(
+                "prepare volumes failed: {error}; cleanup failed: {cleanup_error}"
+            ))),
+        },
+    }
+}
+
+fn prepare_service_volumes_inner(
+    volume_provider: &dyn VolumeProvider,
+    service_volumes: &mut BTreeMap<String, Vec<MountedVolume>>,
+    lock: &TopologyLock,
+    project: &str,
+    scope: &VolumeScope,
+    snapshots: Option<&RestoredVolumes>,
+) -> Result<(), SandboxError> {
+    let sandbox_id = SandboxId::parse(project.to_owned())
+        .map_err(|error| SandboxError::Runtime(error.to_string()))?;
+    let mut handles = BTreeMap::<VolumeId, VolumeHandle>::new();
+    let expected_snapshots = lock
+        .services
+        .values()
+        .flat_map(|service| service.volumes.iter())
+        .filter(|volume| {
+            matches!(
+                volume.persistence_class,
+                runtrue_sandbox_core::VolumePersistenceClass::Ephemeral
+                    | runtrue_sandbox_core::VolumePersistenceClass::Persistent
+            ) && volume.snapshot_policy != runtrue_sandbox_core::VolumeSnapshotPolicy::Excluded
+        })
+        .map(|volume| &volume.volume_id)
+        .collect::<BTreeSet<_>>();
+    if let Some(snapshots) = snapshots {
+        if snapshots.keys().collect::<BTreeSet<_>>() != expected_snapshots {
+            return Err(SandboxError::Runtime(
+                "volume snapshot objects do not match the restore topology".to_owned(),
+            ));
+        }
+    }
+    for service_name in &lock.startup_order {
+        let container_id = ContainerId::parse(service_name.clone())
+            .map_err(|error| SandboxError::Runtime(error.to_string()))?;
+        for specification in &lock.services[service_name].volumes {
+            let (handle, newly_created) = match handles.get(&specification.volume_id) {
+                Some(handle) => (handle.clone(), false),
+                None => {
+                    let handle = match snapshots
+                        .and_then(|snapshots| snapshots.get(&specification.volume_id))
+                    {
+                        Some((snapshot, path)) => volume_provider
+                            .restore(scope, specification, snapshot, path)
+                            .map_err(volume_error)?,
+                        None => volume_provider
+                            .create(scope, specification)
+                            .map_err(volume_error)?,
+                    };
+                    handles.insert(specification.volume_id.clone(), handle.clone());
+                    (handle, true)
+                }
+            };
+            let attachment = match volume_provider.attach(
+                &handle,
+                AttachmentOwner {
+                    sandbox_id: sandbox_id.clone(),
+                    container_id: container_id.clone(),
+                },
+                specification,
+            ) {
+                Ok(attachment) => attachment,
+                Err(error) => {
+                    if newly_created
+                        && handle.persistence_class()
+                            != runtrue_sandbox_core::VolumePersistenceClass::Persistent
+                    {
+                        return match volume_provider.delete(&handle) {
+                            Ok(()) => Err(volume_error(error)),
+                            Err(cleanup_error) => Err(SandboxError::Runtime(format!(
+                                "attach volume failed: {error}; delete unattached volume failed: {cleanup_error}"
+                            ))),
+                        };
+                    }
+                    return Err(volume_error(error));
+                }
+            };
+            match volume_provider.mount(&attachment) {
+                Ok(volume) => service_volumes
+                    .entry(service_name.clone())
+                    .or_default()
+                    .push(volume),
+                Err(error) => {
+                    let cleanup = volume_provider.detach(&attachment);
+                    return match cleanup {
+                        Ok(()) => Err(volume_error(error)),
+                        Err(cleanup_error) => Err(SandboxError::Runtime(format!(
+                            "mount volume failed: {error}; detach failed: {cleanup_error}"
+                        ))),
+                    };
+                }
+            }
+        }
+        service_volumes.entry(service_name.clone()).or_default();
+    }
+    Ok(())
+}
+
+fn cleanup_service_volumes(
+    volume_provider: &dyn VolumeProvider,
+    service_volumes: &mut BTreeMap<String, Vec<MountedVolume>>,
+) -> Result<(), SandboxError> {
+    let mut first_error = None;
+    for (_, volumes) in std::mem::take(service_volumes) {
+        for volume in volumes {
+            if let Err(error) = volume_provider.unmount(&volume) {
+                first_error.get_or_insert_with(|| volume_error(error));
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -1048,4 +1122,215 @@ fn validate_project(project: &str) -> Result<(), SandboxError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtrue_sandbox_core::{
+        TenantId, VolumePersistenceClass, VolumeSnapshotPolicy, VolumeSpec, WorkspaceId,
+        VOLUME_SPEC_VERSION,
+    };
+    use runtrue_sandbox_oci::model::{LockedDescriptor, LockedImage, LockedService};
+    use runtrue_sandbox_volume::{
+        LocalVolumeConfig, LocalVolumeProvider, VolumeAttachment, VolumeCleanupReport, VolumeError,
+        VolumeProviderCapabilities,
+    };
+    use sha2::{Digest as _, Sha256};
+    use std::{
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct FailSecondMountProvider {
+        inner: LocalVolumeProvider,
+        mounts: AtomicUsize,
+        detaches: AtomicUsize,
+        unmounts: AtomicUsize,
+    }
+
+    impl VolumeProvider for FailSecondMountProvider {
+        fn provider_id(&self) -> &str {
+            self.inner.provider_id()
+        }
+
+        fn capabilities(&self) -> VolumeProviderCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn create(
+            &self,
+            scope: &VolumeScope,
+            specification: &VolumeSpec,
+        ) -> Result<VolumeHandle, VolumeError> {
+            self.inner.create(scope, specification)
+        }
+
+        fn attach(
+            &self,
+            handle: &VolumeHandle,
+            owner: AttachmentOwner,
+            specification: &VolumeSpec,
+        ) -> Result<VolumeAttachment, VolumeError> {
+            self.inner.attach(handle, owner, specification)
+        }
+
+        fn mount(&self, attachment: &VolumeAttachment) -> Result<MountedVolume, VolumeError> {
+            if self.mounts.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(VolumeError::Mount(
+                    "injected second mount failure".to_owned(),
+                ));
+            }
+            self.inner.mount(attachment)
+        }
+
+        fn detach(&self, attachment: &VolumeAttachment) -> Result<(), VolumeError> {
+            self.detaches.fetch_add(1, Ordering::SeqCst);
+            self.inner.detach(attachment)
+        }
+
+        fn freeze(&self, attachment: &VolumeAttachment) -> Result<(), VolumeError> {
+            self.inner.freeze(attachment)
+        }
+
+        fn thaw(&self, attachment: &VolumeAttachment) -> Result<(), VolumeError> {
+            self.inner.thaw(attachment)
+        }
+
+        fn snapshot(
+            &self,
+            attachment: &VolumeAttachment,
+            destination: &Path,
+        ) -> Result<VolumeSnapshot, VolumeError> {
+            self.inner.snapshot(attachment, destination)
+        }
+
+        fn restore(
+            &self,
+            scope: &VolumeScope,
+            specification: &VolumeSpec,
+            snapshot: &VolumeSnapshot,
+            source: &Path,
+        ) -> Result<VolumeHandle, VolumeError> {
+            self.inner.restore(scope, specification, snapshot, source)
+        }
+
+        fn unmount(&self, mounted: &MountedVolume) -> Result<(), VolumeError> {
+            self.unmounts.fetch_add(1, Ordering::SeqCst);
+            self.inner.unmount(mounted)
+        }
+
+        fn delete(&self, handle: &VolumeHandle) -> Result<(), VolumeError> {
+            self.inner.delete(handle)
+        }
+
+        fn cleanup(&self) -> Result<VolumeCleanupReport, VolumeError> {
+            self.inner.cleanup()
+        }
+    }
+
+    fn artifact_spec(name: &str, destination: &str, digest: &str) -> VolumeSpec {
+        VolumeSpec {
+            schema_version: VOLUME_SPEC_VERSION,
+            volume_id: VolumeId::parse(name).expect("volume id"),
+            destination: destination.to_owned(),
+            read_only: true,
+            persistence_class: VolumePersistenceClass::Artifact,
+            snapshot_policy: VolumeSnapshotPolicy::Excluded,
+            quota_bytes: 0,
+            content_digest: Some(digest.to_owned()),
+        }
+    }
+
+    fn lock(volumes: Vec<VolumeSpec>) -> TopologyLock {
+        let descriptor = LockedDescriptor {
+            media_type: "test".to_owned(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size: 1,
+        };
+        let service = LockedService {
+            image: LockedImage {
+                source: "example/test".to_owned(),
+                exact_reference: format!("example/test@sha256:{}", "a".repeat(64)),
+                image_id: format!("sha256:{}", "b".repeat(64)),
+                index: None,
+                manifest: descriptor.clone(),
+                config: descriptor.clone(),
+                layers: vec![descriptor],
+                operating_system: "linux".to_owned(),
+                architecture: "amd64".to_owned(),
+                variant: None,
+            },
+            command: Vec::new(),
+            entrypoint: vec!["/bin/true".to_owned()],
+            environment: BTreeMap::new(),
+            depends_on: BTreeMap::new(),
+            healthcheck: None,
+            networks: Vec::new(),
+            working_dir: "/work".to_owned(),
+            root_filesystem: RootFilesystemMode::ReadOnly,
+            volumes,
+        };
+        TopologyLock {
+            schema_version: 1,
+            topology_digest: "test".to_owned(),
+            name: "test".to_owned(),
+            services: BTreeMap::from([("api".to_owned(), service)]),
+            networks: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            startup_order: vec!["api".to_owned()],
+            policy: Default::default(),
+        }
+    }
+
+    #[test]
+    fn second_mount_failure_releases_first_mount() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let source = temporary.path().join("artifact");
+        fs::write(&source, b"dataset").expect("artifact source");
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(b"dataset")));
+        let provider_root = temporary.path().join("provider");
+        let inner = LocalVolumeProvider::open(LocalVolumeConfig::new(provider_root.clone()))
+            .expect("local volume provider");
+        inner
+            .publish_artifact(&source, &digest)
+            .expect("published artifact");
+        let provider = FailSecondMountProvider {
+            inner,
+            mounts: AtomicUsize::new(0),
+            detaches: AtomicUsize::new(0),
+            unmounts: AtomicUsize::new(0),
+        };
+        let lock = lock(vec![
+            artifact_spec("first", "/first", &digest),
+            artifact_spec("second", "/second", &digest),
+        ]);
+        let scope = VolumeScope::new(
+            TenantId::parse("tenant-a").expect("tenant"),
+            WorkspaceId::parse("workspace-a").expect("workspace"),
+        );
+        let mut service_volumes = BTreeMap::new();
+
+        let preparation = prepare_service_volumes(
+            &provider,
+            &mut service_volumes,
+            &lock,
+            "sandbox-a",
+            &scope,
+            None,
+        );
+        let error = preparation.expect_err("second mount must fail");
+        assert!(error.to_string().contains("injected second mount failure"));
+
+        assert_eq!(provider.mounts.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.unmounts.load(Ordering::SeqCst), 1);
+        assert!(service_volumes.is_empty());
+        assert_eq!(
+            fs::read_dir(provider_root.join("volumes"))
+                .expect("volume directory")
+                .count(),
+            0
+        );
+    }
 }
