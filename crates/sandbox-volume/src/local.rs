@@ -4,8 +4,12 @@ use crate::{
     MountedVolume, SecretResolver, VolumeAttachment, VolumeCleanupReport, VolumeError,
     VolumeHandle, VolumeProvider, VolumeProviderCapabilities, VolumeScope, VolumeSnapshot,
 };
+use nix::dir::Dir;
+use nix::errno::Errno;
+use nix::fcntl::{openat, OFlag};
 use nix::libc;
 use nix::mount::{mount, umount, MsFlags};
+use nix::sys::stat::Mode;
 use runtrue_sandbox_core::{
     SnapshotPortability, VolumePersistenceClass, VolumeSnapshotPolicy, VolumeSpec,
 };
@@ -15,6 +19,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, DirBuilder, File, OpenOptions},
     io::{Read, Write as _},
+    os::fd::OwnedFd,
     os::unix::fs::{
         DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
     },
@@ -93,6 +98,7 @@ pub struct LocalVolumeProvider {
 
 pub struct LocalSecretResolver {
     root: PathBuf,
+    root_directory: File,
     maximum_total_bytes: u64,
 }
 
@@ -105,7 +111,14 @@ impl LocalSecretResolver {
         }
         create_private_directory(&root)?;
         let root = fs::canonicalize(&root).map_err(|error| io_error(&root, error))?;
-        let metadata = fs::metadata(&root).map_err(|error| io_error(&root, error))?;
+        let root_directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&root)
+            .map_err(|error| io_error(&root, error))?;
+        let metadata = root_directory
+            .metadata()
+            .map_err(|error| io_error(&root, error))?;
         if !metadata.is_dir()
             || metadata.uid() != nix::unistd::geteuid().as_raw()
             || metadata.permissions().mode() & 0o077 != 0
@@ -116,8 +129,59 @@ impl LocalSecretResolver {
         }
         Ok(Self {
             root,
+            root_directory,
             maximum_total_bytes,
         })
+    }
+
+    fn open_scoped_directory(
+        &self,
+        scope: &VolumeScope,
+        volume_id: &runtrue_sandbox_core::VolumeId,
+    ) -> Result<(Dir, PathBuf), VolumeError> {
+        let components = [
+            "tenants",
+            scope.tenant_id().as_str(),
+            "workspaces",
+            scope.workspace_id().as_str(),
+            volume_id.as_str(),
+        ];
+        let mut path = self.root.clone();
+        let mut directory: OwnedFd = self
+            .root_directory
+            .try_clone()
+            .map_err(|error| io_error(&self.root, error))?
+            .into();
+        // A one-component-at-a-time dirfd walk provides the relevant openat2
+        // RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS guarantees on supported Unix targets.
+        for component in components {
+            path.push(component);
+            directory = openat(
+                &directory,
+                component,
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| match error {
+                Errno::ENOENT => VolumeError::NotFound(volume_id.to_string()),
+                Errno::EACCES | Errno::ELOOP | Errno::ENOTDIR => VolumeError::AccessDenied(
+                    "secret source path must not contain symbolic links".to_owned(),
+                ),
+                _ => io_error(&path, error.into()),
+            })?;
+        }
+        let metadata =
+            nix::sys::stat::fstat(&directory).map_err(|error| io_error(&path, error.into()))?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || metadata.st_uid != nix::unistd::geteuid().as_raw()
+            || metadata.st_mode & 0o077 != 0
+        {
+            return Err(VolumeError::AccessDenied(
+                "secret source directory must be owner-only".to_owned(),
+            ));
+        }
+        let directory = Dir::from_fd(directory).map_err(|error| io_error(&path, error.into()))?;
+        Ok((directory, path))
     }
 }
 
@@ -127,33 +191,27 @@ impl SecretResolver for LocalSecretResolver {
         scope: &VolumeScope,
         volume_id: &runtrue_sandbox_core::VolumeId,
     ) -> Result<Vec<crate::SecretFile>, VolumeError> {
-        let directory = self
-            .root
-            .join("tenants")
-            .join(scope.tenant_id().as_str())
-            .join("workspaces")
-            .join(scope.workspace_id().as_str())
-            .join(volume_id.as_str());
-        let metadata = fs::symlink_metadata(&directory).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                VolumeError::NotFound(volume_id.to_string())
-            } else {
-                io_error(&directory, error)
+        let (mut directory, directory_path) = self.open_scoped_directory(scope, volume_id)?;
+        let mut entries = Vec::new();
+        for entry in directory.iter() {
+            let entry = entry.map_err(|error| io_error(&directory_path, error.into()))?;
+            let filename = entry.file_name();
+            if filename.to_bytes() == b"." || filename.to_bytes() == b".." {
+                continue;
             }
-        })?;
-        if !metadata.file_type().is_dir()
-            || metadata.uid() != nix::unistd::geteuid().as_raw()
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err(VolumeError::AccessDenied(
-                "secret source directory must be owner-only".to_owned(),
-            ));
+            let name = filename
+                .to_str()
+                .map_err(|_| VolumeError::Invalid("secret filename is not UTF-8".to_owned()))?
+                .to_owned();
+            validate_secret_name(&name)?;
+            entries.push((name, filename.to_owned(), entry.ino()));
+            if entries.len() > 1_024 {
+                return Err(VolumeError::Invalid(
+                    "secret source contains an invalid file count".to_owned(),
+                ));
+            }
         }
-        let mut entries = fs::read_dir(&directory)
-            .map_err(|error| io_error(&directory, error))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| io_error(&directory, error))?;
-        entries.sort_by_key(fs::DirEntry::file_name);
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
         if entries.is_empty() || entries.len() > 1_024 {
             return Err(VolumeError::Invalid(
                 "secret source contains an invalid file count".to_owned(),
@@ -161,18 +219,27 @@ impl SecretResolver for LocalSecretResolver {
         }
         let mut total = 0_u64;
         let mut files = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| VolumeError::Invalid("secret filename is not UTF-8".to_owned()))?;
-            validate_secret_name(&name)?;
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+        for (name, filename, inode) in entries {
+            let path = directory_path.join(&name);
+            let descriptor = openat(
+                &directory,
+                filename.as_c_str(),
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|error| match error {
+                Errno::EACCES | Errno::ELOOP => VolumeError::AccessDenied(
+                    "secret source must not contain symbolic links".to_owned(),
+                ),
+                _ => io_error(&path, error.into()),
+            })?;
+            let mut file = File::from(descriptor);
+            let metadata = file.metadata().map_err(|error| io_error(&path, error))?;
             total = total
                 .checked_add(metadata.len())
                 .ok_or_else(|| VolumeError::Invalid("secret size overflow".to_owned()))?;
             if !metadata.file_type().is_file()
+                || metadata.ino() != inode
                 || metadata.uid() != nix::unistd::geteuid().as_raw()
                 || metadata.permissions().mode() & 0o077 != 0
                 || total > self.maximum_total_bytes
@@ -181,15 +248,12 @@ impl SecretResolver for LocalSecretResolver {
                     "secret source must contain bounded owner-only regular files".to_owned(),
                 ));
             }
-            let mut file = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(&path)
-                .map_err(|error| io_error(&path, error))?;
             let capacity = usize::try_from(metadata.len())
                 .map_err(|_| VolumeError::Invalid("secret file is too large".to_owned()))?;
             let mut contents = Zeroizing::new(Vec::with_capacity(capacity));
-            file.read_to_end(&mut contents)
+            std::io::Read::by_ref(&mut file)
+                .take(metadata.len().saturating_add(1))
+                .read_to_end(&mut contents)
                 .map_err(|error| io_error(&path, error))?;
             if contents.len() != capacity {
                 return Err(VolumeError::Integrity(
@@ -2043,6 +2107,122 @@ mod tests {
 
         symlink(&token, directory.join("alias")).expect("secret symlink");
         assert!(resolver.resolve(&scope("tenant-a"), &volume_id).is_err());
+    }
+
+    #[test]
+    fn secret_resolver_rejects_intermediate_and_final_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let outside = temporary.path().join("outside");
+        let outside_secret = outside.join("tenant-a/workspaces/workspace-a/credentials");
+        fs::create_dir_all(&outside_secret).expect("outside secret directory");
+        fs::set_permissions(&outside_secret, fs::Permissions::from_mode(0o700))
+            .expect("outside directory mode");
+        let token = outside_secret.join("token");
+        fs::write(&token, b"outside").expect("outside secret");
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o600))
+            .expect("outside secret mode");
+        let volume_id = VolumeId::parse("credentials").expect("volume");
+
+        let intermediate_root = temporary.path().join("intermediate");
+        let intermediate_resolver =
+            LocalSecretResolver::open(intermediate_root.clone(), 1024).expect("resolver");
+        symlink(&outside, intermediate_root.join("tenants")).expect("intermediate symlink");
+        assert!(matches!(
+            intermediate_resolver.resolve(&scope("tenant-a"), &volume_id),
+            Err(VolumeError::AccessDenied(_))
+        ));
+
+        let final_root = temporary.path().join("final");
+        let final_resolver = LocalSecretResolver::open(final_root.clone(), 1024).expect("resolver");
+        let workspace = final_root.join("tenants/tenant-a/workspaces/workspace-a");
+        fs::create_dir_all(&workspace).expect("workspace directory");
+        symlink(&outside_secret, workspace.join("credentials")).expect("final symlink");
+        assert!(matches!(
+            final_resolver.resolve(&scope("tenant-a"), &volume_id),
+            Err(VolumeError::AccessDenied(_))
+        ));
+    }
+
+    #[test]
+    fn secret_resolver_binds_resolution_to_opened_directories_during_replacement() {
+        use std::{
+            os::unix::fs::symlink,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+            thread,
+        };
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("secrets");
+        let resolver = LocalSecretResolver::open(root.clone(), 1024).expect("resolver");
+        let directory = root.join("tenants/tenant-a/workspaces/workspace-a/credentials");
+        fs::create_dir_all(&directory).expect("secret directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).expect("directory mode");
+        let token = directory.join("token");
+        fs::write(&token, b"trusted").expect("trusted secret");
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("secret mode");
+
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o700))
+            .expect("outside directory mode");
+        let outside_token = outside.join("token");
+        fs::write(&outside_token, b"untrusted").expect("outside secret");
+        fs::set_permissions(&outside_token, fs::Permissions::from_mode(0o600))
+            .expect("outside secret mode");
+
+        let saved_directory = directory.with_extension("saved");
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker_directory = directory.clone();
+        let worker_saved = saved_directory.clone();
+        let worker_outside = outside.clone();
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                if fs::rename(&worker_directory, &worker_saved).is_ok() {
+                    symlink(&worker_outside, &worker_directory).expect("replacement symlink");
+                    fs::remove_file(&worker_directory).expect("remove replacement symlink");
+                    fs::rename(&worker_saved, &worker_directory).expect("restore secret directory");
+                }
+            }
+        });
+
+        let volume_id = VolumeId::parse("credentials").expect("volume");
+        for _ in 0..2_000 {
+            if let Ok(files) = resolver.resolve(&scope("tenant-a"), &volume_id) {
+                assert_eq!(files.len(), 1);
+                assert_eq!(&*files[0].contents, b"trusted");
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        worker.join().expect("replacement worker");
+        let files = resolver
+            .resolve(&scope("tenant-a"), &volume_id)
+            .expect("resolved secret after replacement race");
+        assert_eq!(&*files[0].contents, b"trusted");
+
+        let saved_root = temporary.path().join("saved-root");
+        fs::rename(&root, &saved_root).expect("move opened secret root");
+        let replacement_root = temporary.path().join("replacement-root");
+        let replacement_directory =
+            replacement_root.join("tenants/tenant-a/workspaces/workspace-a/credentials");
+        fs::create_dir_all(&replacement_directory).expect("replacement secret directory");
+        fs::set_permissions(&replacement_directory, fs::Permissions::from_mode(0o700))
+            .expect("replacement directory mode");
+        let replacement_token = replacement_directory.join("token");
+        fs::write(&replacement_token, b"untrusted").expect("replacement secret");
+        fs::set_permissions(&replacement_token, fs::Permissions::from_mode(0o600))
+            .expect("replacement secret mode");
+        symlink(&replacement_root, &root).expect("replace secret root pathname");
+
+        let files = resolver
+            .resolve(&scope("tenant-a"), &volume_id)
+            .expect("resolved secret from opened root");
+        assert_eq!(&*files[0].contents, b"trusted");
     }
 
     #[test]
