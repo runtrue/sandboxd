@@ -13,13 +13,14 @@ use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, DirBuilder, File, OpenOptions},
-    io::{Read as _, Write as _},
+    io::{Read, Write as _},
     os::unix::fs::{
         DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
+    thread,
     time::{Duration, Instant},
 };
 use tempfile::Builder;
@@ -887,36 +888,71 @@ impl LocalVolumeProvider {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| io_error(program, error))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| VolumeError::Invalid(format!("{operation} stdout is unavailable")))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| VolumeError::Invalid(format!("{operation} stderr is unavailable")))?;
+        let output_limit = self.config.maximum_output_bytes;
+        let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
+        let stderr_reader = thread::spawn(move || read_bounded(stderr, output_limit));
         let deadline = Instant::now() + self.config.operation_timeout;
-        loop {
-            match child.try_wait().map_err(|error| io_error(program, error))? {
-                Some(_) => break,
-                None if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
                 }
-                None => {
+                Ok(None) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(VolumeError::Timeout(operation.to_owned()));
+                    break Err(VolumeError::Timeout(operation.to_owned()));
+                }
+                Err(error) => {
+                    let error = io_error(program, error);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(error);
                 }
             }
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| io_error(program, error))?;
-        if output.stdout.len() + output.stderr.len() > self.config.maximum_output_bytes {
+        };
+        let stdout = stdout_reader.join();
+        let stderr = stderr_reader.join();
+        let stdout = stdout
+            .map_err(|_| VolumeError::Invalid(format!("{operation} stdout reader panicked")))?;
+        let stderr = stderr
+            .map_err(|_| VolumeError::Invalid(format!("{operation} stderr reader panicked")))?;
+        let status = status?;
+        let stdout = stdout.map_err(|error| io_error(program, error))?;
+        let stderr = stderr.map_err(|error| io_error(program, error))?;
+        let output_exceeded =
+            stdout.observed_bytes.saturating_add(stderr.observed_bytes) > output_limit;
+        if output_exceeded {
+            let detail = format_stderr(&stderr.bytes, stderr.truncated);
+            let suffix = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            };
             return Err(VolumeError::Invalid(format!(
-                "{operation} output exceeded its byte limit"
+                "{operation} output exceeded its byte limit{suffix}"
             )));
         }
-        if !output.status.success() {
+        if !status.success() {
             return Err(VolumeError::Mount(format!(
                 "{operation} exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                status,
+                format_stderr(&stderr.bytes, stderr.truncated)
             )));
         }
-        Ok(output)
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+        })
     }
 
     fn release_attachment_locked(&self, attachment: &VolumeAttachment) -> Result<(), VolumeError> {
@@ -1448,6 +1484,39 @@ fn decode_mount_path(value: &str) -> PathBuf {
     )
 }
 
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    observed_bytes: usize,
+    truncated: bool,
+}
+
+fn read_bounded(mut reader: impl Read, maximum: usize) -> Result<BoundedOutput, std::io::Error> {
+    let mut bytes = Vec::with_capacity(maximum.min(64 * 1024));
+    let mut observed_bytes = 0_usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        observed_bytes = observed_bytes
+            .saturating_add(read)
+            .min(maximum.saturating_add(1));
+        let retained = maximum.saturating_sub(bytes.len()).min(read);
+        bytes.write_all(&buffer[..retained])?;
+    }
+    Ok(BoundedOutput {
+        truncated: observed_bytes > bytes.len(),
+        bytes,
+        observed_bytes,
+    })
+}
+
+fn format_stderr(stderr: &[u8], truncated: bool) -> String {
+    let suffix = if truncated { " [truncated]" } else { "" };
+    format!("{}{suffix}", String::from_utf8_lossy(stderr).trim())
+}
+
 fn digest_file(path: &Path) -> Result<(String, u64), VolumeError> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -1615,6 +1684,76 @@ mod tests {
         );
         assert!(parse_loop_device(b"/dev/loop1 --detach /dev/loop2").is_err());
         assert!(parse_loop_device(b"/tmp/loop1").is_err());
+    }
+
+    #[test]
+    fn external_command_drains_output_larger_than_pipe_capacity() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut config = LocalVolumeConfig::new(temporary.path().join("provider"));
+        config.operation_timeout = Duration::from_secs(10);
+        config.maximum_output_bytes = 8 * 1024 * 1024;
+        let provider = LocalVolumeProvider::open(config).expect("provider");
+
+        let output = provider
+            .run_external(
+                Path::new("/bin/sh"),
+                &[
+                    "-c",
+                    "head -c 4194304 /dev/zero; head -c 4194304 /dev/zero >&2",
+                ],
+                "produce large output",
+            )
+            .expect("large output command");
+
+        assert_eq!(output.stdout.len(), 4 * 1024 * 1024);
+        assert_eq!(output.stderr.len(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn external_command_rejects_output_over_limit_with_bounded_stderr() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut config = LocalVolumeConfig::new(temporary.path().join("provider"));
+        config.operation_timeout = Duration::from_secs(10);
+        config.maximum_output_bytes = 1024;
+        let provider = LocalVolumeProvider::open(config).expect("provider");
+
+        let error = provider
+            .run_external(
+                Path::new("/bin/sh"),
+                &[
+                    "-c",
+                    "printf 'diagnostic-start\\n' >&2; head -c 4194304 /dev/zero >&2; exit 7",
+                ],
+                "produce excessive output",
+            )
+            .expect_err("excessive output must be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("output exceeded its byte limit"));
+        assert!(message.contains("diagnostic-start"));
+        assert!(message.contains("[truncated]"));
+        assert!(message.len() < 1200);
+    }
+
+    #[test]
+    fn external_command_timeout_kills_and_reaps_while_draining_output() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut config = LocalVolumeConfig::new(temporary.path().join("provider"));
+        config.operation_timeout = Duration::from_millis(50);
+        config.maximum_output_bytes = 1024;
+        let provider = LocalVolumeProvider::open(config).expect("provider");
+
+        let error = provider
+            .run_external(
+                Path::new("/bin/sh"),
+                &["-c", "while :; do printf x; done"],
+                "produce output forever",
+            )
+            .expect_err("command must time out");
+
+        assert!(
+            matches!(error, VolumeError::Timeout(operation) if operation == "produce output forever")
+        );
     }
 
     #[test]
