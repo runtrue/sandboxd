@@ -5,6 +5,11 @@ networks:
     internal: true
     driver: bridge
 
+volumes:
+  fixture:
+    persistence_class: artifact
+    content_digest: sha256:507aa5df7f283c70ea39528e7d0a27f2e29a7c685d9e0f360a89169d68713b64
+
 services:
   server:
     image: docker.io/library/python:3.13-slim
@@ -41,7 +46,8 @@ services:
     entrypoint: [/usr/local/bin/python3, -c]
     command:
       - |
-        import json, urllib.request
+        import json, pathlib, urllib.request
+        assert pathlib.Path("/opt/runtrue/artifact-volume.txt").read_text() == "artifact-volume-e2e\n"
         with urllib.request.urlopen("http://server:8080/from-client", timeout=2) as response:
             payload = json.load(response)
         assert payload == {"ok": True, "request_path": "/from-client", "service": "server", "topology": "sandbox-network-example"}
@@ -54,4 +60,7 @@ services:
       PYTHONUNBUFFERED: "1"
       TOPOLOGY_NAME: sandbox-network-example
     networks: [application]
+    volumes:
+      - source: fixture
+        target: /opt/runtrue/artifact-volume.txt
     read_only: true

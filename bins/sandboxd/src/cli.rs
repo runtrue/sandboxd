@@ -103,6 +103,22 @@ pub(crate) enum Command {
         #[arg(long)]
         stop_after: bool,
     },
+    /// Verify and publish a host file for read-only artifact volumes.
+    PublishArtifact {
+        #[arg(long, default_value = DEFAULT_SOCKET)]
+        socket: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        digest: String,
+    },
+    /// Remove unreferenced artifact-volume content older than the grace period.
+    GarbageCollectArtifacts {
+        #[arg(long, default_value = DEFAULT_SOCKET)]
+        socket: PathBuf,
+        #[arg(long, default_value_t = 86_400)]
+        minimum_age_seconds: u64,
+    },
     Shutdown {
         #[arg(long, default_value = DEFAULT_SOCKET)]
         socket: PathBuf,

@@ -9,7 +9,8 @@ pub use local::{
     VOLUME_SNAPSHOT_VERSION,
 };
 pub use model::{
+    ArtifactGarbageCollectionReport, ArtifactPublication, ArtifactPublicationStatus,
     AttachmentOwner, MountedVolume, SecretFile, SecretResolver, VolumeAttachment,
     VolumeCleanupReport, VolumeHandle, VolumeProviderCapabilities, VolumeScope, VolumeSnapshot,
 };
-pub use provider::VolumeProvider;
+pub use provider::{ArtifactVolumeStore, VolumeProvider};

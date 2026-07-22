@@ -167,6 +167,30 @@ pub struct VolumeCleanupReport {
     pub removed_secret_volumes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactPublicationStatus {
+    Published,
+    Reused,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactPublication {
+    pub digest: String,
+    pub size_bytes: u64,
+    pub status: ArtifactPublicationStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactGarbageCollectionReport {
+    pub removed_artifacts: usize,
+    pub retained_artifacts: usize,
+    pub removed_staging_files: usize,
+    pub retained_staging_files: usize,
+}
+
 pub struct SecretFile {
     pub name: String,
     pub contents: Zeroizing<Vec<u8>>,

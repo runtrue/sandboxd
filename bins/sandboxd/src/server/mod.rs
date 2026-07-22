@@ -29,7 +29,8 @@ use runtrue_sandbox_oci::{
     SandboxError,
 };
 use runtrue_sandbox_volume::{
-    LocalSecretResolver, LocalVolumeConfig, LocalVolumeProvider, VolumeProvider,
+    ArtifactVolumeStore, LocalSecretResolver, LocalVolumeConfig, LocalVolumeProvider,
+    VolumeProvider,
 };
 
 pub(crate) const MAXIMUM_WRITABLE_ROOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -156,12 +157,14 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
                 SandboxError::Runtime(format!("open local secret resolver: {error}"))
             })?,
     );
-    let volume_provider: Arc<dyn VolumeProvider> = Arc::new(
+    let local_volume_provider = Arc::new(
         LocalVolumeProvider::open_with_secret_resolver(volume_config, Some(secret_resolver))
             .map_err(|error| {
                 SandboxError::Runtime(format!("open local volume provider: {error}"))
             })?,
     );
+    let volume_provider: Arc<dyn VolumeProvider> = local_volume_provider.clone();
+    let artifact_volume_store: Arc<dyn ArtifactVolumeStore> = local_volume_provider;
 
     let mut endpoints = vec![BoundEndpoint {
         listener: socket::bind_operator(&config.operator_socket)?,
@@ -184,6 +187,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         guest_profiles: config.guest_profiles,
         image_provider,
         volume_provider,
+        artifact_volume_store,
         runsc: config.runsc,
         ip: config.ip,
         nft: config.nft,

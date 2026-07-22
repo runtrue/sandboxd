@@ -173,6 +173,44 @@ rotating temporary credentials, pass an absolute owner-only JSON file with
 never copied into artifact metadata. Local-only builds can omit the remote
 dependency cohort with `cargo build -p runtrue-sandboxd --no-default-features`.
 
+## Artifact-volume ingestion and garbage collection
+
+Artifact-volume content is published through the root-only operator socket.
+Compute the digest independently, then ask the running worker to stream the
+source into its private volume store:
+
+```bash
+digest="sha256:$(sha256sum ./dataset.bin | cut -d' ' -f1)"
+sudo runtrue-sandboxd publish-artifact \
+  --source ./dataset.bin \
+  --digest "$digest"
+```
+
+The daemon opens a regular file without following a final symlink, hashes every
+byte while copying, rejects a digest mismatch, fsyncs a read-only temporary
+file, and publishes it with a no-clobber rename. Repeating the command for the
+same digest is safe: existing content is verified and reported as `reused`.
+The response contains only the canonical digest, byte count, and status. The
+operator source path is confined to this maintenance request; it is never
+written to a topology lock, tenant-visible volume specification, provider
+handle, or artifact metadata.
+
+Published objects are retained until explicit operator garbage collection.
+The following removes objects that have no live provider volume record and are
+at least 24 hours old (the default grace period):
+
+```bash
+sudo runtrue-sandboxd garbage-collect-artifacts
+```
+
+Use `--minimum-age-seconds` to change the grace, including `0` for deliberate
+immediate cleanup after all consuming sandboxes have stopped. Collection and
+volume operations share the provider lock, so content referenced by a live
+artifact-volume handle is retained. Crash-left temporary publication files use
+the same grace and are reported separately. Keep the original source or an
+external artifact registry as the durable source of truth; re-publication by
+digest is the supported recovery path after collection.
+
 ## Run locally
 
 Run the networking, lifecycle, and resource-limit scenario:
