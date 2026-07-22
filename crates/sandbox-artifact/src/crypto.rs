@@ -269,9 +269,7 @@ pub(crate) fn open(
         check_deadline(deadline, "decrypt snapshot object")?;
         let plaintext_length = CHUNK_BYTES;
         let ciphertext_length = plaintext_length + TAG_BYTES;
-        input
-            .read_exact(&mut ciphertext[..ciphertext_length])
-            .map_err(|error| io_error(source, error))?;
+        read_envelope_exact(&mut input, &mut ciphertext[..ciphertext_length], source)?;
         remaining -= plaintext_length as u64;
         let plaintext = decryptor
             .decrypt_next(Payload {
@@ -286,9 +284,7 @@ pub(crate) fn open(
     }
     let plaintext_length = remaining as usize;
     let ciphertext_length = plaintext_length + TAG_BYTES;
-    input
-        .read_exact(&mut ciphertext[..ciphertext_length])
-        .map_err(|error| io_error(source, error))?;
+    read_envelope_exact(&mut input, &mut ciphertext[..ciphertext_length], source)?;
     let plaintext = decryptor
         .decrypt_last(Payload {
             msg: &ciphertext[..ciphertext_length],
@@ -372,15 +368,21 @@ fn read_header(input: &mut fs::File, path: &Path) -> Result<Header, ArtifactErro
     let mut wrap_nonce = [0_u8; WRAP_NONCE_BYTES];
     let mut stream_nonce = [0_u8; STREAM_NONCE_BYTES];
     let mut wrapped_key = [0_u8; WRAPPED_KEY_BYTES];
-    input
+    let read = input
         .read_exact(&mut magic)
         .and_then(|()| input.read_exact(&mut version))
         .and_then(|()| input.read_exact(&mut chunk_bytes))
         .and_then(|()| input.read_exact(&mut plaintext_bytes))
         .and_then(|()| input.read_exact(&mut wrap_nonce))
         .and_then(|()| input.read_exact(&mut stream_nonce))
-        .and_then(|()| input.read_exact(&mut wrapped_key))
-        .map_err(|error| io_error(path, error))?;
+        .and_then(|()| input.read_exact(&mut wrapped_key));
+    if let Err(error) = read {
+        return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            ArtifactError::Integrity("encrypted object is truncated".to_owned())
+        } else {
+            io_error(path, error)
+        });
+    }
     if &magic != MAGIC
         || u32::from_be_bytes(version) != FORMAT_VERSION
         || u32::from_be_bytes(chunk_bytes) != CHUNK_BYTES as u32
@@ -394,6 +396,20 @@ fn read_header(input: &mut fs::File, path: &Path) -> Result<Header, ArtifactErro
         wrap_nonce,
         stream_nonce,
         wrapped_key,
+    })
+}
+
+fn read_envelope_exact(
+    input: &mut fs::File,
+    bytes: &mut [u8],
+    path: &Path,
+) -> Result<(), ArtifactError> {
+    input.read_exact(bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            ArtifactError::Integrity("encrypted object is truncated".to_owned())
+        } else {
+            io_error(path, error)
+        }
     })
 }
 

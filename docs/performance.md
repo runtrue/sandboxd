@@ -129,6 +129,40 @@ alone. The payload retained its SHA-256 digest, mode `0640`, and length through
 both restores. These are single-run local diagnostics rather than release
 thresholds.
 
+## S3 artifact-provider measurements
+
+The S3 conformance gate runs an optimized artifact test against the pinned
+MinIO image over loopback. It exercises both single-part and multipart objects,
+cross-worker materialization, concurrent publication, corrupt-object rejection,
+fault-injected upload and download interruption, two-page listing, concurrent
+garbage collection, and abandoned multipart cleanup. The same process first
+runs the fixture through the local provider so provider measurements share a
+host and build:
+
+```bash
+./tools/test-s3-artifacts.sh
+```
+
+One run on 2026-07-22, using a tmpfs-backed MinIO data directory and a 5,242,915
+byte logical fixture, produced:
+
+| Provider | Cold initialization | Publish transfer | Publish | Publish throughput | Materialize transfer | Materialize | Materialize throughput |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| local | 32 µs | 5,244,991 B | 63 ms | 83,253,825 B/s | 5,244,991 B | 36 ms | 145,694,194 B/s |
+| `s3-wire` + MinIO | 1,859 µs | 5,244,973 B | 179 ms | 29,301,525 B/s | 5,244,973 B | 44 ms | 119,203,931 B/s |
+
+The same checkout's stripped release binaries measured:
+
+| Build | Bytes |
+| --- | ---: |
+| default, with `s3-wire` artifact support | 7,881,912 |
+| `--no-default-features`, local provider only | 4,271,552 |
+
+These are retained single-run diagnostics, not release thresholds. The
+loopback MinIO result isolates provider overhead but does not predict WAN or
+AWS service latency. Re-run on the intended worker cohort before making a
+capacity decision.
+
 GitHub-hosted runners have variable CPU and storage neighbors. The PR comment
 flags a possible regression when throughput falls by more than 10% or p99
 latency rises by more than 15%; relative performance alone never fails the
