@@ -19,6 +19,7 @@ docker run --detach --rm \
   --env MINIO_ROOT_USER="$access_key" \
   --env MINIO_ROOT_PASSWORD="$secret_key" \
   --env MINIO_TEST_BUCKET="$bucket" \
+  --tmpfs /data:rw,nosuid,nodev,noexec,size=128m \
   --entrypoint /bin/sh \
   "$minio_image" \
   -c 'mkdir -p "/data/$MINIO_TEST_BUCKET" && exec minio server /data --address :9000' \
@@ -37,5 +38,5 @@ S3_TEST_REGION='us-east-1' \
 S3_TEST_BUCKET="$bucket" \
 S3_TEST_ACCESS_KEY_ID="$access_key" \
 S3_TEST_SECRET_ACCESS_KEY="$secret_key" \
-  cargo test --locked --package runtrue-sandbox-artifact --features s3 \
+  cargo test --locked --release --package runtrue-sandbox-artifact --features s3 \
   --test s3_minio -- --ignored --nocapture

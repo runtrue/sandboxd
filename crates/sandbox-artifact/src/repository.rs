@@ -1152,13 +1152,14 @@ mod tests {
             .expect("open envelope")
             .set_len(length - 1)
             .expect("truncate envelope");
-        assert!(store
-            .materialize(
+        assert!(matches!(
+            store.materialize(
                 &fixture.publication.scope,
                 &fixture.publication.manifest.snapshot_id,
                 &directory.path().join("truncated-restore"),
-            )
-            .is_err());
+            ),
+            Err(ArtifactError::Integrity(_))
+        ));
     }
 
     #[test]

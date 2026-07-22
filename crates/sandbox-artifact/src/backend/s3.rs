@@ -694,7 +694,7 @@ fn map_s3_error(error: S3Error) -> ArtifactError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use s3_wire::{Credentials, CredentialsProvider, StaticCredentialsProvider};
+    use s3_wire::{Credentials, CredentialsProvider, RetryPolicy, StaticCredentialsProvider};
     use std::{
         io::Write as _,
         net::{SocketAddr, TcpListener, TcpStream},
@@ -709,6 +709,18 @@ mod tests {
         headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
         declared_length: Option<usize>,
+    }
+
+    enum ServerAction {
+        Respond(Response),
+        Close,
+        Stall(Duration),
+    }
+
+    impl From<Response> for ServerAction {
+        fn from(response: Response) -> Self {
+            Self::Respond(response)
+        }
     }
 
     impl Response {
@@ -732,15 +744,25 @@ mod tests {
     }
 
     fn scripted_server(responses: Vec<Response>) -> (SocketAddr, JoinHandle<Vec<String>>) {
+        scripted_server_actions(responses.into_iter().map(ServerAction::from).collect())
+    }
+
+    fn scripted_server_actions(
+        actions: Vec<ServerAction>,
+    ) -> (SocketAddr, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted S3 server");
         let address = listener.local_addr().expect("scripted S3 address");
         let handle = thread::spawn(move || {
-            responses
+            actions
                 .into_iter()
-                .map(|response| {
+                .map(|action| {
                     let (mut stream, _) = listener.accept().expect("accept S3 request");
                     let request = read_request(&mut stream);
-                    write_response(&mut stream, response);
+                    match action {
+                        ServerAction::Respond(response) => write_response(&mut stream, response),
+                        ServerAction::Close => {}
+                        ServerAction::Stall(duration) => thread::sleep(duration),
+                    }
                     request
                 })
                 .collect()
@@ -797,6 +819,14 @@ mod tests {
     }
 
     fn backend(address: SocketAddr, multipart_threshold: u64) -> S3Backend {
+        backend_with_attempts(address, multipart_threshold, 4)
+    }
+
+    fn backend_with_attempts(
+        address: SocketAddr,
+        multipart_threshold: u64,
+        max_attempts: u32,
+    ) -> S3Backend {
         let credentials =
             Credentials::new("test-access", "test-secret", None).expect("static test credentials");
         let provider: Arc<dyn CredentialsProvider> =
@@ -811,6 +841,19 @@ mod tests {
             .multipart_part_size(5 * 1024 * 1024)
             .multipart_concurrency(1)
             .max_multipart_in_flight_bytes(5 * 1024 * 1024)
+            .connect_timeout(Duration::from_millis(200))
+            .attempt_timeout(Duration::from_secs(1))
+            .operation_timeout(Duration::from_secs(2))
+            .idle_body_timeout(Duration::from_millis(100))
+            .retry_policy(
+                RetryPolicy::new(
+                    max_attempts,
+                    Duration::from_millis(1),
+                    Duration::from_millis(2),
+                    Duration::from_secs(1),
+                )
+                .expect("test retry policy"),
+            )
             .credentials_provider(provider)
             .build()
             .expect("test S3 config");
@@ -1065,5 +1108,159 @@ mod tests {
         assert!(requests[4].starts_with("POST /sandbox-artifacts/"));
         assert!(requests[4].contains("uploadId="));
         assert!(requests[5].starts_with("HEAD /sandbox-artifacts/"));
+    }
+
+    #[test]
+    fn s3_backend_retries_transient_failures_with_a_fixed_attempt_bound() {
+        let unavailable = "<Error><Code>ServiceUnavailable</Code><Message>retry</Message></Error>";
+        let (address, server) = scripted_server(vec![
+            Response::xml("503 Service Unavailable", unavailable.to_owned()),
+            Response::xml("503 Service Unavailable", unavailable.to_owned()),
+            Response::empty("200 OK"),
+        ]);
+        let backend = backend_with_attempts(address, 8 * 1024 * 1024, 3);
+
+        assert!(backend
+            .exists(
+                "tenants/tenant-a/workspaces/team-a/objects/sha256/retry",
+                Instant::now() + TEST_TIMEOUT,
+            )
+            .expect("retry transient HEAD"));
+
+        let requests = server.join().expect("scripted server");
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| request.starts_with("HEAD ")));
+    }
+
+    #[test]
+    fn caller_deadline_cancels_a_stalled_s3_request() {
+        let (address, server) =
+            scripted_server_actions(vec![ServerAction::Stall(Duration::from_millis(250))]);
+        let backend = backend_with_attempts(address, 8 * 1024 * 1024, 1);
+        let started = Instant::now();
+
+        let result = backend.exists(
+            "tenants/tenant-a/workspaces/team-a/objects/sha256/stalled",
+            Instant::now() + Duration::from_millis(50),
+        );
+
+        assert!(matches!(result, Err(ArtifactError::Timeout(_))));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert_eq!(server.join().expect("scripted server").len(), 1);
+    }
+
+    #[test]
+    fn transport_failures_are_bounded_and_do_not_expose_credentials() {
+        let (address, server) =
+            scripted_server_actions(vec![ServerAction::Close, ServerAction::Close]);
+        let backend = backend_with_attempts(address, 8 * 1024 * 1024, 2);
+
+        let error = backend
+            .exists(
+                "tenants/tenant-a/workspaces/team-a/objects/sha256/reset",
+                Instant::now() + TEST_TIMEOUT,
+            )
+            .expect_err("closed transport must fail");
+        let message = error.to_string();
+        assert!(!message.contains("test-access"));
+        assert!(!message.contains("test-secret"));
+        assert_eq!(server.join().expect("scripted server").len(), 2);
+    }
+
+    #[test]
+    fn interrupted_download_removes_the_partial_destination() {
+        let mut truncated = Response::empty("200 OK");
+        truncated.body = b"partial".to_vec();
+        truncated.declared_length = Some(64);
+        let (address, server) = scripted_server(vec![truncated]);
+        let backend = backend_with_attempts(address, 8 * 1024 * 1024, 1);
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let destination = temporary.path().join("partial-download");
+
+        assert!(backend
+            .get(
+                "tenants/tenant-a/workspaces/team-a/objects/sha256/truncated",
+                &destination,
+                64,
+                Instant::now() + TEST_TIMEOUT,
+            )
+            .is_err());
+        assert!(!destination.exists());
+        assert_eq!(server.join().expect("scripted server").len(), 1);
+    }
+
+    #[test]
+    fn interrupted_multipart_upload_is_aborted() {
+        let logical_key = "tenants/tenant-a/workspaces/team-a/objects/sha256/interrupted";
+        let remote_key = format!(
+            "runtrue-sandboxd/v1/tenants/{}/workspaces/{}/objects/sha256/interrupted",
+            hex::encode(Sha256::digest(b"tenant-a")),
+            hex::encode(Sha256::digest(b"team-a"))
+        );
+        let not_found = "<Error><Code>NoSuchKey</Code><Message>missing</Message></Error>";
+        let created = format!(
+            "<InitiateMultipartUploadResult><Bucket>sandbox-artifacts</Bucket><Key>{remote_key}</Key><UploadId>upload-interrupted</UploadId></InitiateMultipartUploadResult>"
+        );
+        let failed = "<Error><Code>InternalError</Code><Message>injected</Message></Error>";
+        let (address, server) = scripted_server(vec![
+            Response::xml("404 Not Found", not_found.to_owned()),
+            Response::empty("200 OK"),
+            Response::xml("200 OK", created),
+            Response::xml("500 Internal Server Error", failed.to_owned()),
+            Response::empty("204 No Content"),
+        ]);
+        let backend = backend_with_attempts(address, 5 * 1024 * 1024, 1);
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let source = temporary.path().join("large");
+        fs::write(&source, vec![7_u8; 5 * 1024 * 1024]).expect("multipart source");
+
+        assert!(backend
+            .put_if_absent(logical_key, &source, Instant::now() + TEST_TIMEOUT)
+            .is_err());
+
+        let requests = server.join().expect("scripted server");
+        assert_eq!(requests.len(), 5);
+        assert!(requests[3].contains("partNumber=1"));
+        assert!(requests[4].starts_with("DELETE "));
+        assert!(requests[4].contains("uploadId=upload-interrupted"));
+    }
+
+    #[test]
+    fn s3_backend_follows_bounded_listing_pagination() {
+        let logical_prefix = "tenants/tenant-a/workspaces/team-a/objects/";
+        let remote_prefix = format!(
+            "runtrue-sandboxd/v1/tenants/{}/workspaces/{}/objects/",
+            hex::encode(Sha256::digest(b"tenant-a")),
+            hex::encode(Sha256::digest(b"team-a"))
+        );
+        let first = format!(
+            "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next-page</NextContinuationToken><Contents><Key>{remote_prefix}a</Key><LastModified>2026-07-21T00:00:00Z</LastModified><Size>1</Size></Contents><KeyCount>1</KeyCount></ListBucketResult>"
+        );
+        let second = format!(
+            "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>{remote_prefix}b</Key><LastModified>2026-07-21T00:00:01Z</LastModified><Size>1</Size></Contents><KeyCount>1</KeyCount></ListBucketResult>"
+        );
+        let (address, server) = scripted_server(vec![
+            Response::xml("200 OK", first),
+            Response::xml("200 OK", second),
+        ]);
+        let backend = backend_with_attempts(address, 8 * 1024 * 1024, 1);
+
+        let listed = backend
+            .list(logical_prefix, 2, Instant::now() + TEST_TIMEOUT)
+            .expect("paginated listing");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|object| object.key.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "tenants/tenant-a/workspaces/team-a/objects/a",
+                "tenants/tenant-a/workspaces/team-a/objects/b",
+            ]
+        );
+
+        let requests = server.join().expect("scripted server");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("continuation-token=next-page"));
     }
 }
