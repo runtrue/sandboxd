@@ -37,6 +37,9 @@ self-hosted worker labeled `sandboxd-gvisor`. Do not register a long-lived or
 general-purpose privileged runner with this public repository. The privileged
 workflow has no pull-request trigger.
 
+Releases follow the additional gates in [docs/releasing.md](docs/releasing.md).
+All project interactions must follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Change design
 
 - Treat the complete sandbox as the lifecycle and checkpoint boundary.

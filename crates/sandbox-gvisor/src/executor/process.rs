@@ -215,8 +215,9 @@ impl Runsc {
             if let Some(status) = process.poll()? {
                 let id = process.id.clone();
                 let stderr = process.finish_capture()?.stderr.clone();
+                let diagnostic = self.diagnostic(&id);
                 return Err(SandboxError::Docker(format!(
-                    "runsc service `{}` exited {:?} before running: {}",
+                    "runsc service `{}` exited {:?} before running: {}{diagnostic}",
                     id,
                     status.code(),
                     String::from_utf8_lossy(&stderr).trim()

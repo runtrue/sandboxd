@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default 1.97.1
+      - name: Install dependency scanners
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: Validate source and dependency policy
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --locked
+          ./tools/test-s3-artifacts.sh
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo audit --deny warnings
+          cargo deny check advisories licenses bans sources
+
+  publish:
+    name: Publish x86-64 Linux binaries
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      CARGO_INCREMENTAL: "0"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup default 1.97.1
+      - name: Build release binaries twice
+        run: |
+          cargo build --workspace --release --locked
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd > /tmp/first-build.sha256
+          mkdir -p /tmp/first-build
+          cp target/release/runtrue-sandboxctl target/release/runtrue-sandboxd /tmp/first-build/
+          cargo clean
+          cargo build --workspace --release --locked
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd > /tmp/second-build.sha256
+          diff --unified /tmp/first-build.sha256 /tmp/second-build.sha256
+      - name: Create deterministic archive and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          package="sandboxd-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${package}"
+          install -m 0755 /tmp/first-build/runtrue-sandboxctl "dist/${package}/"
+          install -m 0755 /tmp/first-build/runtrue-sandboxd "dist/${package}/"
+          install -m 0644 README.md SECURITY.md LICENSE "dist/${package}/"
+          commit_time="$(git show -s --format=%ct HEAD)"
+          tar \
+            --sort=name \
+            --mtime="@${commit_time}" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C dist \
+            -czf "dist/${package}.tar.gz" \
+            "${package}"
+          (
+            cd dist
+            sha256sum "${package}.tar.gz" > SHA256SUMS
+          )
+      - name: Publish GitHub release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=()
+          case "$RELEASE_TAG" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "$RELEASE_TAG" \
+            dist/*.tar.gz \
+            dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "sandboxd ${RELEASE_TAG}" \
+            --generate-notes \
+            "${prerelease[@]}"
