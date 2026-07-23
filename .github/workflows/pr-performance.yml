@@ -48,7 +48,7 @@ jobs:
     steps:
       - name: Verify initiator and resolve pull request
         id: authorize
-        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REQUESTED_PR: ${{ inputs.pr_number || github.event.issue.number }}
           REQUESTED_SAMPLES: ${{ inputs.samples || '12000' }}
@@ -223,7 +223,7 @@ jobs:
           name: pr-${{ needs.authorize.outputs.pr_number }}-performance-${{ github.run_id }}
           path: results
       - name: Update pull request feedback
-        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
           BENCHMARK_RESULT: ${{ needs.benchmark.result }}
