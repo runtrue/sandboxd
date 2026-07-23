@@ -457,7 +457,7 @@ impl LocalVolumeProvider {
             .and_then(|()| {
                 temporary
                     .as_file_mut()
-                    .set_permissions(fs::Permissions::from_mode(0o400))
+                    .set_permissions(fs::Permissions::from_mode(0o444))
             })
             .and_then(|()| temporary.as_file_mut().sync_all())
             .map_err(|error| io_error(&artifact_root, error))?;
@@ -732,13 +732,16 @@ impl LocalVolumeProvider {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .mode(0o400)
+                .mode(0o444)
                 .open(&path)
                 .map_err(|error| io_error(&path, error))?;
             file.write_all(&secret.contents)
+                .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o444)))
                 .and_then(|()| file.sync_all())
                 .map_err(|error| io_error(&path, error))?;
         }
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o555))
+            .map_err(|error| io_error(&data, error))?;
         Ok(())
     }
 
@@ -1873,6 +1876,11 @@ fn verify_artifact(path: &Path, expected: &str) -> Result<u64, VolumeError> {
             "artifact content digest does not match the volume specification".to_owned(),
         ));
     }
+    if metadata.permissions().mode() & 0o777 != 0o444 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o444))
+            .and_then(|()| File::open(path)?.sync_all())
+            .map_err(|error| io_error(path, error))?;
+    }
     Ok(size_bytes)
 }
 
@@ -2060,6 +2068,14 @@ mod tests {
         assert!(verify_artifact(&artifact, &digest).is_err());
         fs::set_permissions(&artifact, fs::Permissions::from_mode(0o400)).expect("read only");
         assert!(verify_artifact(&artifact, &digest).is_ok());
+        assert_eq!(
+            fs::metadata(&artifact)
+                .expect("artifact metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
     }
 
     #[test]
@@ -2117,8 +2133,8 @@ mod tests {
                 .expect("artifact metadata")
                 .permissions()
                 .mode()
-                & 0o222,
-            0
+                & 0o777,
+            0o444
         );
         provider.unmount(&mounted).expect("unmounted artifact");
     }

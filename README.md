@@ -98,6 +98,8 @@ independent guest CPU or memory guarantees.
   and one active HMAC key;
 - the local artifact provider restricts snapshot restore to the same worker;
 - raw host bind mounts and uninstalled external/CSI providers are unsupported;
+- volume destinations on a read-only OCI root must already exist in the image;
+  use an explicitly writable root when the runtime must create a new target;
 - writable-root snapshots reject hard links and non-overlay extended
   attributes until those representations have a portable contract;
 - external networking remains disabled unless the topology lock carries an explicit
@@ -131,6 +133,10 @@ independent guest CPU or memory guarantees.
 Detailed documentation covers [architecture and isolation](docs/architecture.md),
 [authenticated control](docs/control-plane.md), and
 [performance feedback](docs/performance.md).
+
+Installation from source or a release archive and an example systemd unit are
+documented in [installation and service operation](docs/install.md). Release
+operators should follow the gated [release process](docs/releasing.md).
 
 ## Validated host cohort
 
@@ -249,7 +255,9 @@ go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the local development workflow. Send
 security-sensitive reports through GitHub's private vulnerability reporting;
-do not open a public issue containing exploit details.
+do not open a public issue containing exploit details. Community participation
+is governed by the [Code of Conduct](CODE_OF_CONDUCT.md), and release changes
+are recorded in the [changelog](CHANGELOG.md).
 
 ## License
 

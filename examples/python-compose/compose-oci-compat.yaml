@@ -7,11 +7,15 @@ services:
     entrypoint: [/usr/local/bin/python3, -c]
     command:
       - |
-        import os, socket, stat
+        import ctypes, os, socket, stat
 
         def status(name):
             with open("/proc/self/status", encoding="ascii") as stream:
-                fields = dict(line.rstrip().split(":\t", 1) for line in stream if ":\t" in line)
+                fields = {}
+                for line in stream:
+                    field, separator, value = line.partition(":")
+                    if separator:
+                        fields[field] = value.strip()
             return fields[name]
 
         enabled = {0, 1, 3, 4, 6, 7}
@@ -22,7 +26,8 @@ services:
         assert int(status("CapPrm"), 16) == expected
         assert int(status("CapInh"), 16) == 0
         assert int(status("CapAmb"), 16) == 0
-        assert status("NoNewPrivs") == "1"
+        libc = ctypes.CDLL(None, use_errno=True)
+        assert libc.prctl(39, 0, 0, 0, 0) == 1  # PR_GET_NO_NEW_PRIVS
 
         chown_target = "/tmp/cap-chown"
         with open(chown_target, "w", encoding="ascii") as stream:
@@ -54,12 +59,23 @@ services:
             raise AssertionError("CAP_NET_RAW unexpectedly available")
         except PermissionError:
             pass
-        for protected in ["/proc/kcore", "/proc/sys/kernel/hostname"]:
-            try:
-                os.open(protected, os.O_RDWR)
-                raise AssertionError(f"sensitive path unexpectedly writable: {protected}")
-            except OSError:
-                pass
+        try:
+            os.open("/proc/kcore", os.O_RDWR)
+            raise AssertionError("masked path unexpectedly opened: /proc/kcore")
+        except OSError:
+            pass
+
+        hostname_path = "/proc/sys/kernel/hostname"
+        with open(hostname_path, encoding="ascii") as stream:
+            hostname = stream.read()
+        hostname_fd = os.open(hostname_path, os.O_WRONLY)
+        try:
+            os.write(hostname_fd, hostname.encode("ascii"))
+            raise AssertionError("sensitive sysctl unexpectedly writable")
+        except OSError:
+            pass
+        finally:
+            os.close(hostname_fd)
 
         os.setgroups([1234])
         os.setgid(1234)

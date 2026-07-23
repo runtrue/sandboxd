@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.97.1"
@@ -40,12 +40,12 @@ tokio = { version = "=1.53.1", features = ["fs", "io-util", "rt-multi-thread", "
 xattr = { version = "=1.6.1", default-features = false }
 zstd = { version = "=0.13.3", default-features = false }
 zeroize = "=1.9.0"
-runtrue-sandbox-artifact = { version = "=0.1.0", path = "crates/sandbox-artifact" }
-runtrue-sandbox-core = { version = "=0.1.0", path = "crates/sandbox-core" }
-runtrue-sandbox-gvisor = { version = "=0.1.0", path = "crates/sandbox-gvisor" }
-runtrue-sandbox-oci = { version = "=0.1.0", path = "crates/sandbox-oci" }
-runtrue-sandbox-runtime = { version = "=0.1.0", path = "crates/sandbox-runtime" }
-runtrue-sandbox-volume = { version = "=0.1.0", path = "crates/sandbox-volume" }
+runtrue-sandbox-artifact = { version = "=0.1.0-alpha.1", path = "crates/sandbox-artifact" }
+runtrue-sandbox-core = { version = "=0.1.0-alpha.1", path = "crates/sandbox-core" }
+runtrue-sandbox-gvisor = { version = "=0.1.0-alpha.1", path = "crates/sandbox-gvisor" }
+runtrue-sandbox-oci = { version = "=0.1.0-alpha.1", path = "crates/sandbox-oci" }
+runtrue-sandbox-runtime = { version = "=0.1.0-alpha.1", path = "crates/sandbox-runtime" }
+runtrue-sandbox-volume = { version = "=0.1.0-alpha.1", path = "crates/sandbox-volume" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

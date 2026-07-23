@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible sandboxd defect that is not security-sensitive.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Use private vulnerability reporting instead.
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: Commit, tag, or release version where the problem occurs.
+      placeholder: v0.1.0-alpha.1 or a full commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Host environment
+      description: Include kernel, architecture, cgroup mode, runsc, and containerd versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe topology and exact commands needed to reproduce.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Remove tenant data, credentials, host paths, and other secrets.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: This report does not contain a vulnerability or sensitive data.
+          required: true
+        - label: I reproduced this after a clean worker restart.
+          required: false

@@ -1,0 +1,33 @@
+name: Feature proposal
+description: Propose a capability or compatibility improvement.
+title: "proposal: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the workload or operator problem, not only the desired implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the API, compatibility, and lifecycle behavior you expect.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and portability impact
+      description: Identify changes to trust boundaries, host resources, networking, snapshots, or cleanup.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

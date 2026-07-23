@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/runtrue/sandboxd/security/advisories/new
+    about: Report security-sensitive issues privately. Do not open a public issue.
+  - name: Usage question or design discussion
+    url: https://github.com/runtrue/sandboxd/discussions
+    about: Ask questions and discuss designs without filing a defect.

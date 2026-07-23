@@ -67,7 +67,16 @@ artifact_digest=sha256:507aa5df7f283c70ea39528e7d0a27f2e29a7c685d9e0f360a89169d6
 "$binary" create --socket "$socket" --lock "$lock_path" \
   --sandbox "$sandbox" --timeout-seconds 20
 sleep 1
-"$binary" logs --socket "$socket" --sandbox "$sandbox" --container client
+client_logs=$("$binary" logs --socket "$socket" --sandbox "$sandbox" --container client)
+printf '%s\n' "$client_logs"
+python3 - "$client_logs" <<'PY'
+import json
+import sys
+
+response = json.loads(sys.argv[1])
+if not response["ok"] or response["result"]["exit_code"] != 0:
+    raise SystemExit("client service did not complete successfully")
+PY
 "$binary" pause --socket "$socket" --sandbox "$sandbox"
 "$binary" inspect --socket "$socket" --sandbox "$sandbox"
 "$binary" resume --socket "$socket" --sandbox "$sandbox"

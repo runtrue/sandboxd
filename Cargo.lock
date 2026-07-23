@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandbox-artifact"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandbox-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandbox-gvisor"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "hex",
  "libc",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandbox-oci"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64",
  "flate2",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandbox-runtime"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "runtrue-sandbox-core",
  "thiserror 1.0.61",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandbox-volume"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "hex",
  "nix",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandboxctl"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "runtrue-sandbox-core",
@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-sandboxd"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "hex",
