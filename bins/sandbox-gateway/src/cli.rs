@@ -137,11 +137,11 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         Duration::from_secs(args.dispatch_timeout_seconds),
         args.dispatch_worker_scan_limit,
     )?;
-    let state = AppState {
+    let state = AppState::new(
         store,
-        auth: Arc::new(AuthPolicy::load(&args.auth_policy)?),
-        worker_auth: Arc::new(WorkerAuthPolicy::load(&args.worker_auth_policy)?),
-    };
+        Arc::new(AuthPolicy::load(&args.auth_policy)?),
+        Arc::new(WorkerAuthPolicy::load(&args.worker_auth_policy)?),
+    );
     tokio::spawn(dispatcher.run());
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await

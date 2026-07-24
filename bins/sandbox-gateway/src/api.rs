@@ -3,10 +3,14 @@ use crate::worker_auth::WorkerAuthPolicy;
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
+use futures_util::{stream, Stream};
 use runtrue_sandbox_core::{QueuedWork, SandboxId, WorkerId, WorkspaceId};
 use runtrue_sandbox_placement::{
     EnqueueOutcome, PlacementRecord, PlacementState, PlacementStoreError, PlacementSubmission,
@@ -15,13 +19,17 @@ use runtrue_sandbox_placement::{
 use runtrue_sandbox_protocol::{Operation, WorkerAdvertisement, WorkloadResponse};
 use serde::{Deserialize, Serialize};
 use std::{
+    convert::Infallible,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::{sync::Semaphore, time::sleep};
 use tower::limit::ConcurrencyLimitLayer;
 
 const MAXIMUM_BODY_BYTES: usize = 512 * 1024;
 const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
+const MAXIMUM_RESULT_STREAMS: usize = 64;
+const RESULT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 
 #[derive(Clone)]
@@ -29,6 +37,24 @@ pub(crate) struct AppState {
     pub(crate) store: Arc<PostgresPlacementStore>,
     pub(crate) auth: Arc<AuthPolicy>,
     pub(crate) worker_auth: Arc<WorkerAuthPolicy>,
+    pub(crate) result_streams: Arc<Semaphore>,
+    pub(crate) result_stream_poll_interval: Duration,
+}
+
+impl AppState {
+    pub(crate) fn new(
+        store: Arc<PostgresPlacementStore>,
+        auth: Arc<AuthPolicy>,
+        worker_auth: Arc<WorkerAuthPolicy>,
+    ) -> Self {
+        Self {
+            store,
+            auth,
+            worker_auth,
+            result_streams: Arc::new(Semaphore::new(MAXIMUM_RESULT_STREAMS)),
+            result_stream_poll_interval: RESULT_STREAM_POLL_INTERVAL,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +96,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/v1/placements/{idempotency_key}",
             get(inspect).delete(cancel),
+        )
+        .route(
+            "/v1/placements/{idempotency_key}/events",
+            get(stream_placement),
         )
         .route("/internal/v1/workers/register", post(register_worker))
         .route(
@@ -243,6 +273,112 @@ async fn inspect(
     Ok(Json(record.into()))
 }
 
+async fn stream_placement(
+    State(state): State<AppState>,
+    Path(idempotency_key): Path<String>,
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let principal = authenticate_path(&state, &headers, &idempotency_key)?;
+    let permit = Arc::clone(&state.result_streams)
+        .try_acquire_owned()
+        .map_err(|_| ApiError::Exhausted)?;
+    let initial = state
+        .store
+        .get_by_idempotency(
+            &principal.tenant_id,
+            &principal.subject_id,
+            &idempotency_key,
+        )
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let stream_state = PlacementStream {
+        store: Arc::clone(&state.store),
+        tenant_id: principal.tenant_id,
+        subject_id: principal.subject_id,
+        idempotency_key,
+        poll_interval: state.result_stream_poll_interval,
+        initial: Some(initial),
+        last_event: None,
+        terminal_sent: false,
+        _permit: permit,
+    };
+    Ok(
+        Sse::new(stream::unfold(stream_state, next_placement_event)).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("placement stream"),
+        ),
+    )
+}
+
+struct PlacementStream {
+    store: Arc<PostgresPlacementStore>,
+    tenant_id: runtrue_sandbox_core::TenantId,
+    subject_id: runtrue_sandbox_core::SubjectId,
+    idempotency_key: String,
+    poll_interval: Duration,
+    initial: Option<PlacementRecord>,
+    last_event: Option<String>,
+    terminal_sent: bool,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+async fn next_placement_event(
+    mut state: PlacementStream,
+) -> Option<(Result<Event, Infallible>, PlacementStream)> {
+    if state.terminal_sent {
+        return None;
+    }
+    loop {
+        let record = if let Some(initial) = state.initial.take() {
+            Ok(Some(initial))
+        } else {
+            sleep(state.poll_interval).await;
+            state
+                .store
+                .get_by_idempotency(&state.tenant_id, &state.subject_id, &state.idempotency_key)
+                .await
+        };
+        let record = match record {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                state.terminal_sent = true;
+                let event = Event::default()
+                    .event("error")
+                    .data(r#"{"error":"not_found"}"#);
+                return Some((Ok(event), state));
+            }
+            Err(_) => {
+                state.terminal_sent = true;
+                let event = Event::default()
+                    .event("error")
+                    .data(r#"{"error":"unavailable"}"#);
+                return Some((Ok(event), state));
+            }
+        };
+        let terminal = matches!(
+            record.state,
+            PlacementState::Completed | PlacementState::Cancelled | PlacementState::Expired
+        );
+        let encoded = match serde_json::to_string(&PlacementResponse::from(record)) {
+            Ok(encoded) => encoded,
+            Err(_) => {
+                state.terminal_sent = true;
+                let event = Event::default()
+                    .event("error")
+                    .data(r#"{"error":"unavailable"}"#);
+                return Some((Ok(event), state));
+            }
+        };
+        if state.last_event.as_deref() == Some(&encoded) {
+            continue;
+        }
+        state.last_event = Some(encoded.clone());
+        state.terminal_sent = terminal;
+        return Some((Ok(Event::default().event("placement").data(encoded)), state));
+    }
+}
+
 async fn cancel(
     State(state): State<AppState>,
     Path(idempotency_key): Path<String>,
@@ -403,19 +539,39 @@ mod tests {
                 )
                 .await
                 .expect("store");
+                let store = Arc::new(store);
                 let suffix = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("clock")
                     .as_nanos();
                 let worker_id = format!("gateway-worker-{suffix}");
-                let app = router(AppState {
-                    store: Arc::new(store),
-                    auth: Arc::new(AuthPolicy::for_test("a-secure-random-token-with-32-bytes")),
-                    worker_auth: Arc::new(WorkerAuthPolicy::for_test(
+                let app = router(AppState::new(
+                    Arc::clone(&store),
+                    Arc::new(AuthPolicy::for_test("a-secure-random-token-with-32-bytes")),
+                    Arc::new(WorkerAuthPolicy::for_test(
                         "a-secure-worker-token-with-32-bytes",
                         &worker_id,
                     )),
-                });
+                ));
+                let stream_store = Arc::new(
+                    PostgresPlacementStore::connect_local_insecure(
+                        &url,
+                        PlacementStoreConfig::default(),
+                    )
+                    .await
+                    .expect("stream replica store"),
+                );
+                let mut stream_state = AppState::new(
+                    stream_store,
+                    Arc::new(AuthPolicy::for_test("a-secure-random-token-with-32-bytes")),
+                    Arc::new(WorkerAuthPolicy::for_test(
+                        "a-secure-worker-token-with-32-bytes",
+                        &worker_id,
+                    )),
+                );
+                stream_state.result_streams = Arc::new(Semaphore::new(1));
+                stream_state.result_stream_poll_interval = Duration::from_millis(1);
+                let stream_app = router(stream_state);
                 let idempotency_key = format!("gateway-http-{suffix}");
                 let sandbox_id = format!("gateway-sandbox-{suffix}");
                 let request = || {
@@ -615,6 +771,33 @@ mod tests {
                         .status(),
                     StatusCode::SERVICE_UNAVAILABLE
                 );
+                let events = || {
+                    Request::builder()
+                        .uri(format!("/v1/placements/{idempotency_key}/events"))
+                        .header(
+                            "authorization",
+                            "Bearer key-a.a-secure-random-token-with-32-bytes",
+                        )
+                        .body(Body::empty())
+                        .expect("events")
+                };
+                let stream_response = stream_app.clone().oneshot(events()).await.expect("stream");
+                assert_eq!(stream_response.status(), StatusCode::OK);
+                assert_eq!(
+                    stream_response
+                        .headers()
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("text/event-stream")
+                );
+                assert_eq!(
+                    stream_app
+                        .oneshot(events())
+                        .await
+                        .expect("bounded streams")
+                        .status(),
+                    StatusCode::TOO_MANY_REQUESTS
+                );
                 let cancel = Request::builder()
                     .method("DELETE")
                     .uri(format!("/v1/placements/{idempotency_key}"))
@@ -628,6 +811,14 @@ mod tests {
                     app.oneshot(cancel).await.expect("cancel").status(),
                     StatusCode::OK
                 );
+                let stream_bytes = to_bytes(stream_response.into_body(), 64 * 1024)
+                    .await
+                    .expect("stream body");
+                let stream_body = std::str::from_utf8(&stream_bytes).expect("UTF-8 stream");
+                assert!(stream_body.contains("event: placement"));
+                assert!(stream_body.contains(r#""state":"queued""#));
+                assert!(stream_body.contains(r#""state":"cancelled""#));
+                assert!(!stream_body.contains("queue_position"));
             });
     }
 }

@@ -225,9 +225,11 @@ tenant HTTP -> gateway -> durable assignment -> signed work order
 ```
 
 It requires a terminal result containing the nested gVisor kernel, UID 65534,
-and the fixture marker; repeats the tenant idempotency key; rejects an operator
-request at the broker; and inspects the live Pod to confirm the broker has no
-capabilities, signing key, operator socket, or service-account token.
+and the fixture marker; requires the authenticated SSE stream to publish and
+close on that completed result without exposing queue position; repeats the
+tenant idempotency key; rejects an operator request at the broker; and inspects
+the live Pod to confirm the broker has no capabilities, signing key, operator
+socket, or service-account token.
 
 ## Runtime configuration
 
