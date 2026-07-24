@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "pools": [
+    {
+      "name": "fixed-standard-warm",
+      "kubernetes_stateful_set": "sandboxd-fixed-standard-warm",
+      "key": {
+        "attested_root_cohort": "fixed-rootset-20260724",
+        "resource_shape": "standard-v1",
+        "guest_profile": {
+          "name": "strict",
+          "version": 1
+        },
+        "runtime_compatibility_cohort": "runsc-20260714-fixed",
+        "network_tier": "loopback",
+        "storage_tier": "ephemeral"
+      },
+      "policy": {
+        "minimum_workers": 0,
+        "maximum_workers": 100,
+        "warm_headroom": 2,
+        "maximum_scale_up_per_reconcile": 10,
+        "maximum_scale_down_per_reconcile": 4,
+        "idle_before_scale_down_ms": 60000
+      },
+      "cold_fallback": false
+    },
+    {
+      "name": "reviewed-cold-fallback",
+      "kubernetes_stateful_set": "sandboxd-reviewed-cold",
+      "key": {
+        "attested_root_cohort": "prepared-rootset-20260724",
+        "resource_shape": "cold-standard-v1",
+        "guest_profile": {
+          "name": "strict",
+          "version": 1
+        },
+        "runtime_compatibility_cohort": "runsc-20260714-prepared",
+        "network_tier": "loopback",
+        "storage_tier": "ephemeral"
+      },
+      "policy": {
+        "minimum_workers": 0,
+        "maximum_workers": 20,
+        "warm_headroom": 0,
+        "maximum_scale_up_per_reconcile": 2,
+        "maximum_scale_down_per_reconcile": 2,
+        "idle_before_scale_down_ms": 30000
+      },
+      "cold_fallback": true
+    }
+  ]
+}
