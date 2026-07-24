@@ -1,6 +1,7 @@
 # sandboxd
 
 [![CI](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml/badge.svg)](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml)
+[![K3s integration](https://github.com/runtrue/sandboxd/actions/workflows/k3s-integration.yml/badge.svg)](https://github.com/runtrue/sandboxd/actions/workflows/k3s-integration.yml)
 
 `sandboxd` is a containerized Linux execution worker for running restricted OCI
 workloads inside [gVisor](https://gvisor.dev/). The worker runs in a standard
@@ -52,6 +53,14 @@ The listed runtime versions are a known-good reference rather than global pins.
 Qualify other versions with the lifecycle and snapshot integration suites in
 the target environment. Snapshot restore requires source and destination
 workers to report the same `runsc` version and runtime configuration.
+
+## Kubernetes deployment
+
+Production-oriented k3s manifests are provided for fixed-rootfs,
+private-containerd, and host-integrated feature levels. The fixed-rootfs
+profile is the recommended minimum-authority starting point; the complete
+capability and feature contract is documented in
+[`deploy/k3s/SECURITY-PROFILES.md`](deploy/k3s/SECURITY-PROFILES.md).
 
 ## Get started
 

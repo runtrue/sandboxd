@@ -1,0 +1,11 @@
+*
+!deploy/
+deploy/*
+!deploy/k3s/
+!deploy/k3s/**
+!target/
+target/*
+!target/release/
+target/release/*
+!target/release/runtrue-sandboxd
+!target/release/runtrue-sandboxctl

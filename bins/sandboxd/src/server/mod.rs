@@ -146,6 +146,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         },
         platform: ImagePlatform::parse(&config.image_platform)?,
         limits: ImageLimits::default(),
+        fixed_rootfs: config.fixed_rootfs,
     })?);
     let mut volume_config = LocalVolumeConfig::new(config.state_root.join("volumes"));
     volume_config.mkfs_ext4_program = config.mkfs_ext4.clone();
@@ -191,6 +192,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         runsc: config.runsc,
         ip: config.ip,
         nft: config.nft,
+        executor: config.executor,
         assignments,
         audit,
         work_orders,

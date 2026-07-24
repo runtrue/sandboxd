@@ -117,6 +117,52 @@ impl ImageLimits {
 }
 
 #[derive(Debug, Clone)]
+pub struct FixedRootfsMeasurement {
+    pub digest: String,
+    pub entries: usize,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FixedRootfsConfig {
+    pub rootfs: PathBuf,
+    pub topology_lock: PathBuf,
+    pub measurement: Option<FixedRootfsMeasurement>,
+}
+
+impl FixedRootfsConfig {
+    fn validated(mut self, limits: &ImageLimits) -> Result<Self, SandboxError> {
+        self.rootfs =
+            fs::canonicalize(&self.rootfs).map_err(|source| io_error(&self.rootfs, source))?;
+        if !self.rootfs.is_dir() {
+            return Err(SandboxError::ImageProvider(
+                "fixed rootfs is not a directory".to_owned(),
+            ));
+        }
+        self.topology_lock = fs::canonicalize(&self.topology_lock)
+            .map_err(|source| io_error(&self.topology_lock, source))?;
+        if !self.topology_lock.is_file() {
+            return Err(SandboxError::ImageProvider(
+                "fixed rootfs topology lock is not a regular file".to_owned(),
+            ));
+        }
+        if let Some(measurement) = &self.measurement {
+            if !super::validation::valid_digest(&measurement.digest)
+                || measurement.entries == 0
+                || measurement.entries > limits.maximum_entries
+                || measurement.bytes == 0
+                || measurement.bytes > limits.maximum_expanded_bytes
+            {
+                return Err(SandboxError::ImageProvider(
+                    "fixed rootfs measurement is invalid or exceeds policy".to_owned(),
+                ));
+            }
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ContainerdProviderConfig {
     pub ctr_program: PathBuf,
     pub address: PathBuf,
@@ -126,6 +172,7 @@ pub struct ContainerdProviderConfig {
     pub writable_rootfs: super::WritableRootfsConfig,
     pub platform: ImagePlatform,
     pub limits: ImageLimits,
+    pub fixed_rootfs: Option<FixedRootfsConfig>,
 }
 
 impl ContainerdProviderConfig {
@@ -138,23 +185,30 @@ impl ContainerdProviderConfig {
                 "containerd executable, socket, and mount root must be absolute".to_owned(),
             ));
         }
-        self.ctr_program = fs::canonicalize(&self.ctr_program)
-            .map_err(|source| io_error(&self.ctr_program, source))?;
-        if !self.ctr_program.is_file() {
-            return Err(SandboxError::ImageProvider(
-                "containerd client is not a regular file".to_owned(),
-            ));
+        self.limits.validate()?;
+        if self.fixed_rootfs.is_none() {
+            self.ctr_program = fs::canonicalize(&self.ctr_program)
+                .map_err(|source| io_error(&self.ctr_program, source))?;
+            if !self.ctr_program.is_file() {
+                return Err(SandboxError::ImageProvider(
+                    "containerd client is not a regular file".to_owned(),
+                ));
+            }
+            let socket =
+                fs::metadata(&self.address).map_err(|source| io_error(&self.address, source))?;
+            if !socket.file_type().is_socket() {
+                return Err(SandboxError::ImageProvider(
+                    "containerd address is not a Unix socket".to_owned(),
+                ));
+            }
         }
-        let socket =
-            fs::metadata(&self.address).map_err(|source| io_error(&self.address, source))?;
-        if !socket.file_type().is_socket() {
-            return Err(SandboxError::ImageProvider(
-                "containerd address is not a Unix socket".to_owned(),
-            ));
-        }
+        self.fixed_rootfs = self
+            .fixed_rootfs
+            .take()
+            .map(|config| config.validated(&self.limits))
+            .transpose()?;
         validate_identifier("containerd namespace", &self.namespace)?;
         validate_identifier("snapshotter", &self.snapshotter)?;
-        self.limits.validate()?;
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)

@@ -98,6 +98,8 @@ fn admit(daemon: &DaemonState, topology: &TopologyLock) -> Result<Value, Sandbox
             "image_id": image.image().image_id,
             "exact_reference": image.image().exact_reference,
             "rootfs_digest": image.rootfs_digest(),
+            "rootfs_entries": image.rootfs_entries(),
+            "rootfs_bytes": image.rootfs_bytes(),
         })).collect::<Vec<_>>()
     }))
 }
@@ -132,6 +134,7 @@ fn run(
         std::sync::Arc::clone(&daemon.image_provider),
         &key.scope.volume_scope(),
         std::sync::Arc::clone(&daemon.volume_provider),
+        daemon.executor,
     );
     match result {
         Ok(result) => {
@@ -186,6 +189,7 @@ fn create(
         std::sync::Arc::clone(&daemon.image_provider),
         &key.scope.volume_scope(),
         std::sync::Arc::clone(&daemon.volume_provider),
+        daemon.executor,
     ) {
         Ok(instance) => instance,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
@@ -269,6 +273,7 @@ fn restore(
         std::sync::Arc::clone(&daemon.image_provider),
         &key.scope.volume_scope(),
         std::sync::Arc::clone(&daemon.volume_provider),
+        daemon.executor,
     ) {
         Ok(instance) => instance,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),

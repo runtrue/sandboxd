@@ -1,0 +1,12 @@
+name: writable-root-conformance
+
+services:
+  writer:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        from pathlib import Path
+        Path("/work/result.txt").write_text("writable-root-passed\n")
+        print(Path("/work/result.txt").read_text(), end="")
+    read_only: false

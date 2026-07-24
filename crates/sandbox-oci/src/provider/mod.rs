@@ -7,7 +7,9 @@ mod layer;
 mod validation;
 mod writable;
 
-pub use config::{ContainerdProviderConfig, ImageLimits, ImagePlatform};
+pub use config::{
+    ContainerdProviderConfig, FixedRootfsConfig, FixedRootfsMeasurement, ImageLimits, ImagePlatform,
+};
 pub use containerd::ContainerdImageProvider;
 pub use credentials::RegistryCredential;
 pub use handle::{ImmutableRootfs, PreparedImageHandle};

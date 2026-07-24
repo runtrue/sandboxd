@@ -1,0 +1,187 @@
+name: K3s integration
+
+on:
+  pull_request:
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/k3s-integration.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "bins/**"
+      - "crates/**"
+      - "deploy/k3s/**"
+      - "tools/test-k3s-fixed-runtime.sh"
+  push:
+    branches: [main]
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/k3s-integration.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "bins/**"
+      - "crates/**"
+      - "deploy/k3s/**"
+      - "tools/test-k3s-fixed-runtime.sh"
+  schedule:
+    - cron: "41 3 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k3s-integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  K3S_VERSION: v1.36.1+k3s1
+  K3S_AMD64_SHA256: a443db3fe9820cd93617ae67e4386d87c1514c1e96ceb30f4c2791c39065653c
+
+jobs:
+  fixed-runtime:
+    name: Fixed runtime in local-only k3s
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate ephemeral runner
+        run: |
+          sudo -n true
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          test "$(uname -m)" = x86_64
+          command -v curl
+          command -v docker
+          command -v iptables-save
+          command -v jq
+          command -v systemd-run
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup default 1.97.1
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
+
+      - name: Build fixed-runtime image
+        run: |
+          build_id=$(sha256sum target/release/runtrue-sandboxd | cut -d' ' -f1)
+          docker build \
+            --build-arg "SANDBOXD_BUILD_ID=$build_id" \
+            --tag sandboxd-fixed-runtime:local \
+            --file deploy/k3s/Dockerfile.fixed-runtime \
+            .
+
+      - name: Install checksum-pinned k3s
+        run: |
+          encoded_version=${K3S_VERSION//+/%2B}
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-all-errors \
+            --output /tmp/k3s \
+            "https://github.com/k3s-io/k3s/releases/download/${encoded_version}/k3s"
+          echo "${K3S_AMD64_SHA256}  /tmp/k3s" | sha256sum --check --strict
+          sudo install -m 0755 /tmp/k3s /usr/local/bin/k3s
+          sudo ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
+
+      - name: Start local-only k3s
+        run: |
+          node_ip=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+          test -n "$node_ip"
+          sudo install -d -m 0700 /etc/rancher/k3s
+          sudo tee /etc/rancher/k3s/config.yaml >/dev/null <<EOF
+          bind-address: 127.0.0.1
+          advertise-address: 127.0.0.1
+          node-ip: ${node_ip}
+          tls-san:
+            - 127.0.0.1
+          write-kubeconfig-mode: "0600"
+          disable:
+            - traefik
+            - servicelb
+            - metrics-server
+            - coredns
+            - local-storage
+          disable-network-policy: false
+          EOF
+          sudo systemd-run \
+            --unit=sandboxd-ci-k3s \
+            --property=Type=exec \
+            --collect \
+            /usr/local/bin/k3s server --config /etc/rancher/k3s/config.yaml
+          for _ in $(seq 1 180); do
+            if sudo /usr/local/bin/k3s kubectl get node >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          sudo /usr/local/bin/k3s kubectl wait \
+            --for=condition=Ready node --all --timeout=180s
+          sudo install \
+            -m 0600 \
+            -o "$(id -u)" \
+            -g "$(id -g)" \
+            /etc/rancher/k3s/k3s.yaml \
+            /tmp/sandboxd-k3s.yaml
+          echo "KUBECONFIG=/tmp/sandboxd-k3s.yaml" >>"$GITHUB_ENV"
+
+      - name: Validate local control-plane boundary
+        run: |
+          sudo ss -lntp | grep -E '127\\.0\\.0\\.1:6443'
+          sudo ss -lntp | grep -E '127\\.0\\.0\\.1:10250'
+          node=$(kubectl get node -o jsonpath='{.items[0].metadata.name}')
+          kubectl label node "$node" runtrue.io/sandbox-node=true --overwrite
+
+      - name: Import fixed-runtime image
+        run: docker save sandboxd-fixed-runtime:local | sudo /usr/local/bin/k3s ctr images import -
+
+      - name: Run k3s fixed-runtime conformance
+        run: bash tools/test-k3s-fixed-runtime.sh
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p k3s-diagnostics
+          kubectl get \
+            namespace,serviceaccount,deployment,pod,networkpolicy,service,ingress \
+            --all-namespaces \
+            -o wide >k3s-diagnostics/resources.txt 2>&1 || true
+          kubectl describe namespace sandboxd-system \
+            >k3s-diagnostics/namespace.txt 2>&1 || true
+          kubectl describe pod -n sandboxd-system \
+            >k3s-diagnostics/pods.txt 2>&1 || true
+          kubectl logs -n sandboxd-system \
+            -l app.kubernetes.io/name=sandboxd-fixed-runtime \
+            --all-containers \
+            --prefix >k3s-diagnostics/sandboxd.log 2>&1 || true
+          sudo journalctl -u sandboxd-ci-k3s.service --no-pager \
+            >k3s-diagnostics/k3s.log 2>&1 || true
+          sudo iptables-save >k3s-diagnostics/iptables.txt 2>&1 || true
+          docker image inspect sandboxd-fixed-runtime:local \
+            >k3s-diagnostics/image.json 2>&1 || true
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: k3s-integration-${{ github.run_id }}
+          path: k3s-diagnostics
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Stop k3s
+        if: always()
+        run: |
+          kubectl delete namespace sandboxd-system --wait=false >/dev/null 2>&1 || true
+          sudo systemctl stop sandboxd-ci-k3s.service >/dev/null 2>&1 || true

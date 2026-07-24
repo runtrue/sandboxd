@@ -1,4 +1,4 @@
-use super::proxy::PolicyServices;
+use super::{proxy::PolicyServices, CgroupMode, ExecutorConfiguration, NetworkMode};
 use crate::{error::io_error, model::TopologyLock, SandboxError};
 use runtrue_sandbox_oci::{EgressLimits, NetworkProfile, TcpEgressRule};
 use sha2::{Digest as _, Sha256};
@@ -37,6 +37,7 @@ impl ProjectNetwork {
         project: &str,
         lock: &TopologyLock,
         state: &Path,
+        configuration: ExecutorConfiguration,
     ) -> Result<Self, SandboxError> {
         if lock.networks.len() != 1
             || lock
@@ -47,6 +48,31 @@ impl ProjectNetwork {
             return Err(SandboxError::Unsupported(
                 "the gVisor backend supports one private logical network".to_owned(),
             ));
+        }
+        if configuration.network_mode == NetworkMode::Loopback {
+            if lock.policy.network.profile != NetworkProfile::None
+                || !lock.policy.network.ingress.is_empty()
+            {
+                return Err(SandboxError::Unsupported(
+                    "loopback network mode requires the none network profile".to_owned(),
+                ));
+            }
+            let sandbox = ServiceNetwork {
+                namespace: String::new(),
+                hosts_path: state.join("hosts"),
+                resolv_path: state.join("resolv.conf"),
+                http_proxy: None,
+                no_proxy: None,
+            };
+            write_guest_files(&sandbox, lock, None)?;
+            return Ok(Self {
+                ip: ip_program.to_path_buf(),
+                nft: nft_program.to_path_buf(),
+                bridge: String::new(),
+                nft_table: String::new(),
+                sandbox,
+                policy_services: None,
+            });
         }
         let ip = validate_ip(ip_program)?;
         let nft = if lock.policy.network.profile == NetworkProfile::None
@@ -77,7 +103,7 @@ impl ProjectNetwork {
             },
             policy_services: None,
         };
-        if let Err(error) = network.configure(project, lock) {
+        if let Err(error) = network.configure(project, lock, configuration.cgroup_mode) {
             let _ = network.cleanup();
             return Err(error);
         }
@@ -101,6 +127,9 @@ impl ProjectNetwork {
     }
 
     pub(super) fn cleanup(&mut self) -> Result<(), SandboxError> {
+        if self.bridge.is_empty() {
+            return Ok(());
+        }
         let mut first_error = None;
         self.policy_services = None;
         if let Err(error) = delete_nft_table(&self.nft, &self.nft_table) {
@@ -118,7 +147,12 @@ impl ProjectNetwork {
         }
     }
 
-    fn configure(&mut self, project: &str, lock: &TopologyLock) -> Result<(), SandboxError> {
+    fn configure(
+        &mut self,
+        project: &str,
+        lock: &TopologyLock,
+        cgroup_mode: CgroupMode,
+    ) -> Result<(), SandboxError> {
         let token = short_token(project);
         let namespace = self.sandbox.namespace.clone();
         let host_veth = format!("rth{token}");
@@ -145,24 +179,30 @@ impl ProjectNetwork {
         )?;
         checked(&self.ip, &["link", "set", &host_veth, "up"])?;
         checked(&self.ip, &["link", "set", &guest_veth, "netns", &namespace])?;
-        checked(&self.ip, &["-n", &namespace, "link", "set", "lo", "up"])?;
-        checked(
+        checked_in_namespace(
             &self.ip,
-            &["-n", &namespace, "link", "set", &guest_veth, "name", "eth0"],
+            &namespace,
+            &["link", "set", "lo", "up"],
+            cgroup_mode,
         )?;
-        checked(
+        checked_in_namespace(
             &self.ip,
-            &[
-                "-n",
-                &namespace,
-                "addr",
-                "add",
-                &format!("{address}/24"),
-                "dev",
-                "eth0",
-            ],
+            &namespace,
+            &["link", "set", &guest_veth, "name", "eth0"],
+            cgroup_mode,
         )?;
-        checked(&self.ip, &["-n", &namespace, "link", "set", "eth0", "up"])?;
+        checked_in_namespace(
+            &self.ip,
+            &namespace,
+            &["addr", "add", &format!("{address}/24"), "dev", "eth0"],
+            cgroup_mode,
+        )?;
+        checked_in_namespace(
+            &self.ip,
+            &namespace,
+            &["link", "set", "eth0", "up"],
+            cgroup_mode,
+        )?;
         let external = lock.policy.network.profile != NetworkProfile::None;
         let has_ingress = !lock.policy.network.ingress.is_empty();
         if external || has_ingress {
@@ -172,9 +212,11 @@ impl ProjectNetwork {
             )?;
         }
         if external {
-            checked(
+            checked_in_namespace(
                 &self.ip,
-                &["-n", &namespace, "route", "add", "default", "via", &gateway],
+                &namespace,
+                &["route", "add", "default", "via", &gateway],
+                cgroup_mode,
             )?;
             enable_forwarding(&self.bridge)?;
         }
@@ -189,23 +231,7 @@ impl ProjectNetwork {
                 &lock.policy.network.limits,
             )?;
         }
-        let mut hosts = String::from("127.0.0.1 localhost\n");
-        for peer in lock.services.keys() {
-            hosts.push_str(&format!("127.0.0.1 {peer}\n"));
-        }
-        fs::write(&self.sandbox.hosts_path, hosts)
-            .map_err(|source| io_error(&self.sandbox.hosts_path, source))?;
-        fs::set_permissions(&self.sandbox.hosts_path, fs::Permissions::from_mode(0o444))
-            .map_err(|source| io_error(&self.sandbox.hosts_path, source))?;
-        let resolv = if !external {
-            "options attempts:1 timeout:1\n".to_owned()
-        } else {
-            format!("nameserver {gateway}\noptions attempts:1 timeout:1 single-request\n")
-        };
-        fs::write(&self.sandbox.resolv_path, resolv)
-            .map_err(|source| io_error(&self.sandbox.resolv_path, source))?;
-        fs::set_permissions(&self.sandbox.resolv_path, fs::Permissions::from_mode(0o444))
-            .map_err(|source| io_error(&self.sandbox.resolv_path, source))?;
+        write_guest_files(&self.sandbox, lock, external.then_some(gateway.as_str()))?;
         if external || has_ingress {
             let gateway_address = gateway
                 .parse::<IpAddr>()
@@ -230,10 +256,37 @@ impl ProjectNetwork {
     }
 }
 
+fn write_guest_files(
+    sandbox: &ServiceNetwork,
+    lock: &TopologyLock,
+    nameserver: Option<&str>,
+) -> Result<(), SandboxError> {
+    let mut hosts = String::from("127.0.0.1 localhost\n");
+    for peer in lock.services.keys() {
+        hosts.push_str(&format!("127.0.0.1 {peer}\n"));
+    }
+    fs::write(&sandbox.hosts_path, hosts)
+        .map_err(|source| io_error(&sandbox.hosts_path, source))?;
+    fs::set_permissions(&sandbox.hosts_path, fs::Permissions::from_mode(0o444))
+        .map_err(|source| io_error(&sandbox.hosts_path, source))?;
+    let resolv = nameserver.map_or_else(
+        || "options attempts:1 timeout:1\n".to_owned(),
+        |gateway| format!("nameserver {gateway}\noptions attempts:1 timeout:1 single-request\n"),
+    );
+    fs::write(&sandbox.resolv_path, resolv)
+        .map_err(|source| io_error(&sandbox.resolv_path, source))?;
+    fs::set_permissions(&sandbox.resolv_path, fs::Permissions::from_mode(0o444))
+        .map_err(|source| io_error(&sandbox.resolv_path, source))
+}
+
 pub(super) fn planned_resources(
     project: &str,
     lock: &TopologyLock,
+    network_mode: NetworkMode,
 ) -> (String, Vec<String>, String) {
+    if network_mode == NetworkMode::Loopback {
+        return (String::new(), Vec::new(), String::new());
+    }
     let bridge = bridge_name(project);
     let _ = lock;
     let namespaces = vec![namespace_name(project)];
@@ -478,6 +531,38 @@ fn checked(program: &Path, arguments: &[&str]) -> Result<(), SandboxError> {
     } else {
         Err(SandboxError::Docker(format!(
             "`ip {}` failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn checked_in_namespace(
+    program: &Path,
+    namespace: &str,
+    arguments: &[&str],
+    cgroup_mode: CgroupMode,
+) -> Result<(), SandboxError> {
+    if cgroup_mode == CgroupMode::Managed {
+        let mut namespaced = vec!["-n", namespace];
+        namespaced.extend_from_slice(arguments);
+        return checked(program, &namespaced);
+    }
+    let namespace_path = format!("/var/run/netns/{namespace}");
+    let output = Command::new("/usr/bin/nsenter")
+        .arg(format!("--net={namespace_path}"))
+        .arg("--")
+        .arg(program)
+        .args(arguments)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .output()
+        .map_err(|source| io_error("/usr/bin/nsenter", source))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(SandboxError::Docker(format!(
+            "`nsenter --net={namespace_path} ip {}` failed: {}",
             arguments.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         )))

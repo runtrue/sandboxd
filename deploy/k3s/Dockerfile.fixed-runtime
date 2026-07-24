@@ -1,0 +1,38 @@
+FROM mirror.gcr.io/library/python@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS nested-rootfs
+
+RUN install -d -m 0755 /work
+COPY deploy/k3s/guest-hosts /etc/hosts
+COPY deploy/k3s/guest-resolv.conf /etc/resolv.conf
+
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb AS runsc-fetch
+
+ARG GVISOR_VERSION=20260714.0
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && gvisor_url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/x86_64" \
+    && curl -fsSL "${gvisor_url}/runsc" -o /usr/local/bin/runsc \
+    && curl -fsSL "${gvisor_url}/runsc.sha512" -o /tmp/runsc.sha512 \
+    && (cd /usr/local/bin && sha512sum -c /tmp/runsc.sha512) \
+    && chmod 0755 /usr/local/bin/runsc
+
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb AS runtime-libs
+
+FROM scratch
+
+ARG SANDBOXD_BUILD_ID=local
+LABEL org.opencontainers.image.revision="${SANDBOXD_BUILD_ID}"
+
+COPY --from=runsc-fetch /usr/local/bin/runsc /usr/local/bin/runsc
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libm.so.6 /lib/x86_64-linux-gnu/libm.so.6
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
+COPY --from=runtime-libs /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+COPY --from=runtime-libs /tmp /tmp
+COPY target/release/runtrue-sandboxd /usr/local/bin/runtrue-sandboxd
+COPY deploy/k3s/fixed-runtime.lock.json /opt/runtrue-sandboxd/fixed-runtime.lock.json
+COPY --from=nested-rootfs / /opt/runtrue-sandboxd/fixed-rootfs
+
+ENTRYPOINT ["/usr/local/bin/runtrue-sandboxd"]
+CMD ["serve"]
