@@ -42,6 +42,49 @@ TO sandboxd_placement_runtime;
 Do not grant the runtime role database ownership, schema creation, table
 deletion, role administration, replication, or superuser privileges.
 
-The repository is intentionally not a tenant-facing API. The remaining #50
-work is the stateless authenticated gateway, the narrow worker broker, and
-streaming/cancellation wiring around this store.
+The repository is intentionally not a tenant-facing API.
+
+`runtrue-sandbox-gateway` is the stateless tenant-facing HTTP boundary. Tenant,
+subject, workspace, deadline, topology, shape, and cohort authorization come
+from an owner-only hashed-token policy; tenant identity is never accepted from
+the request body. The gateway can submit, inspect, and cancel placement records
+only. It has no Kubernetes client, service-account token, worker address input,
+or sandboxd operator operation.
+
+The deployment in `deploy/k3s/sandbox-gateway.yaml` runs as UID/GID 65532 with
+no Linux capabilities, no privilege escalation, a read-only root, RuntimeDefault
+seccomp/AppArmor, no service-account token, and explicit network policy. It is
+ClusterIP-only. Its cleartext Pod listener must sit behind trusted TLS
+termination; non-loopback binding requires an explicit acknowledgement flag.
+
+Create `sandbox-gateway-database` with `url`, `ca.crt`, `tls.crt`, and
+`tls.key`; create `sandbox-gateway-migration-database` with a separate
+DDL-capable identity and the same key names. Create `sandbox-gateway-auth` with
+`policy.json` in this form:
+
+```json
+{
+  "schema_version": 1,
+  "credentials": {
+    "key-id": {
+      "token_sha256": "64-lowercase-hex-characters",
+      "tenant_id": "tenant-a",
+      "subject_id": "service-a",
+      "workspaces": ["workspace-a"],
+      "maximum_deadline_ms": 300000,
+      "topologies": ["topology-v1"],
+      "resource_shapes": ["standard-v1"],
+      "compatibility_cohorts": ["runsc-v1"]
+    }
+  }
+}
+```
+
+Clients send `Authorization: Bearer key-id.<high-entropy-secret>` and
+`Idempotency-Key: <bounded-key>`. Store only the SHA-256 digest of a randomly
+generated secret with at least 32 bytes of entropy. The migration Job and
+runtime Deployment use different Kubernetes Secrets and database roles.
+
+The remaining #50 work is the narrow worker broker, signed work-order dispatch,
+result streaming, worker registration endpoints, and fault-injected gateway
+rollout tests.

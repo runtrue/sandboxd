@@ -1,5 +1,6 @@
 use runtrue_sandbox_core::{
-    AssignmentEpoch, PlacementIdentity, QueuedWork, SandboxId, TenantId, WorkerId, WorkspaceId,
+    AssignmentEpoch, PlacementIdentity, QueuedWork, SandboxId, SubjectId, TenantId, WorkerId,
+    WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,7 +23,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 const MIGRATION_LOCK: i64 = 7_223_510_449_421;
 const QUEUE_LOCK: i64 = 7_223_510_449_422;
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 const MAXIMUM_PEM_BYTES: u64 = 1024 * 1024;
 
 const MIGRATION: &str = r#"
@@ -111,6 +112,18 @@ CREATE TABLE IF NOT EXISTS sandboxd_placement.audit (
 );
 "#;
 
+const MIGRATION_V2: &str = r#"
+ALTER TABLE sandboxd_placement.requests ADD COLUMN IF NOT EXISTS subject_id TEXT;
+UPDATE sandboxd_placement.requests SET subject_id = 'legacy-unknown' WHERE subject_id IS NULL;
+ALTER TABLE sandboxd_placement.requests ALTER COLUMN subject_id SET NOT NULL;
+
+ALTER TABLE sandboxd_placement.audit ADD COLUMN IF NOT EXISTS subject_id TEXT;
+UPDATE sandboxd_placement.audit SET subject_id = 'legacy-unknown' WHERE subject_id IS NULL;
+ALTER TABLE sandboxd_placement.audit ALTER COLUMN subject_id SET NOT NULL;
+
+UPDATE sandboxd_placement.schema_version SET version = 2 WHERE singleton = TRUE;
+"#;
+
 #[derive(Debug, Clone, Copy)]
 pub struct PlacementStoreConfig {
     pub global_queue_limit: i64,
@@ -166,6 +179,7 @@ pub struct PlacementDatabaseTls {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementSubmission {
     pub work: QueuedWork,
+    pub subject_id: SubjectId,
     pub topology: String,
     pub resource_shape: String,
     pub compatibility_cohort: String,
@@ -194,6 +208,7 @@ pub struct PlacementRecord {
     pub request_id: String,
     pub idempotency_key: String,
     pub identity: PlacementIdentity,
+    pub subject_id: SubjectId,
     pub state: PlacementState,
     pub worker_id: Option<WorkerId>,
     pub assignment_epoch: Option<AssignmentEpoch>,
@@ -212,6 +227,7 @@ pub struct Assignment {
     pub request_id: String,
     pub idempotency_key: String,
     pub identity: PlacementIdentity,
+    pub subject_id: SubjectId,
     pub worker_id: WorkerId,
     pub epoch: AssignmentEpoch,
     pub lease_expires_unix_ms: u64,
@@ -344,7 +360,10 @@ impl PostgresPlacementStore {
             )
             .await?
             .get("version");
-        if version != SCHEMA_VERSION {
+        if version == 1 {
+            transaction.batch_execute(MIGRATION_V2).await?;
+        }
+        if !matches!(version, 1 | SCHEMA_VERSION) {
             return Err(PlacementStoreError::Invalid(format!(
                 "placement database schema version {version} is not supported"
             )));
@@ -408,6 +427,11 @@ impl PostgresPlacementStore {
                 ],
             )
             .await?;
+        Ok(())
+    }
+
+    pub async fn ping(&self) -> Result<(), PlacementStoreError> {
+        self.client.lock().await.query_one("SELECT 1", &[]).await?;
         Ok(())
     }
 
@@ -511,16 +535,17 @@ impl PostgresPlacementStore {
         transaction
             .execute(
                 "INSERT INTO sandboxd_placement.requests
-                 (request_id, idempotency_key, tenant_id, workspace_id, sandbox_id,
+                 (request_id, idempotency_key, tenant_id, workspace_id, sandbox_id, subject_id,
                   topology, resource_shape, compatibility_cohort, deadline_unix_ms,
                   created_unix_ms, fair_finish, state)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'queued')",
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'queued')",
                 &[
                     &request_id(&submission.work),
                     &submission.work.idempotency_key,
                     &submission.work.tenant_id.as_str(),
                     &submission.work.workspace_id.as_str(),
                     &submission.work.sandbox_id.as_str(),
+                    &submission.subject_id.as_str(),
                     &submission.topology,
                     &submission.resource_shape,
                     &submission.compatibility_cohort,
@@ -810,6 +835,7 @@ impl PostgresPlacementStore {
     pub async fn cancel(
         &self,
         tenant_id: &TenantId,
+        subject_id: &SubjectId,
         idempotency_key: &str,
         now_unix_ms: u64,
     ) -> Result<Option<PlacementRecord>, PlacementStoreError> {
@@ -819,8 +845,8 @@ impl PostgresPlacementStore {
         let row = transaction
             .query_opt(
                 "SELECT * FROM sandboxd_placement.requests
-                 WHERE tenant_id = $1 AND idempotency_key = $2 FOR UPDATE",
-                &[&tenant_id.as_str(), &idempotency_key],
+                 WHERE tenant_id = $1 AND subject_id = $2 AND idempotency_key = $3 FOR UPDATE",
+                &[&tenant_id.as_str(), &subject_id.as_str(), &idempotency_key],
             )
             .await?;
         let Some(row) = row else {
@@ -925,6 +951,7 @@ impl PostgresPlacementStore {
     pub async fn get_by_idempotency(
         &self,
         tenant_id: &TenantId,
+        subject_id: &SubjectId,
         idempotency_key: &str,
     ) -> Result<Option<PlacementRecord>, PlacementStoreError> {
         self.client
@@ -932,8 +959,8 @@ impl PostgresPlacementStore {
             .await
             .query_opt(
                 "SELECT * FROM sandboxd_placement.requests
-                 WHERE tenant_id = $1 AND idempotency_key = $2",
-                &[&tenant_id.as_str(), &idempotency_key],
+                 WHERE tenant_id = $1 AND subject_id = $2 AND idempotency_key = $3",
+                &[&tenant_id.as_str(), &subject_id.as_str(), &idempotency_key],
             )
             .await?
             .as_ref()
@@ -996,14 +1023,15 @@ async fn append_audit(
         .execute(
             "INSERT INTO sandboxd_placement.audit
              (event_unix_ms, request_id, tenant_id, workspace_id, sandbox_id,
-              worker_id, assignment_epoch, event, result_digest)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+              subject_id, worker_id, assignment_epoch, event, result_digest)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             &[
                 &now,
                 &record.request_id,
                 &record.identity.tenant_id.as_str(),
                 &record.identity.workspace_id.as_str(),
                 &record.identity.sandbox_id.as_str(),
+                &record.subject_id.as_str(),
                 &worker,
                 &epoch,
                 &event,
@@ -1049,6 +1077,8 @@ fn record_from_row(row: &Row) -> Result<PlacementRecord, PlacementStoreError> {
             sandbox_id: SandboxId::parse(row.get::<_, String>("sandbox_id"))
                 .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?,
         },
+        subject_id: SubjectId::parse(row.get::<_, String>("subject_id"))
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?,
         state: match row.get::<_, &str>("state") {
             "queued" => PlacementState::Queued,
             "assigned" => PlacementState::Assigned,
@@ -1073,6 +1103,7 @@ fn assignment_from_record(record: PlacementRecord) -> Result<Assignment, Placeme
         request_id: record.request_id,
         idempotency_key: record.idempotency_key,
         identity: record.identity,
+        subject_id: record.subject_id,
         worker_id: record
             .worker_id
             .ok_or_else(|| PlacementStoreError::Invalid("assignment has no worker".to_owned()))?,
@@ -1208,15 +1239,18 @@ fn open_regular_file(path: &Path, private: bool) -> Result<File, PlacementStoreE
     let metadata = file.metadata().map_err(|error| {
         PlacementStoreError::Tls(format!("inspect `{}`: {error}", path.display()))
     })?;
-    if !metadata.is_file()
-        || (private
-            && (metadata.mode() & 0o077 != 0 || metadata.uid() != nix::unistd::geteuid().as_raw()))
-    {
+    let process_owned =
+        metadata.uid() == nix::unistd::geteuid().as_raw() && metadata.mode() & 0o077 == 0;
+    let root_group_mounted = metadata.uid() == 0
+        && metadata.gid() == nix::unistd::getegid().as_raw()
+        && metadata.mode() & 0o037 == 0
+        && metadata.mode() & 0o040 != 0;
+    if !metadata.is_file() || (private && !process_owned && !root_group_mounted) {
         return Err(PlacementStoreError::Tls(format!(
             "`{}` must be a regular non-symlink{}",
             path.display(),
             if private {
-                " owned by the process identity with mode 0600 or stricter"
+                " owned by the process with mode 0600, or root-owned and process-group-readable with mode 0640 or stricter"
             } else {
                 ""
             }

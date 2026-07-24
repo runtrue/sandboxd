@@ -15,6 +15,23 @@ matrix is in [`SECURITY-PROFILES.md`](SECURITY-PROFILES.md).
 | Dynamic runtime | `sandboxd-dynamic-runtime.yaml` | `Dockerfile.host-integrated` | Private containerd in the worker container for arbitrary pinned OCI images. No host socket, path, device, or namespace. |
 | Host integrated | `sandboxd-host-integrated.yaml` | `Dockerfile.host-integrated` | Compatibility profile for features implemented with host containerd, loop devices, mounts, networking, and cgroups. Requires dedicated trusted nodes. |
 
+The optional `sandbox-gateway.yaml` control-plane manifest is separate from
+the worker profiles. It runs two stateless, non-root, capability-free gateway
+replicas plus a one-shot schema migration Job. Build it with
+`Dockerfile.gateway`. It requires:
+
+- an HA PostgreSQL service with TLS and network policy;
+- separate runtime and migration database identities;
+- `sandbox-gateway-database`, `sandbox-gateway-migration-database`, and
+  `sandbox-gateway-auth` Secrets as documented in
+  `crates/sandbox-placement/README.md`;
+- a trusted TLS ingress or service mesh selected by the gateway-client network
+  policy labels; and
+- an admission policy replacing the local image tag with an immutable digest.
+
+The checked-in Service is ClusterIP-only. Do not create a public LoadBalancer
+or permit cleartext ingress directly to the Pod listener.
+
 The fixed and dynamic profiles use a Kubernetes user namespace
 (`hostUsers: false`), disable service-account token mounting, expose no Service
 or Ingress, use no host namespace or `hostPath`, and apply a default-deny
