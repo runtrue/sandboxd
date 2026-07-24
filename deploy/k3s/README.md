@@ -30,6 +30,10 @@ that supports FQDN policy. Their control socket exists only inside the pod.
 - A dedicated sandbox node pool for any profile that grants `SYS_ADMIN`.
 - Fixed and dynamic nodes labeled `runtrue.io/sandbox-node=true`; optionally
   taint them `runtrue.io/sandbox=true:NoSchedule`.
+- A node pool per reviewed worker resource shape. Kubernetes has no portable
+  per-Pod PID-limit field, so the fixed `standard-v1` pool must configure
+  kubelet `pod-max-pids=256`. Do not mix shapes with different PID ceilings on
+  that pool.
 - Host-integrated compatibility nodes use the separate
   `runtrue.io/sandbox-host-integrated=true` label.
 - An admission policy that pins worker images by digest in release
@@ -55,6 +59,10 @@ disable:
   - metrics-server
   - coredns
   - local-storage
+kubelet-arg:
+  - pod-max-pids=256
+kube-controller-manager-arg:
+  - terminated-pod-gc-threshold=32
 disable-network-policy: false
 ```
 
@@ -83,12 +91,31 @@ checksum-pinned k3s binary, starts a local-only cluster, builds and imports the
 worker image, validates all manifests, and runs
 [`tools/test-k3s-fixed-runtime.sh`](../../tools/test-k3s-fixed-runtime.sh).
 
-The harness verifies the successful nested server/client path, the exact
-host-side capability mask, user-namespace mapping, read-only worker root,
-default-deny NetworkPolicy installation, and absence of host integration. It
-also verifies rejection of external networking, writable roots, and a
-mismatched OCI image. Pod, k3s, firewall, and image diagnostics are retained
-for every workflow run.
+The harness verifies the successful nested server/client path, one-assignment
+admission, fresh-Pod replacement after success and injected failures, the
+actual Pod-cgroup PID ceiling, the exact host-side capability mask,
+user-namespace mapping, read-only worker root, default-deny NetworkPolicy, and
+absence of host integration. It also verifies rejection of external
+networking, writable roots, and a mismatched OCI image. Pod, k3s, firewall, and
+image diagnostics are retained for every workflow run.
+
+[`tools/test-k3s-resource-limits.sh`](../../tools/test-k3s-resource-limits.sh)
+separately drives CPU saturation, fork exhaustion, bounded temporary-storage
+exhaustion, and memory pressure through real nested gVisor workloads. It
+requires CPU throttling in the Pod cgroup, guest process creation to stop below
+the Pod PID ceiling, `/tmp` to return `ENOSPC` at its declared 16 MiB limit, and
+the Pod cgroup to record an OOM kill while the node remains ready. A local
+`standard-v1` run recorded:
+
+```json
+{"cpu_nr_throttled_delta":2,"pid_children_before_ceiling":95,"tmpfs_bytes_before_enospc":16777216,"pod_oom_kill_delta":4}
+```
+
+These are conformance observations, not benchmark baselines; CI retains fresh
+measurements on each run. The fixed tier exposes no writable disk-backed guest
+path, so disk amplification is rejected by construction and bounded `/tmp`
+exhaustion is the relevant guest-write test. Writable disk conformance belongs
+to the directory/PVC storage tier.
 
 ## Build and deploy the fixed-runtime profile
 
@@ -110,8 +137,10 @@ docker save sandboxd-fixed-runtime:local | k3s ctr images import -
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 kubectl apply -f deploy/k3s/sandboxd-fixed-runtime.yaml
-kubectl rollout status -n sandboxd-system \
-  deployment/sandboxd-fixed-runtime --timeout=180s
+kubectl wait -n sandboxd-system \
+  --for=condition=Ready pod \
+  -l app.kubernetes.io/name=sandboxd-fixed-runtime \
+  --timeout=180s
 ```
 
 Run the nested-container conformance check:
@@ -159,22 +188,36 @@ Production behavior is selected by typed command-line options:
 - `--cgroup-mode external` delegates aggregate enforcement to the enclosing
   Kubernetes pod.
 - `--cgroup-mode managed` creates sandboxd-owned cgroup-v2 subtrees.
+- `--resource-shape` and the accompanying CPU, memory, PID, ephemeral-storage,
+  and service ceilings define the guest admission budget. The Pod limit is a
+  larger enforcement envelope that includes runsc, Sentry, gofers, sandboxd,
+  and cleanup overhead.
 
 The daemon validates these options at startup. There are no deployment-only
 environment-variable shortcuts.
 
 ## State, availability, and rollout
 
-The checked-in fixed and dynamic manifests use bounded `emptyDir` volumes so
-they are safe for conformance and stateless workers. They do not claim
-restart-durable sandboxes. Before enabling durable operation:
+The checked-in fixed and dynamic manifests run single-use worker Deployments
+with bounded `emptyDir` volumes. The Pod-level policy remains `Always`, as
+required by a Deployment, while Kubernetes 1.36's per-container restart policy
+sets sandboxd to `Never`. Exit code 75 therefore makes the Pod terminal and the
+ReplicaSet creates a fresh Pod with fresh storage instead of restarting
+sandboxd in the contaminated Pod. This requires the `ContainerRestartRules`
+feature available in the pinned Kubernetes cohort. Terminal Pod objects do not
+retain running processes or `emptyDir` data, but the control plane keeps them
+for diagnostics until garbage collection; the dedicated cohort therefore uses
+a bounded `terminated-pod-gc-threshold`. These manifests provide one static
+clean slot; they are not the warm-pool controller specified by the
+placement/autoscaling phases and do not claim restart-durable sandboxes. Before
+enabling durable operation:
 
 1. use an encrypted, user-namespace-compatible, single-writer PVC for state and
    local artifacts;
 2. verify idmapped-mount behavior with the selected CSI driver;
 3. add worker fencing and repeated crash/recovery tests;
-4. keep `strategy.type: Recreate` until multi-replica ownership and scheduling
-   are implemented; and
+4. deploy the fenced placement and warm-pool controller before exposing tenant
+   submission; and
 5. monitor failed cleanup, assignment reconciliation, storage capacity,
    sandbox count, and pod eviction.
 
@@ -193,8 +236,10 @@ docker build \
   -f deploy/k3s/Dockerfile.host-integrated .
 docker save sandboxd-dynamic-runtime:local | k3s ctr images import -
 kubectl apply -f deploy/k3s/sandboxd-dynamic-runtime.yaml
-kubectl rollout status -n sandboxd-system \
-  deployment/sandboxd-dynamic-runtime --timeout=180s
+kubectl wait -n sandboxd-system \
+  --for=condition=Ready pod \
+  -l app.kubernetes.io/name=sandboxd-dynamic-runtime \
+  --timeout=180s
 ```
 
 The private containerd content store is empty on every new pod. Prepare each

@@ -1,0 +1,16 @@
+name: fixed-cpu-conformance
+
+services:
+  stress:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import os
+        for _ in range(8):
+            if os.fork() == 0:
+                value = 0
+                while True:
+                    value = (value + 1) % 1000003
+        os.wait()
+    read_only: true

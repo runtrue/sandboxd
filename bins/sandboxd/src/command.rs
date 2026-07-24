@@ -17,6 +17,12 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 maximum_connections,
                 io_timeout_seconds,
                 worker_id,
+                resource_shape,
+                sandbox_cpu_millis,
+                sandbox_memory_bytes,
+                sandbox_pids,
+                sandbox_ephemeral_storage_bytes,
+                maximum_services,
                 guest_profiles,
                 artifact_master_key,
                 artifact_s3_bucket,
@@ -97,13 +103,22 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                     }
                 },
             };
-            server::serve(server::ServerConfig {
+            match server::serve(server::ServerConfig {
                 operator_socket: socket,
                 workload_socket,
                 broker_uid,
                 work_order_key,
                 worker_id: runtrue_sandbox_core::WorkerId::parse(worker_id)
                     .map_err(|error| SandboxError::Runtime(error.to_string()))?,
+                resource_shape: runtrue_sandbox_core::WorkerResourceShape {
+                    schema_version: runtrue_sandbox_core::WORKER_RESOURCE_SHAPE_VERSION,
+                    name: resource_shape,
+                    sandbox_cpu_millis,
+                    sandbox_memory_bytes,
+                    sandbox_pids,
+                    sandbox_ephemeral_storage_bytes,
+                    maximum_services,
+                },
                 guest_profiles: installed_guest_profiles,
                 artifact_master_key,
                 artifact_s3_bucket,
@@ -129,9 +144,13 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 nft,
                 maximum_connections,
                 io_timeout: std::time::Duration::from_secs(io_timeout_seconds),
-            })
+            })? {
+                server::ServeOutcome::Shutdown => Ok(()),
+                server::ServeOutcome::Recycle => std::process::exit(75),
+            }
         }
         Command::Ping { socket } => client::send(&socket, Operation::Ping),
+        Command::Ready { socket } => client::send(&socket, Operation::Ready),
         Command::Stats { socket } => client::send(&socket, Operation::Stats),
         Command::Admit { socket, lock } => client::send(
             &socket,

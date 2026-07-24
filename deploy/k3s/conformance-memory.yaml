@@ -1,0 +1,12 @@
+name: fixed-memory-conformance
+
+services:
+  stress:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        chunks = []
+        while True:
+            chunks.append(bytearray(64 * 1024 * 1024))
+    read_only: true

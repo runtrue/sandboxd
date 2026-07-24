@@ -29,6 +29,7 @@ fn collect_operator(daemon: &DaemonState) -> Result<Value, SandboxError> {
         })
         .collect::<Vec<_>>();
     serde_json::to_value(serde_json::json!({
+        "worker": daemon.worker.status(),
         "counters": &*counters,
         "active_operations": active.len(),
         "cached_images": images,
