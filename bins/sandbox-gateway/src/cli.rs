@@ -1,7 +1,7 @@
 use crate::{
     api::{self, AppState},
     auth::AuthPolicy,
-    config::read_database_url,
+    config::{read_database_url, read_worker_pool_catalog},
     dispatcher::Dispatcher,
     signer::WorkOrderSigner,
     worker_auth::WorkerAuthPolicy,
@@ -55,6 +55,9 @@ struct ServeArgs {
     /// Owner-only JSON file binding worker credentials to exact advertised identities.
     #[arg(long)]
     worker_auth_policy: PathBuf,
+    /// Operator-owned bounded worker-pool catalog.
+    #[arg(long)]
+    worker_pool_catalog: PathBuf,
     /// Owner-only file containing the shared 32-byte work-order HMAC key.
     #[arg(long)]
     work_order_key: PathBuf,
@@ -141,6 +144,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         store,
         Arc::new(AuthPolicy::load(&args.auth_policy)?),
         Arc::new(WorkerAuthPolicy::load(&args.worker_auth_policy)?),
+        Arc::new(read_worker_pool_catalog(&args.worker_pool_catalog)?),
     );
     tokio::spawn(dispatcher.run());
     let listener = tokio::net::TcpListener::bind(args.listen)

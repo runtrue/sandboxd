@@ -139,6 +139,18 @@ impl WorkerPoolCatalog {
             .or_else(|| self.pools.iter().find(|pool| pool.cold_fallback))
             .expect("validated catalog has one fallback"))
     }
+
+    pub fn pool(&self, name: &str) -> Result<&WorkerPool, CoreError> {
+        self.validate()?;
+        self.pools
+            .iter()
+            .find(|pool| pool.name == name)
+            .ok_or_else(|| {
+                CoreError::InvalidSpecification(
+                    "worker pool is not present in the reviewed catalog".to_owned(),
+                )
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

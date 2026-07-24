@@ -10,7 +10,8 @@ The repository enforces:
 - bounded global and per-tenant queues;
 - separate global and per-tenant concurrency limits;
 - durable weighted-fair ordering;
-- exact worker topology, resource-shape, and compatibility-cohort matching;
+- exact reviewed pool, worker topology, resource-shape, and
+  compatibility-cohort matching;
 - exact authenticated worker registration, broker address, and signed ceiling
   advertisement;
 - one clean worker token per assignment;
@@ -48,9 +49,10 @@ The repository is intentionally not a tenant-facing API.
 
 `runtrue-sandbox-gateway` is the stateless tenant-facing HTTP boundary. Tenant,
 subject, workspace, deadline, topology, shape, and cohort authorization come
-from an owner-only hashed-token policy; tenant identity is never accepted from
-the request body. The gateway can submit, inspect, cancel, and stream placement
-records only. It has no Kubernetes client, service-account token,
+from an owner-only hashed-token policy. Pool selection is restricted by that
+policy and resolved against the bounded operator catalog; tenant identity is
+never accepted from the request body. The gateway can submit, inspect, cancel,
+and stream placement records only. It has no Kubernetes client, service-account token,
 tenant-selected worker address, or sandboxd operator operation. Every replica
 also runs the same bounded reconciliation loop: it claims durable work, signs
 the typed operation, delivers it to the assigned broker, and publishes a
@@ -87,6 +89,7 @@ DDL-capable identity and the same key names. Create `sandbox-gateway-auth` with
       "subject_id": "service-a",
       "workspaces": ["workspace-a"],
       "maximum_deadline_ms": 300000,
+      "pools": ["fixed-standard-warm"],
       "topologies": ["topology-v1"],
       "resource_shapes": ["standard-v1"],
       "compatibility_cohorts": ["runsc-v1"]
@@ -103,7 +106,7 @@ runtime Deployment use different Kubernetes Secrets and database roles.
 The runtime `sandbox-gateway-auth` Secret also contains:
 
 - `worker-policy.json`, which maps each worker credential to one exact worker
-  ID, topology, resource shape, and compatibility cohort; and
+  ID, pool, topology, resource shape, and compatibility cohort; and
 - `work-order.key`, the same 64-lowercase-hex HMAC key mounted read-only into
   sandboxd, but never into the broker.
 
@@ -116,6 +119,7 @@ The runtime `sandbox-gateway-auth` Secret also contains:
     "worker-key-a": {
       "token_sha256": "64-lowercase-hex-characters",
       "worker_id": "worker-a",
+      "pool_name": "fixed-standard-warm",
       "topology": "topology-v1",
       "resource_shape": "standard-v1",
       "compatibility_cohort": "runsc-v1"
@@ -130,6 +134,13 @@ The registration body contains its broker socket address and typed resource
 ceilings. A credential cannot register or heartbeat a different worker
 identity. NetworkPolicy admits these routes only from labeled worker
 registration clients.
+
+Pool demand, fresh clean/leased/draining workers, the idle clock, desired
+capacity, and quota backpressure are reconciled transactionally in PostgreSQL.
+Duplicate controllers serialize their decision and a restart resumes from the
+same idle clock. Kubernetes replica count is an explicit observation rather
+than inferred from registrations, so stale worker rows cannot manufacture
+capacity.
 
 The same exact worker credential may request a fail-closed state transition at
 `POST /internal/v1/workers/{worker_id}/drain` or

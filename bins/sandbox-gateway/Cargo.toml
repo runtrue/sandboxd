@@ -14,6 +14,7 @@ hmac.workspace = true
 libc.workspace = true
 nix.workspace = true
 runtrue-sandbox-core.workspace = true
+runtrue-sandbox-oci.workspace = true
 runtrue-sandbox-placement.workspace = true
 runtrue-sandbox-protocol.workspace = true
 serde.workspace = true

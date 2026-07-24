@@ -1311,6 +1311,7 @@ dependencies = [
  "libc",
  "nix",
  "runtrue-sandbox-core",
+ "runtrue-sandbox-oci",
  "runtrue-sandbox-placement",
  "runtrue-sandbox-protocol",
  "serde",

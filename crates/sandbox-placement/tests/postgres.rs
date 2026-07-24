@@ -1,6 +1,6 @@
 use runtrue_sandbox_core::{
-    GuestProfile, QueuedWork, ResourceCeilings, SandboxId, SubjectId, TenantId, WorkerId,
-    WorkspaceId,
+    GuestProfile, PoolPolicy, QueuedWork, ResourceCeilings, SandboxId, SubjectId, TenantId,
+    WorkerId, WorkspaceId,
 };
 use runtrue_sandbox_placement::{
     Assignment, CompletionOutcome, EnqueueOutcome, PlacementStoreConfig, PlacementStoreError,
@@ -337,6 +337,110 @@ async fn exercise(url: &str) {
         .complete(&replacement, &digest('f'), 308)
         .await
         .expect("replacement wins");
+
+    let policy = PoolPolicy {
+        minimum_workers: 0,
+        maximum_workers: 100,
+        warm_headroom: 2,
+        maximum_scale_up_per_reconcile: 10,
+        maximum_scale_down_per_reconcile: 4,
+        idle_before_scale_down_ms: 10,
+    };
+    let first_scale = replica_b
+        .reconcile_pool("fixed-standard-warm", 0, 100, policy, 309)
+        .await
+        .expect("durable demand");
+    assert!(first_scale.decision.create_workers > 0);
+    let duplicate_scale = replica_b
+        .reconcile_pool("fixed-standard-warm", 0, 100, policy, 309)
+        .await
+        .expect("duplicate reconcile");
+    assert_eq!(duplicate_scale, first_scale);
+    let quota = replica_b
+        .reconcile_pool("fixed-standard-warm", 0, 0, policy, 310)
+        .await
+        .expect("quota backpressure");
+    assert_eq!(quota.decision.desired_workers, 0);
+    assert!(quota.decision.backpressured_assignments > 0);
+
+    let mut idle_a = worker("worker-idle-a");
+    idle_a.pool_name = "idle-pool".to_owned();
+    let mut idle_b = worker("worker-idle-b");
+    idle_b.pool_name = "idle-pool".to_owned();
+    replica_b
+        .register_worker(&idle_a, 400)
+        .await
+        .expect("first idle worker");
+    replica_b
+        .register_worker(&idle_b, 400)
+        .await
+        .expect("second idle worker");
+    let cold_policy = PoolPolicy {
+        warm_headroom: 0,
+        ..policy
+    };
+    assert_eq!(
+        replica_b
+            .reconcile_pool("idle-pool", 2, 2, cold_policy, 400)
+            .await
+            .expect("start idle clock")
+            .decision
+            .drain_clean_workers,
+        0
+    );
+    assert_eq!(
+        replica_b
+            .reconcile_pool("idle-pool", 2, 2, cold_policy, 410)
+            .await
+            .expect("restart-safe idle scale down")
+            .decision
+            .drain_clean_workers,
+        2
+    );
+
+    let mut pool_bound = submission(
+        "tenant-pool-bound",
+        "pool-bound",
+        "sandbox-pool-bound",
+        10_000,
+    );
+    pool_bound.pool_name = "other-reviewed-pool".to_owned();
+    pool_bound.topology = "pool-bound-topology".to_owned();
+    replica_b
+        .enqueue(&pool_bound, 420)
+        .await
+        .expect("pool-bound demand");
+    let mut wrong_pool = worker("worker-wrong-pool");
+    wrong_pool.topology = "pool-bound-topology".to_owned();
+    replica_b
+        .register_worker(&wrong_pool, 420)
+        .await
+        .expect("wrong-pool worker");
+    assert!(replica_b
+        .assign_next(&wrong_pool.worker_id, 421)
+        .await
+        .expect("pool fence")
+        .is_none());
+    let mut matching_pool = worker("worker-matching-pool");
+    matching_pool.pool_name = "other-reviewed-pool".to_owned();
+    matching_pool.topology = "pool-bound-topology".to_owned();
+    replica_b
+        .register_worker(&matching_pool, 421)
+        .await
+        .expect("matching-pool worker");
+    let pool_assignment = replica_b
+        .assign_next(&matching_pool.worker_id, 422)
+        .await
+        .expect("pool assignment")
+        .expect("matching pool demand");
+    assert_eq!(
+        pool_assignment.identity.tenant_id,
+        pool_bound.work.tenant_id
+    );
+    assert_eq!(
+        pool_assignment.identity.sandbox_id,
+        pool_bound.work.sandbox_id
+    );
 }
 
 async fn assert_terminal_audit(url: &str, assignment: &Assignment, result_digest: &str) {
@@ -431,6 +535,7 @@ fn submission(
             deadline_unix_ms,
         },
         subject_id: SubjectId::parse("gateway-a").expect("subject"),
+        pool_name: "fixed-standard-warm".to_owned(),
         topology: "topology-v1".to_owned(),
         resource_shape: "standard-v1".to_owned(),
         compatibility_cohort: "runsc-v1".to_owned(),
@@ -443,6 +548,7 @@ fn submission(
 fn worker(worker_id: &str) -> WorkerRegistration {
     WorkerRegistration {
         worker_id: WorkerId::parse(worker_id).expect("worker"),
+        pool_name: "fixed-standard-warm".to_owned(),
         topology: "topology-v1".to_owned(),
         resource_shape: "standard-v1".to_owned(),
         compatibility_cohort: "runsc-v1".to_owned(),

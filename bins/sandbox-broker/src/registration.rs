@@ -31,6 +31,7 @@ struct RegistrationConfig {
     key_id: String,
     secret: String,
     worker_id: WorkerId,
+    pool_name: String,
     topology: String,
     resource_shape: String,
     compatibility_cohort: String,
@@ -73,6 +74,7 @@ impl RegistrationClient {
             || !bounded_token(&config.key_id, 64)
             || !bounded_token(&config.secret, 128)
             || config.secret.len() < 32
+            || !bounded_label(&config.pool_name)
             || !bounded_label(&config.topology)
             || !bounded_label(&config.resource_shape)
             || !bounded_label(&config.compatibility_cohort)
@@ -90,6 +92,7 @@ impl RegistrationClient {
             authorization,
             advertisement: WorkerAdvertisement {
                 worker_id: config.worker_id,
+                pool_name: config.pool_name,
                 topology: config.topology,
                 resource_shape: config.resource_shape,
                 compatibility_cohort: config.compatibility_cohort,
@@ -277,6 +280,7 @@ mod tests {
                 "key_id": "worker-key-a",
                 "secret": "a-secure-worker-token-with-32-bytes",
                 "worker_id": "worker-a",
+                "pool_name": "fixed-standard-warm",
                 "topology": "topology-v1",
                 "resource_shape": "standard-v1",
                 "compatibility_cohort": "runsc-v1",

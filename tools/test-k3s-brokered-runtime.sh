@@ -47,6 +47,7 @@ cat >"$temporary/policy.json" <<EOF
       "subject_id": "integration-client",
       "workspaces": ["workspace-a"],
       "maximum_deadline_ms": 120000,
+      "pools": ["fixed-standard-warm"],
       "topologies": ["fixed-v1"],
       "resource_shapes": ["standard-v1"],
       "compatibility_cohorts": ["runsc-20260714-fixed"]
@@ -62,6 +63,7 @@ cat >"$temporary/worker-policy.json" <<EOF
     "worker-key": {
       "token_sha256": "$worker_digest",
       "worker_id": "worker-fixed-a",
+      "pool_name": "fixed-standard-warm",
       "topology": "fixed-v1",
       "resource_shape": "standard-v1",
       "compatibility_cohort": "runsc-20260714-fixed"
@@ -76,6 +78,7 @@ cat >"$temporary/registration.json" <<EOF
   "key_id": "worker-key",
   "secret": "$worker_secret",
   "worker_id": "worker-fixed-a",
+  "pool_name": "fixed-standard-warm",
   "topology": "fixed-v1",
   "resource_shape": "standard-v1",
   "compatibility_cohort": "runsc-20260714-fixed",
@@ -111,6 +114,10 @@ kubectl create secret generic sandbox-work-order \
 kubectl create secret generic sandbox-worker-auth \
   -n "$namespace" \
   --from-file=registration.json="$temporary/registration.json" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create configmap sandbox-worker-pools \
+  -n "$namespace" \
+  --from-file=catalog.json=deploy/k3s/worker-pools.json \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl apply -f deploy/k3s/sandbox-gateway-local-test.yaml
@@ -194,6 +201,7 @@ jq -n \
     workspace_id: "workspace-a",
     sandbox_id: $sandbox,
     deadline_ms: 120000,
+    pool_name: "fixed-standard-warm",
     topology: "fixed-v1",
     resource_shape: "standard-v1",
     compatibility_cohort: "runsc-20260714-fixed",

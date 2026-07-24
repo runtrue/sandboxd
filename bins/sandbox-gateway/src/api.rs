@@ -11,7 +11,10 @@ use axum::{
     Json, Router,
 };
 use futures_util::{stream, Stream};
-use runtrue_sandbox_core::{QueuedWork, SandboxId, WorkerId, WorkspaceId};
+use runtrue_sandbox_core::{
+    NetworkFeatureTier, QueuedWork, SandboxId, WorkerId, WorkerPool, WorkerPoolCatalog, WorkspaceId,
+};
+use runtrue_sandbox_oci::NetworkProfile;
 use runtrue_sandbox_placement::{
     EnqueueOutcome, PlacementRecord, PlacementState, PlacementStoreError, PlacementSubmission,
     PostgresPlacementStore, WorkerRegistration,
@@ -37,6 +40,7 @@ pub(crate) struct AppState {
     pub(crate) store: Arc<PostgresPlacementStore>,
     pub(crate) auth: Arc<AuthPolicy>,
     pub(crate) worker_auth: Arc<WorkerAuthPolicy>,
+    pub(crate) worker_pools: Arc<WorkerPoolCatalog>,
     pub(crate) result_streams: Arc<Semaphore>,
     pub(crate) result_stream_poll_interval: Duration,
 }
@@ -46,11 +50,13 @@ impl AppState {
         store: Arc<PostgresPlacementStore>,
         auth: Arc<AuthPolicy>,
         worker_auth: Arc<WorkerAuthPolicy>,
+        worker_pools: Arc<WorkerPoolCatalog>,
     ) -> Self {
         Self {
             store,
             auth,
             worker_auth,
+            worker_pools,
             result_streams: Arc::new(Semaphore::new(MAXIMUM_RESULT_STREAMS)),
             result_stream_poll_interval: RESULT_STREAM_POLL_INTERVAL,
         }
@@ -63,6 +69,7 @@ struct SubmitRequest {
     workspace_id: WorkspaceId,
     sandbox_id: SandboxId,
     deadline_ms: u64,
+    pool_name: String,
     topology: String,
     resource_shape: String,
     compatibility_cohort: String,
@@ -75,6 +82,7 @@ struct PlacementResponse {
     idempotency_key: String,
     workspace_id: String,
     sandbox_id: String,
+    pool_name: String,
     state: PlacementState,
     worker_id: Option<String>,
     assignment_epoch: Option<u64>,
@@ -128,16 +136,27 @@ async fn register_worker(
     principal
         .authorize(
             &request.worker_id,
+            &request.pool_name,
             &request.topology,
             &request.resource_shape,
             &request.compatibility_cohort,
         )
         .map_err(|()| ApiError::Forbidden)?;
+    let pool = state
+        .worker_pools
+        .pool(&request.pool_name)
+        .map_err(|_| ApiError::Forbidden)?;
+    if pool.key.resource_shape != request.resource_shape
+        || pool.key.runtime_compatibility_cohort != request.compatibility_cohort
+    {
+        return Err(ApiError::Forbidden);
+    }
     state
         .store
         .register_worker(
             &WorkerRegistration {
                 worker_id: request.worker_id,
+                pool_name: request.pool_name,
                 topology: request.topology,
                 resource_shape: request.resource_shape,
                 compatibility_cohort: request.compatibility_cohort,
@@ -226,11 +245,24 @@ async fn submit(
         .authorize(
             &request.workspace_id,
             request.deadline_ms,
+            &request.pool_name,
             &request.topology,
             &request.resource_shape,
             &request.compatibility_cohort,
         )
         .map_err(|()| ApiError::Forbidden)?;
+    let pool = state
+        .worker_pools
+        .pool(&request.pool_name)
+        .map_err(|_| ApiError::Forbidden)?;
+    if !pool_accepts_request(
+        pool,
+        &request.resource_shape,
+        &request.compatibility_cohort,
+        &request.operation,
+    ) {
+        return Err(ApiError::Forbidden);
+    }
     let deadline_unix_ms = now
         .checked_add(request.deadline_ms)
         .ok_or(ApiError::Invalid)?;
@@ -243,6 +275,7 @@ async fn submit(
             deadline_unix_ms,
         },
         subject_id: principal.subject_id,
+        pool_name: request.pool_name,
         topology: request.topology,
         resource_shape: request.resource_shape,
         compatibility_cohort: request.compatibility_cohort,
@@ -253,6 +286,36 @@ async fn submit(
         EnqueueOutcome::Existing(record) => (StatusCode::OK, record),
     };
     Ok((status, Json(record.into())))
+}
+
+fn pool_accepts_request(
+    pool: &WorkerPool,
+    resource_shape: &str,
+    compatibility_cohort: &str,
+    operation: &Operation,
+) -> bool {
+    if pool.key.resource_shape != resource_shape
+        || pool.key.runtime_compatibility_cohort != compatibility_cohort
+    {
+        return false;
+    }
+    let Some(topology) = operation.topology() else {
+        return true;
+    };
+    if topology.policy.guest_profile != pool.key.guest_profile {
+        return false;
+    }
+    match pool.key.network_tier {
+        NetworkFeatureTier::Loopback => {
+            topology.policy.network.profile == NetworkProfile::None
+                && topology.policy.network.ingress.is_empty()
+        }
+        NetworkFeatureTier::UserspaceEgress => {
+            topology.policy.network.profile != NetworkProfile::None
+                && topology.policy.network.ingress.is_empty()
+        }
+        NetworkFeatureTier::UserspaceIngress => !topology.policy.network.ingress.is_empty(),
+    }
 }
 
 async fn inspect(
@@ -452,6 +515,7 @@ impl From<PlacementRecord> for PlacementResponse {
             idempotency_key: record.idempotency_key,
             workspace_id: record.identity.workspace_id.to_string(),
             sandbox_id: record.identity.sandbox_id.to_string(),
+            pool_name: record.pool_name,
             state: record.state,
             worker_id: record.worker_id.map(|worker| worker.to_string()),
             assignment_epoch: record.assignment_epoch.map(|epoch| epoch.get()),
@@ -517,6 +581,54 @@ mod tests {
     use std::env;
     use tower::ServiceExt as _;
 
+    fn worker_pools() -> Arc<WorkerPoolCatalog> {
+        let mut catalog: WorkerPoolCatalog =
+            serde_json::from_str(include_str!("../../../deploy/k3s/worker-pools.json"))
+                .expect("catalog");
+        catalog.pools[0].key.runtime_compatibility_cohort = "runsc-v1".to_owned();
+        catalog.validate().expect("test catalog");
+        Arc::new(catalog)
+    }
+
+    #[test]
+    fn reviewed_pool_rejects_guest_and_network_tier_mismatch() {
+        let catalog = worker_pools();
+        let pool = catalog.pool("fixed-standard-warm").expect("pool");
+        let topology =
+            serde_json::from_str(include_str!("../../../deploy/k3s/fixed-runtime.lock.json"))
+                .expect("topology");
+        let operation = Operation::Run {
+            topology,
+            project: "sandbox-a".to_owned(),
+            wait_for: "client".to_owned(),
+            timeout_ms: 30_000,
+        };
+        assert!(pool_accepts_request(
+            pool,
+            "standard-v1",
+            "runsc-v1",
+            &operation
+        ));
+        let mut egress_pool = pool.clone();
+        egress_pool.key.network_tier = NetworkFeatureTier::UserspaceEgress;
+        assert!(!pool_accepts_request(
+            &egress_pool,
+            "standard-v1",
+            "runsc-v1",
+            &operation
+        ));
+        egress_pool.key.network_tier = NetworkFeatureTier::Loopback;
+        egress_pool.key.guest_profile =
+            runtrue_sandbox_core::GuestProfileIdentity::parse("root-in-sandbox-v1")
+                .expect("profile");
+        assert!(!pool_accepts_request(
+            &egress_pool,
+            "standard-v1",
+            "runsc-v1",
+            &operation
+        ));
+    }
+
     #[test]
     fn authenticated_http_is_idempotent_and_tenant_scoped() {
         let Some(url) = env::var_os("SANDBOX_PLACEMENT_POSTGRES_URL") else {
@@ -552,6 +664,7 @@ mod tests {
                         "a-secure-worker-token-with-32-bytes",
                         &worker_id,
                     )),
+                    worker_pools(),
                 ));
                 let stream_store = Arc::new(
                     PostgresPlacementStore::connect_local_insecure(
@@ -568,6 +681,7 @@ mod tests {
                         "a-secure-worker-token-with-32-bytes",
                         &worker_id,
                     )),
+                    worker_pools(),
                 );
                 stream_state.result_streams = Arc::new(Semaphore::new(1));
                 stream_state.result_stream_poll_interval = Duration::from_millis(1);
@@ -589,6 +703,7 @@ mod tests {
                                 "workspace_id": "workspace-a",
                                 "sandbox_id": sandbox_id.clone(),
                                 "deadline_ms": 60_000,
+                                "pool_name": "fixed-standard-warm",
                                 "topology": "topology-v1",
                                 "resource_shape": "standard-v1",
                                 "compatibility_cohort": "runsc-v1",
@@ -661,6 +776,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "worker_id": worker_id,
+                            "pool_name": "fixed-standard-warm",
                             "topology": "topology-v1",
                             "resource_shape": "standard-v1",
                             "compatibility_cohort": "runsc-v1",
