@@ -901,7 +901,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.8",
  "tempfile",
- "thiserror 1.0.61",
+ "thiserror",
  "tokio",
  "zeroize",
 ]
@@ -912,7 +912,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror 1.0.61",
+ "thiserror",
 ]
 
 [[package]]
@@ -947,7 +947,7 @@ dependencies = [
  "sha2 0.10.8",
  "tar",
  "tempfile",
- "thiserror 1.0.61",
+ "thiserror",
  "xattr",
  "zstd",
 ]
@@ -957,7 +957,7 @@ name = "runtrue-sandbox-runtime"
 version = "0.1.0-alpha.1"
 dependencies = [
  "runtrue-sandbox-core",
- "thiserror 1.0.61",
+ "thiserror",
 ]
 
 [[package]]
@@ -971,7 +971,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.8",
  "tempfile",
- "thiserror 1.0.61",
+ "thiserror",
  "zeroize",
 ]
 
@@ -1085,7 +1085,7 @@ dependencies = [
  "serde",
  "sha2 0.11.0",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror",
  "time",
  "tokio",
  "tokio-util",
@@ -1273,31 +1273,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.61"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c546c80d6be4bc6a00c0f01730c08df82eaa7a7a61f11d656526506112cc1709"
-dependencies = [
- "thiserror-impl 1.0.61",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
 dependencies = [
- "thiserror-impl 2.0.19",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.61"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46c3384250002a6d5af4d114f2845d37b57521033f30d5c3f46c4d70e1197533"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "thiserror-impl",
 ]
 
 [[package]]
