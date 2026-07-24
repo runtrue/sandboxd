@@ -7,9 +7,8 @@ inside [gVisor](https://gvisor.dev/). A sandbox may contain multiple containers,
 but it has one lifecycle, network stack, resource boundary, and checkpoint.
 
 > [!WARNING]
-> `sandboxd` is experimental security software. It is not a tenant-facing API
-> or a complete multi-tenant control plane. The project has not completed an
-> independent security review. Read [SECURITY.md](SECURITY.md) before use.
+> `sandboxd` is experimental security software. Deploy it behind a trusted
+> control plane and review [SECURITY.md](SECURITY.md) before production use.
 
 ## What it provides
 
