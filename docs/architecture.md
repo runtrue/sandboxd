@@ -1,13 +1,19 @@
 # Architecture
 
+This document describes the worker's security-relevant design. Operational
+instructions live in [install.md](install.md); the wire contract lives in
+[control-plane.md](control-plane.md).
+
 ## Trust boundary
 
-The supported deployment is one trusted Linux worker with a root-owned
-`sandboxd` process. Its operator Unix socket accepts UID 0 only. An optional,
-separate workload Unix socket accepts one configured local broker UID, and each
-request on that socket must carry a short-lived signed work order. Tenant
-clients authenticate to an external control plane and never connect directly
-to the privileged worker.
+`sandboxd` runs as a root-owned process in a dedicated worker container. The
+worker runs in a standard Linux pod; a runtime-provided VM boundary is optional.
+Its private containerd daemon shares the worker's mount namespace; Kubernetes
+node runtime sockets and storage are not part of the worker. The operator Unix
+socket accepts UID 0 only. An optional workload socket accepts one configured
+local broker UID and requires a short-lived signed work order for each request.
+Tenant traffic reaches the worker through the surrounding control plane and
+broker.
 
 Topology documents, guest arguments, environment values, OCI image contents,
 workload requests, and guest execution are treated as untrusted. The worker
@@ -16,11 +22,9 @@ containerd daemon and snapshotter, `ctr` client, runsc binary, iproute2 binary,
 image store, state store, artifact store, and artifact master key are trusted.
 
 The security boundary for guest code is gVisor plus host namespaces and cgroup
-containment. The daemon itself is privileged and is not a tenant-facing network
-service. Possession of the operator socket is equivalent to control of the
-worker. Possession of the workload socket is insufficient without a valid
-signed work order, but compromise of the configured broker or signer remains
-inside the trusted control-plane boundary.
+containment. Access to the operator socket grants worker administration. The
+workload socket additionally requires a valid signed work order; the configured
+broker and signer are part of the trusted control-plane boundary.
 
 ## Sandbox ownership
 
@@ -43,30 +47,6 @@ Host paths, network interface names, process IDs, cgroup paths, and runtime
 handles are worker materializations. They do not enter topology locks or the
 backend-neutral snapshot data types.
 
-## Workspace ownership
-
-```text
-bins/
-  sandboxctl/               restricted Compose and image tooling
-  sandboxd/                 privileged worker daemon and local client
-
-crates/
-  sandbox-core/             identities, capabilities, lifecycle, snapshot types
-  sandbox-runtime/          backend and live-instance interfaces
-  sandbox-artifact/         encrypted artifacts, providers, references, GC
-  sandbox-oci/              Compose validation and OCI provider implementations
-  sandbox-gvisor/           gVisor execution, snapshots, recovery, cleanup
-
-examples/
-  containerd-compose/       minimal public-image provider and network fixture
-  python-compose/           local multi-container lifecycle and snapshot checks
-```
-
-The backend-neutral `BackendKind` has stable wire identities for `gvisor` and
-`marcovm`. A stable identity does not imply that an executor is installed. The
-daemon capability response contains gVisor only because this repository ships
-only the gVisor executor.
-
 ## Control plane
 
 `sandboxd` always listens on a mode `0600`, UID-0 operator Unix socket. When
@@ -74,35 +54,30 @@ configured, it also listens on a mode `0600` Unix socket owned by the broker
 UID. Requests and responses are newline-delimited JSON with a four-MiB message
 limit, a schema version, a bounded request identifier, and read/write
 deadlines. A fixed connection limiter rejects excess clients instead of
-creating an unbounded queue or thread set. The listener loop waits for socket
-readiness and drains each ready accept backlog; it does not impose a periodic
-accept-sleep latency floor.
+creating an unbounded queue or thread set.
 
 The operator endpoint verifies `SO_PEERCRED` UID 0 and retains shutdown and
 recovery access. Protocol v2 operator requests carry an explicit local scope;
 protocol v1 remains accepted only on this endpoint for migration. The workload
 endpoint verifies the configured broker UID and protocol-v2 HMAC work orders
 bound to the exact operation, request ID, tenant, workspace, subject, sandbox,
-resource ceilings, nonce, expiration, and assignment epoch. Shutdown has no
-workload work-order representation.
+resource ceilings, nonce, expiration, and assignment epoch.
 
 The daemon owns image admission handles, tenant-scoped active sandbox handles,
 worker metrics, state paths, and artifact scopes. Tenant-facing sandbox IDs are
 mapped to opaque epoch-scoped runtime project IDs. Assignments, consumed nonce
 digests, and bounded audit events are persisted under the private control state
-directory. Their bounded append queues preserve ordering and group concurrent
-writes into durable commits. Assignment and replay acknowledgements are issued
-only after persistence; ordered compaction bounds recovery work. A restart
-repairs an incomplete final journal record, rejects complete malformed state,
-and fences provisioning, restoring, active, and in-progress source assignments
-before accepting new work. Completed transferable records remain fenced across
-restart.
+directory. Bounded append queues preserve ordering and group concurrent writes
+into durable commits. Assignment and replay acknowledgements are issued only
+after persistence. Recovery repairs an incomplete final record, validates
+complete state, and fences in-progress assignments. Completed transferable
+records remain fenced across restart.
 
 Each tenant/workspace/sandbox identity is reserved while create, run, or restore
 materializes host resources. Persistent instances are stored behind a
 sandbox-specific mutex. Artifact keys include the verified tenant and workspace,
-logs require a scoped live-sandbox lookup, and workload metrics
-contain only the verified scope. The immutable image cache may be shared; its
+logs require a scoped live-sandbox lookup, and workload metrics contain only
+the verified scope. The immutable image cache may be shared; its
 contents and global cache metrics are not exposed through workload stats.
 Graceful shutdown refuses to proceed while a sandbox remains active.
 
@@ -111,9 +86,9 @@ The exact request and signing contract is documented in
 
 ## Topology admission
 
-`sandboxctl` accepts a restricted Compose subset. Unknown fields
-are rejected. The compiler bounds service, network, argument, environment, and
-value counts; rejects privileged and ambient host features; requires internal
+`sandboxctl` accepts a restricted Compose subset. Unknown fields are rejected.
+The compiler bounds service, network, argument, environment, and value counts;
+rejects privileged and ambient host features; requires internal
 networks; validates dependency order; resolves images to repository and image
 digests; and writes a canonical topology digest.
 
@@ -141,9 +116,7 @@ mount targets when an image omits them, then remounts the snapshotter view
 read-only. The daemon caches opaque immutable handles and releases every
 activation on graceful shutdown. Registry credentials are scoped to one tenant
 and registry, live only in mode-`0700` temporary provider state, and never enter
-topology locks or snapshot manifests. Docker export and GNU tar remain available
-only through an explicitly named diagnostic command; neither is part of the
-production admission or execution path.
+topology locks or snapshot manifests.
 
 Read-only roots remain the default. For an explicitly writable service, the
 provider creates a sparse ext4 image at the authorized size, attaches it to a
@@ -166,14 +139,13 @@ image admission.
 
 `sandbox-volume` defines create, attach, mount, freeze/thaw, snapshot, restore,
 unmount, detach, delete, capability, and recovery operations over opaque
-provider handles. This is also the boundary for an operator-installed CSI or
-customer-hosted integration; no CSI plugin is loaded by the privileged daemon
-in this repository. The local provider derives a SHA-256 key from tenant,
-workspace, and volume ID. Ephemeral and persistent volumes use sparse ext4
-images, private loop devices, and hard block quotas. Persistent storage remains
-after the final detach; ephemeral storage is destroyed. Attachment ownership is
-atomically persisted before a mount is issued, and startup recovery clears
-stale ownership, mounts, and loop devices after daemon or worker failure.
+provider handles. Operator-installed storage integrations connect at this
+boundary. The local provider derives a SHA-256 key from tenant, workspace, and
+volume ID. Ephemeral and persistent volumes use sparse ext4 images, private loop
+devices, and hard block quotas. Persistent storage remains after the final
+detach; ephemeral storage is destroyed. Attachment ownership is atomically
+persisted before a mount is issued, and startup recovery clears stale ownership,
+mounts, and loop devices after daemon or worker failure.
 
 Artifact volumes resolve a provider-owned regular file by its SHA-256 digest,
 verify it is immutable, and expose it only through a read-only bind mount.
@@ -185,6 +157,7 @@ only objects older than its grace period that have no live artifact-volume
 record; publication, handle creation, and collection use the same provider
 operation lock. The provider store is a cache, so operators retain the external
 source of truth and can safely republish an object by digest.
+
 Secret volumes resolve bounded owner-only files under
 `secret-source/tenants/<tenant>/workspaces/<workspace>/<volume>`, reject
 symlinks and special files, copy the bytes into a size-bounded tmpfs, and expose
@@ -239,8 +212,7 @@ can retry deletion of runsc, network, and cgroup materializations.
 Each sandbox receives one host network namespace, one private bridge/veth
 attachment, and one nftables table whose name is derived from the assignment's
 runtime identity. The `none` profile is the default: it installs no default
-route, host address, NAT rule, or nameserver and retains the original no-egress
-behavior.
+route, host address, NAT rule, or nameserver.
 
 An explicit top-level `x-runtrue-network` policy is canonicalized into the
 topology digest. `http_connect` installs a sandbox-local policy resolver and an
@@ -258,10 +230,7 @@ all unmatched forwarding is dropped. DNS and DNS-over-TLS ports cannot be added
 to raw TCP rules. The per-sandbox policy resolver filters every synthesized
 answer against the authorized CIDRs. nftables connection-count, byte-quota, and
 rate rules are applied before destination accepts. HTTP proxy traffic uses the
-same limits in its relay. gVisor TBF was not selected because one Sentry owns the
-whole network stack and the required accounting boundary is the complete
-sandbox; enforcing the ceiling in the host policy path also covers traffic after
-it leaves the Sentry.
+same limits in its relay.
 
 Ingress declarations contain only a guest service identity and container port.
 The worker allocates loopback host endpoints and 256-bit bearer credentials;
@@ -310,11 +279,9 @@ upper directory; writable roots are never shared even when services or tenants
 use the same immutable image.
 
 The shared Sentry performs guest work for every container. Host cgroup metrics
-therefore establish a sandbox containment boundary, but they do not establish
-independent per-container guest CPU or memory accounting. Policy fields that
-contain `per_service` retain their wire format but must be interpreted as an
-experimental host-process configuration rather than a tenant accounting
-guarantee.
+therefore establish the sandbox containment boundary. Policy fields named
+`per_service` configure host process materializations; they do not provide
+independent guest-container CPU or memory accounting.
 
 ## Lifecycle
 
@@ -334,10 +301,6 @@ removes stopped child state, releases writable mounts and loop devices, tears
 down networking and cgroups, verifies that runsc state is empty, and removes
 the recovery journal only after successful cleanup.
 
-The core crate also contains a broader lifecycle data type for backend-neutral
-orchestration. Its additional states are contracts, not daemon capability
-claims.
-
 ## Snapshot artifacts
 
 Both snapshot modes operate on the complete gVisor sandbox:
@@ -350,9 +313,9 @@ When any OCI root is writable, the daemon pauses the complete sandbox before
 checkpoint and diff export so publication cannot observe a changing upper
 layer. Each upper layer is encoded as an uncompressed OCI diff tar, including
 overlay whiteouts and basic ownership, mode, timestamp, file, directory, and
-symlink metadata. Hard links and non-overlay extended attributes fail closed
-until their portable representation is supported. A live snapshot resumes the
-source before artifact publication; failure also attempts to resume it.
+symlink metadata. Snapshot export rejects hard links and non-overlay extended
+attributes. A live snapshot resumes the source before artifact publication;
+failure also attempts to resume it.
 The artifact layer hashes each file while streaming, encrypts it with a random
 data key, wraps that key with a tenant/workspace-derived key, and publishes the
 object by content digest. A versioned encrypted manifest records tenant,
@@ -368,12 +331,13 @@ uses `s3-wire` for bounded streaming, retries, deadlines, conditional PUT,
 verified GET, HEAD, listing, and deletion. It hashes tenant and workspace names
 before deriving remote keys and publishes the snapshot pointer last. Large
 objects use bounded managed multipart uploads. A durable conditional lock gives
-one publisher ownership of a multipart destination, losing publishers wait for
-the completed object, and failed uploads are aborted. Garbage collection removes
+one publisher ownership of a multipart destination while other publishers wait
+for the completed object. Failed uploads are aborted. Garbage collection removes
 abandoned locks and stale multipart uploads after the configured grace period.
 The S3 provider requires that grace to be at least twice the operation timeout,
 leaving one full timeout window for client-owned abort cleanup after a caller
 deadline expires.
+
 The production endpoint must use TLS. The runtime principal is restricted to
 its configured bucket and prefix; bucket versioning must either be disabled or
 paired with a lifecycle policy because ordinary deletion cannot remove older
@@ -398,9 +362,9 @@ monotonically increasing assignment epoch, stop-and-move mode, provider
 portability, topology, runsc state format and version, runtime configuration,
 CPU features, architecture, and operating system. These checks finish before
 destination cgroups, namespaces, or runsc state are allocated. The root restore
-starts first; active child
-containers then restore against the same checkpoint. A child that had already
-exited is represented as stopped and is not passed to runsc restore.
+starts first; active child containers then restore against the same checkpoint.
+A child that had already exited is represented as stopped and is not passed to
+runsc restore.
 
 The checkpoint contains process state, memory, sockets, and writable tmpfs
 contents. Immutable OCI roots are re-admitted from the destination image store.
@@ -409,12 +373,10 @@ For each writable service, the manifest carries exactly one
 extra, corrupt, oversized, or topology-mismatched diffs, reconstructs the
 private overlay, and only then starts guest code. Failed reconstruction releases
 its mounts, loop device, and provider state. The manifest declares
-`cross_worker_same_backend`, but the daemon reports
-the lower portability of its configured artifact provider. The current local
-provider therefore reports `same_worker` and rejects cross-worker restore before
-runtime allocation. A remote provider must preserve the same conditional grant
-and claim semantics and pass the migration fault gates before that capability
-can be enabled.
+`cross_worker_same_backend`, but the daemon reports the lower portability of
+its configured artifact provider. The local provider reports `same_worker` and
+rejects cross-worker restore before runtime allocation. The S3-compatible
+provider reports `cross_worker_same_backend`.
 
 ## Backend-neutral snapshot types
 
@@ -423,6 +385,5 @@ identity, assignment epoch, backend version and configuration, compatibility
 requirements, and content-addressed object roles. Manifests contain no host
 paths, process IDs, sockets, runtime handles, credentials, or encryption keys.
 
-MarcoVM has a reserved backend identity and can use the same outer contracts.
-There is no MarcoVM executor, VM snapshot format, or cross-backend conversion
-in this repository.
+The contracts reserve a MarcoVM backend identity for future implementations.
+This release includes the gVisor executor and same-backend snapshot formats.
