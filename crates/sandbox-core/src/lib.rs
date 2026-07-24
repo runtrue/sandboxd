@@ -21,7 +21,9 @@ pub use attestation::{
     SignedImageAttestation, IMAGE_ATTESTATION_VERSION,
 };
 pub use autoscale::{
-    reconcile as reconcile_worker_pool, AutoscaleDecision, PoolObservation, PoolPolicy,
+    reconcile as reconcile_worker_pool, AutoscaleDecision, NetworkFeatureTier, PoolObservation,
+    PoolPolicy, ServiceLevelPolicy, StorageFeatureTier, WorkerPool, WorkerPoolCatalog,
+    WorkerPoolKey, WorkerPoolRequest, MAXIMUM_WORKER_POOLS, WORKER_POOL_CATALOG_VERSION,
 };
 pub use backend::{BackendDescriptor, BackendKind};
 pub use capability::{BackendCapabilities, SnapshotPortability};

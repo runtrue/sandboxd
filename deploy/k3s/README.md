@@ -282,6 +282,22 @@ enabling durable operation:
 Do not put the operator socket behind a Service. Tenant traffic must use the
 separate workload socket with signed work orders and a non-root broker identity.
 
+## Reviewed worker-pool catalog
+
+[`worker-pools.json`](worker-pools.json) is the operator-owned autoscaling
+catalog. A pool key binds the attested root cohort, resource shape, reviewed
+guest profile, runsc/snapshot compatibility cohort, and networking and storage
+feature tiers to one named StatefulSet and a bounded scaling policy. The
+catalog accepts at most 128 unique pools and exactly one cold fallback. Unknown
+request combinations route to that existing fallback; tenant input never
+becomes a StatefulSet name, image pull, or new pool.
+
+The service-level override has only two forms: scale to zero or retain a
+positive number of clean workers within the pool maximum. It cannot raise the
+operator-reviewed maximum. The controller integration and drain-first
+StatefulSet reconciliation consume this catalog; the static Deployment below
+remains the single-worker conformance fixture.
+
 ## Dynamic-runtime profile
 
 Build `Dockerfile.host-integrated` under the dynamic image name, import its
