@@ -356,6 +356,7 @@ mod tests {
                     .register_worker(
                         &WorkerRegistration {
                             worker_id: worker,
+                            pool_name: "fixed-standard-warm".to_owned(),
                             topology: topology.clone(),
                             resource_shape: "standard-v1".to_owned(),
                             compatibility_cohort: "runsc-v1".to_owned(),
@@ -378,6 +379,7 @@ mod tests {
                                 deadline_unix_ms: now + 60_000,
                             },
                             subject_id: subject.clone(),
+                            pool_name: "fixed-standard-warm".to_owned(),
                             topology,
                             resource_shape: "standard-v1".to_owned(),
                             compatibility_cohort: "runsc-v1".to_owned(),

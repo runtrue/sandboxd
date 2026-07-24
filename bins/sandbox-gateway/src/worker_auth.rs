@@ -21,6 +21,7 @@ pub(crate) struct WorkerAuthPolicy {
 struct WorkerCredential {
     token_sha256: String,
     worker_id: WorkerId,
+    pool_name: String,
     topology: String,
     resource_shape: String,
     compatibility_cohort: String,
@@ -46,6 +47,7 @@ impl WorkerAuthPolicy {
                 WorkerCredential {
                     token_sha256: hex::encode(Sha256::digest(secret.as_bytes())),
                     worker_id: WorkerId::parse(worker_id).expect("worker"),
+                    pool_name: "fixed-standard-warm".to_owned(),
                     topology: "topology-v1".to_owned(),
                     resource_shape: "standard-v1".to_owned(),
                     compatibility_cohort: "runsc-v1".to_owned(),
@@ -64,6 +66,7 @@ impl WorkerAuthPolicy {
         for (key_id, credential) in &self.credentials {
             if !bounded_token(key_id, 64)
                 || decode_digest(&credential.token_sha256).is_none()
+                || !bounded_label(&credential.pool_name)
                 || !bounded_label(&credential.topology)
                 || !bounded_label(&credential.resource_shape)
                 || !bounded_label(&credential.compatibility_cohort)
@@ -104,11 +107,13 @@ impl WorkerPrincipal {
     pub(crate) fn authorize(
         &self,
         worker_id: &WorkerId,
+        pool_name: &str,
         topology: &str,
         resource_shape: &str,
         compatibility_cohort: &str,
     ) -> Result<(), ()> {
         if self.0.worker_id != *worker_id
+            || self.0.pool_name != pool_name
             || self.0.topology != topology
             || self.0.resource_shape != resource_shape
             || self.0.compatibility_cohort != compatibility_cohort
@@ -168,18 +173,31 @@ mod tests {
         let principal = policy.authenticate(&headers).expect("principal");
         let worker = WorkerId::parse("worker-a").expect("worker");
         principal
-            .authorize(&worker, "topology-v1", "standard-v1", "runsc-v1")
+            .authorize(
+                &worker,
+                "fixed-standard-warm",
+                "topology-v1",
+                "standard-v1",
+                "runsc-v1",
+            )
             .expect("advertisement");
         assert!(principal
             .authorize(
                 &WorkerId::parse("worker-b").expect("worker"),
+                "fixed-standard-warm",
                 "topology-v1",
                 "standard-v1",
                 "runsc-v1"
             )
             .is_err());
         assert!(principal
-            .authorize(&worker, "other-topology", "standard-v1", "runsc-v1")
+            .authorize(
+                &worker,
+                "fixed-standard-warm",
+                "other-topology",
+                "standard-v1",
+                "runsc-v1",
+            )
             .is_err());
     }
 }

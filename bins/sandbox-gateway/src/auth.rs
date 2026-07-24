@@ -27,6 +27,7 @@ struct CredentialPolicy {
     subject_id: SubjectId,
     workspaces: BTreeSet<WorkspaceId>,
     maximum_deadline_ms: u64,
+    pools: BTreeSet<String>,
     topologies: BTreeSet<String>,
     resource_shapes: BTreeSet<String>,
     compatibility_cohorts: BTreeSet<String>,
@@ -61,6 +62,7 @@ impl AuthPolicy {
                         WorkspaceId::parse("workspace-a").expect("workspace")
                     ]),
                     maximum_deadline_ms: 60_000,
+                    pools: BTreeSet::from(["fixed-standard-warm".to_owned()]),
                     topologies: BTreeSet::from(["topology-v1".to_owned()]),
                     resource_shapes: BTreeSet::from(["standard-v1".to_owned()]),
                     compatibility_cohorts: BTreeSet::from(["runsc-v1".to_owned()]),
@@ -83,6 +85,7 @@ impl AuthPolicy {
                 || credential.workspaces.len() > 1_000
                 || credential.maximum_deadline_ms == 0
                 || credential.maximum_deadline_ms > 24 * 60 * 60 * 1_000
+                || !valid_allowlist(&credential.pools)
                 || !valid_allowlist(&credential.topologies)
                 || !valid_allowlist(&credential.resource_shapes)
                 || !valid_allowlist(&credential.compatibility_cohorts)
@@ -129,6 +132,7 @@ impl Principal {
         &self,
         workspace_id: &WorkspaceId,
         deadline_from_now_ms: u64,
+        pool_name: &str,
         topology: &str,
         resource_shape: &str,
         compatibility_cohort: &str,
@@ -136,6 +140,7 @@ impl Principal {
         if !self.policy.workspaces.contains(workspace_id)
             || deadline_from_now_ms == 0
             || deadline_from_now_ms > self.policy.maximum_deadline_ms
+            || !self.policy.pools.contains(pool_name)
             || !self.policy.topologies.contains(topology)
             || !self.policy.resource_shapes.contains(resource_shape)
             || !self

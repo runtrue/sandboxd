@@ -110,6 +110,8 @@ spec:
             - /run/secrets/auth/policy.json
             - --worker-auth-policy
             - /run/secrets/auth/worker-policy.json
+            - --worker-pool-catalog
+            - /run/config/worker-pools/catalog.json
             - --work-order-key
             - /run/secrets/work-order/key
             - --listen
@@ -161,6 +163,10 @@ spec:
               mountPath: /run/secrets/auth/worker-policy.json
               subPath: worker-policy.json
               readOnly: true
+            - name: worker-pools
+              mountPath: /run/config/worker-pools/catalog.json
+              subPath: catalog.json
+              readOnly: true
             - name: work-order-key
               mountPath: /run/secrets/work-order/key
               subPath: key
@@ -176,6 +182,10 @@ spec:
         - name: gateway-auth
           secret:
             secretName: sandbox-gateway-auth
+            defaultMode: 0440
+        - name: worker-pools
+          configMap:
+            name: sandbox-worker-pools
             defaultMode: 0440
         - name: work-order-key
           secret:

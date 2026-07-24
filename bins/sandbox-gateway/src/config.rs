@@ -1,3 +1,4 @@
+use runtrue_sandbox_core::WorkerPoolCatalog;
 use std::{
     fs::OpenOptions,
     io::Read as _,
@@ -53,6 +54,13 @@ pub(crate) fn read_database_url(path: &Path) -> Result<String, String> {
         ));
     }
     Ok(value)
+}
+
+pub(crate) fn read_worker_pool_catalog(path: &Path) -> Result<WorkerPoolCatalog, String> {
+    let catalog: WorkerPoolCatalog = serde_json::from_slice(&read_owner_config(path)?)
+        .map_err(|error| format!("decode worker-pool catalog: {error}"))?;
+    catalog.validate().map_err(|error| error.to_string())?;
+    Ok(catalog)
 }
 
 #[cfg(test)]

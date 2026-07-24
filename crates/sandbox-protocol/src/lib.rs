@@ -15,6 +15,7 @@ pub const LEGACY_OPERATOR_PROTOCOL_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub struct WorkerAdvertisement {
     pub worker_id: WorkerId,
+    pub pool_name: String,
     pub topology: String,
     pub resource_shape: String,
     pub compatibility_cohort: String,

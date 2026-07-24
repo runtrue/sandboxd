@@ -26,12 +26,23 @@ replicas plus a one-shot schema migration Job. Build it with
 - `sandbox-gateway-database`, `sandbox-gateway-migration-database`, and
   `sandbox-gateway-auth` Secrets as documented in
   `crates/sandbox-placement/README.md`;
+- a `sandbox-worker-pools` ConfigMap whose `catalog.json` key is created from
+  the reviewed [`worker-pools.json`](worker-pools.json);
 - a trusted TLS ingress or service mesh selected by the gateway-client network
   policy labels; and
 - an admission policy replacing the local image tag with an immutable digest.
 
 The checked-in Service is ClusterIP-only. Do not create a public LoadBalancer
 or permit cleartext ingress directly to the Pod listener.
+
+Create or update the catalog before rolling the gateway:
+
+```bash
+kubectl create configmap sandbox-worker-pools \
+  --namespace sandboxd-system \
+  --from-file=catalog.json=deploy/k3s/worker-pools.json \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
 
 `Dockerfile.broker` packages the per-worker network broker as UID/GID 65533 in
 a scratch image. The broker runs with a read-only root filesystem, no
