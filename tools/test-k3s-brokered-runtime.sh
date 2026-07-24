@@ -10,6 +10,7 @@ work_order_key=1111111111111111111111111111111111111111111111111111111111111111
 temporary=$(mktemp -d)
 gateway_forward=
 broker_forward=
+events_client=
 
 cleanup() {
   if [[ -n "$gateway_forward" ]]; then
@@ -17,6 +18,9 @@ cleanup() {
   fi
   if [[ -n "$broker_forward" ]]; then
     kill "$broker_forward" 2>/dev/null || true
+  fi
+  if [[ -n "$events_client" ]]; then
+    kill "$events_client" 2>/dev/null || true
   fi
   rm -rf "$temporary"
 }
@@ -125,7 +129,9 @@ kubectl rollout status \
 
 worker_pod=$(kubectl get pod -n "$namespace" \
   -l app.kubernetes.io/name=sandboxd-fixed-runtime-brokered \
-  -o jsonpath='{.items[0].metadata.name}')
+  --field-selector=status.phase=Running \
+  --sort-by=.metadata.creationTimestamp \
+  -o jsonpath='{.items[-1:].metadata.name}')
 worker_json=$(kubectl get pod -n "$namespace" "$worker_pod" -o json)
 jq -e '
   .spec.hostUsers == false
@@ -210,6 +216,12 @@ status=$(curl -sS -o "$temporary/submitted.json" -w '%{http_code}' \
   "http://127.0.0.1:${gateway_port}/v1/placements")
 test "$status" = 202
 
+curl -fsSN --max-time 180 \
+  -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+  "http://127.0.0.1:${gateway_port}/v1/placements/brokered-e2e/events" \
+  >"$temporary/events.txt" &
+events_client=$!
+
 result=
 for _ in $(seq 1 180); do
   result=$(curl -fsS \
@@ -232,6 +244,13 @@ jq -e '
   and (.response.result.stdout | contains("\"kernel\": \"4.19.0-gvisor\""))
   and (.response.result.stdout | contains("\"uid\": 65534"))
 ' >/dev/null <<<"$result"
+wait "$events_client"
+events_client=
+grep -F 'event: placement' "$temporary/events.txt" >/dev/null
+grep -F '"state":"completed"' "$temporary/events.txt" >/dev/null
+if grep -F 'queue_position' "$temporary/events.txt" >/dev/null; then
+  exit 1
+fi
 
 retry_status=$(curl -sS -o "$temporary/retry.json" -w '%{http_code}' \
   -H "Authorization: Bearer tenant-key.${tenant_secret}" \

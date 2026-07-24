@@ -49,12 +49,22 @@ The repository is intentionally not a tenant-facing API.
 `runtrue-sandbox-gateway` is the stateless tenant-facing HTTP boundary. Tenant,
 subject, workspace, deadline, topology, shape, and cohort authorization come
 from an owner-only hashed-token policy; tenant identity is never accepted from
-the request body. The gateway can submit, inspect, and cancel placement records
-only. It has no Kubernetes client, service-account token, tenant-selected
-worker address, or sandboxd operator operation. Every replica also runs the
-same bounded reconciliation loop: it claims durable work, signs the typed
-operation, delivers it to the assigned broker, and publishes a terminal
-response only while that lease epoch still wins.
+the request body. The gateway can submit, inspect, cancel, and stream placement
+records only. It has no Kubernetes client, service-account token,
+tenant-selected worker address, or sandboxd operator operation. Every replica
+also runs the same bounded reconciliation loop: it claims durable work, signs
+the typed operation, delivers it to the assigned broker, and publishes a
+terminal response only while that lease epoch still wins.
+
+`GET /v1/placements/{idempotency_key}/events` returns authenticated
+`text/event-stream` placement snapshots. It emits only when the durable record
+changes and closes after completed, cancelled, or expired. Each replica admits
+at most 64 concurrent streams, retains one bounded last snapshot plus the
+bounded outgoing event per stream, and polls PostgreSQL at a fixed interval. A
+client may reconnect to any replica because the stream owns no correctness
+state. Events contain the same tenant-scoped fields as inspection and never
+expose queue position or another tenant's identity. Database failures produce a
+generic terminal error event without internal details.
 
 The deployment in `deploy/k3s/sandbox-gateway.yaml` runs as UID/GID 65532 with
 no Linux capabilities, no privilege escalation, a read-only root, RuntimeDefault
