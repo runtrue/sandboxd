@@ -1,4 +1,5 @@
 use crate::auth::{AuthPolicy, Principal};
+use crate::worker_auth::WorkerAuthPolicy;
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
@@ -6,26 +7,29 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use runtrue_sandbox_core::{QueuedWork, SandboxId, WorkspaceId};
+use runtrue_sandbox_core::{QueuedWork, ResourceCeilings, SandboxId, WorkerId, WorkspaceId};
 use runtrue_sandbox_placement::{
     EnqueueOutcome, PlacementRecord, PlacementState, PlacementStoreError, PlacementSubmission,
-    PostgresPlacementStore,
+    PostgresPlacementStore, WorkerRegistration,
 };
+use runtrue_sandbox_protocol::{Operation, WorkloadResponse};
 use serde::{Deserialize, Serialize};
 use std::{
+    net::SocketAddr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tower::limit::ConcurrencyLimitLayer;
 
-const MAXIMUM_BODY_BYTES: usize = 16 * 1024;
-const MAXIMUM_CONCURRENT_REQUESTS: usize = 256;
+const MAXIMUM_BODY_BYTES: usize = 512 * 1024;
+const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) store: Arc<PostgresPlacementStore>,
     pub(crate) auth: Arc<AuthPolicy>,
+    pub(crate) worker_auth: Arc<WorkerAuthPolicy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +41,18 @@ struct SubmitRequest {
     topology: String,
     resource_shape: String,
     compatibility_cohort: String,
+    operation: Operation,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterWorkerRequest {
+    worker_id: WorkerId,
+    topology: String,
+    resource_shape: String,
+    compatibility_cohort: String,
+    broker_address: SocketAddr,
+    resource_ceilings: ResourceCeilings,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +66,7 @@ struct PlacementResponse {
     assignment_epoch: Option<u64>,
     lease_expires_unix_ms: Option<u64>,
     result_digest: Option<String>,
+    response: Option<WorkloadResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,9 +83,65 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/placements/{idempotency_key}",
             get(inspect).delete(cancel),
         )
+        .route("/internal/v1/workers/register", post(register_worker))
+        .route(
+            "/internal/v1/workers/{worker_id}/heartbeat",
+            post(heartbeat_worker),
+        )
         .layer(DefaultBodyLimit::max(MAXIMUM_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(MAXIMUM_CONCURRENT_REQUESTS))
         .with_state(state)
+}
+
+async fn register_worker(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RegisterWorkerRequest>,
+) -> Result<StatusCode, ApiError> {
+    let principal = state
+        .worker_auth
+        .authenticate(&headers)
+        .map_err(|()| ApiError::Unauthorized)?;
+    principal
+        .authorize(
+            &request.worker_id,
+            &request.topology,
+            &request.resource_shape,
+            &request.compatibility_cohort,
+        )
+        .map_err(|()| ApiError::Forbidden)?;
+    state
+        .store
+        .register_worker(
+            &WorkerRegistration {
+                worker_id: request.worker_id,
+                topology: request.topology,
+                resource_shape: request.resource_shape,
+                compatibility_cohort: request.compatibility_cohort,
+                broker_address: request.broker_address,
+                resource_ceilings: request.resource_ceilings,
+            },
+            now_unix_ms()?,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn heartbeat_worker(
+    State(state): State<AppState>,
+    Path(worker_id): Path<WorkerId>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    state
+        .worker_auth
+        .authenticate(&headers)
+        .and_then(|principal| principal.authorize_worker(&worker_id))
+        .map_err(|()| ApiError::Unauthorized)?;
+    state
+        .store
+        .heartbeat_worker(&worker_id, now_unix_ms()?)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn live() -> StatusCode {
@@ -115,6 +188,7 @@ async fn submit(
         topology: request.topology,
         resource_shape: request.resource_shape,
         compatibility_cohort: request.compatibility_cohort,
+        operation: request.operation,
     };
     let (status, record) = match state.store.enqueue(&submission, now).await? {
         EnqueueOutcome::Queued(record) => (StatusCode::ACCEPTED, record),
@@ -219,6 +293,7 @@ impl From<PlacementRecord> for PlacementResponse {
             assignment_epoch: record.assignment_epoch.map(|epoch| epoch.get()),
             lease_expires_unix_ms: record.lease_expires_unix_ms,
             result_digest: record.result_digest,
+            response: record.response,
         }
     }
 }
@@ -269,6 +344,7 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker_auth::WorkerAuthPolicy;
     use axum::{
         body::{to_bytes, Body},
         http::Request,
@@ -299,14 +375,19 @@ mod tests {
                 )
                 .await
                 .expect("store");
-                let app = router(AppState {
-                    store: Arc::new(store),
-                    auth: Arc::new(AuthPolicy::for_test("a-secure-random-token-with-32-bytes")),
-                });
                 let suffix = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("clock")
                     .as_nanos();
+                let worker_id = format!("gateway-worker-{suffix}");
+                let app = router(AppState {
+                    store: Arc::new(store),
+                    auth: Arc::new(AuthPolicy::for_test("a-secure-random-token-with-32-bytes")),
+                    worker_auth: Arc::new(WorkerAuthPolicy::for_test(
+                        "a-secure-worker-token-with-32-bytes",
+                        &worker_id,
+                    )),
+                });
                 let idempotency_key = format!("gateway-http-{suffix}");
                 let sandbox_id = format!("gateway-sandbox-{suffix}");
                 let request = || {
@@ -326,7 +407,11 @@ mod tests {
                                 "deadline_ms": 60_000,
                                 "topology": "topology-v1",
                                 "resource_shape": "standard-v1",
-                                "compatibility_cohort": "runsc-v1"
+                                "compatibility_cohort": "runsc-v1",
+                                "operation": {
+                                    "kind": "inspect",
+                                    "parameters": {"sandbox": sandbox_id.clone()}
+                                }
                             })
                             .to_string(),
                         ))
@@ -380,6 +465,63 @@ mod tests {
                         .expect("unauthorized")
                         .status(),
                     StatusCode::UNAUTHORIZED
+                );
+                let register = Request::builder()
+                    .method("POST")
+                    .uri("/internal/v1/workers/register")
+                    .header(
+                        "authorization",
+                        "Worker worker-key-a.a-secure-worker-token-with-32-bytes",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "worker_id": worker_id,
+                            "topology": "topology-v1",
+                            "resource_shape": "standard-v1",
+                            "compatibility_cohort": "runsc-v1",
+                            "broker_address": "127.0.0.1:8081",
+                            "resource_ceilings": {
+                                "allowed_guest_profiles": [{"name": "strict", "version": 1}],
+                                "maximum_services": 4,
+                                "maximum_timeout_ms": 30000,
+                                "memory_bytes_per_service": 268435456,
+                                "cpu_per_service_millis": 1000,
+                                "pids_per_service": 64,
+                                "tmpfs_bytes": 67108864,
+                                "writable_root_bytes_per_service": 67108864,
+                                "maximum_volumes": 8,
+                                "maximum_volume_bytes": 536870912,
+                                "maximum_output_bytes": 1048576
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("register");
+                assert_eq!(
+                    app.clone()
+                        .oneshot(register)
+                        .await
+                        .expect("register")
+                        .status(),
+                    StatusCode::NO_CONTENT
+                );
+                let heartbeat = Request::builder()
+                    .method("POST")
+                    .uri(format!("/internal/v1/workers/{worker_id}/heartbeat"))
+                    .header(
+                        "authorization",
+                        "Worker worker-key-a.a-secure-worker-token-with-32-bytes",
+                    )
+                    .body(Body::empty())
+                    .expect("heartbeat");
+                assert_eq!(
+                    app.clone()
+                        .oneshot(heartbeat)
+                        .await
+                        .expect("heartbeat")
+                        .status(),
+                    StatusCode::NO_CONTENT
                 );
                 let cancel = Request::builder()
                     .method("DELETE")

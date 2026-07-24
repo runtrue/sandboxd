@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const LEGACY_OPERATOR_PROTOCOL_VERSION: u32 = 1;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadRequest {
     pub schema_version: u32,
@@ -17,13 +17,13 @@ pub struct WorkloadRequest {
     pub operation: Operation,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkloadAuthorization {
     WorkOrder { work_order: Box<SignedWorkOrder> },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadResponse {
     pub schema_version: u32,
@@ -88,7 +88,7 @@ impl WorkloadRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     content = "parameters",

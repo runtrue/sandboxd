@@ -1,8 +1,12 @@
-use runtrue_sandbox_core::{QueuedWork, SandboxId, SubjectId, TenantId, WorkerId, WorkspaceId};
+use runtrue_sandbox_core::{
+    GuestProfile, QueuedWork, ResourceCeilings, SandboxId, SubjectId, TenantId, WorkerId,
+    WorkspaceId,
+};
 use runtrue_sandbox_placement::{
     CompletionOutcome, EnqueueOutcome, PlacementStoreConfig, PlacementStoreError,
     PlacementSubmission, PostgresPlacementStore, WorkerRegistration,
 };
+use runtrue_sandbox_protocol::Operation;
 use std::{env, time::Duration};
 
 const TEST_DATABASE_MARKER: &str = "sandboxd_placement_test";
@@ -37,6 +41,7 @@ async fn exercise(url: &str) {
         default_tenant_concurrency_limit: 1,
         worker_heartbeat_timeout: Duration::from_secs(30),
         lease_lifetime: Duration::from_millis(50),
+        broker_port: 8081,
     };
     let replica_a = PostgresPlacementStore::connect_local_insecure(url, config)
         .await
@@ -238,6 +243,9 @@ fn submission(
         topology: "topology-v1".to_owned(),
         resource_shape: "standard-v1".to_owned(),
         compatibility_cohort: "runsc-v1".to_owned(),
+        operation: Operation::Inspect {
+            sandbox: sandbox_name.to_owned(),
+        },
     }
 }
 
@@ -247,6 +255,24 @@ fn worker(worker_id: &str) -> WorkerRegistration {
         topology: "topology-v1".to_owned(),
         resource_shape: "standard-v1".to_owned(),
         compatibility_cohort: "runsc-v1".to_owned(),
+        broker_address: "127.0.0.1:8081".parse().expect("broker address"),
+        resource_ceilings: ceilings(),
+    }
+}
+
+fn ceilings() -> ResourceCeilings {
+    ResourceCeilings {
+        allowed_guest_profiles: vec![GuestProfile::strict().identity],
+        maximum_services: 4,
+        maximum_timeout_ms: 30_000,
+        memory_bytes_per_service: 256 * 1024 * 1024,
+        cpu_per_service_millis: 1_000,
+        pids_per_service: 64,
+        tmpfs_bytes: 64 * 1024 * 1024,
+        writable_root_bytes_per_service: 64 * 1024 * 1024,
+        maximum_volumes: 8,
+        maximum_volume_bytes: 512 * 1024 * 1024,
+        maximum_output_bytes: 1024 * 1024,
     }
 }
 

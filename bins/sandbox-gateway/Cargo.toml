@@ -9,19 +9,23 @@ rust-version.workspace = true
 axum.workspace = true
 clap.workspace = true
 hex.workspace = true
+hmac.workspace = true
 libc.workspace = true
 nix.workspace = true
 runtrue-sandbox-core.workspace = true
 runtrue-sandbox-placement.workspace = true
+runtrue-sandbox-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 subtle = "=2.6.1"
 tokio.workspace = true
 tower.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio-postgres.workspace = true
 
 [lints]
 workspace = true

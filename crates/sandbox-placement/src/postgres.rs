@@ -1,12 +1,14 @@
 use runtrue_sandbox_core::{
-    AssignmentEpoch, PlacementIdentity, QueuedWork, SandboxId, SubjectId, TenantId, WorkerId,
-    WorkspaceId,
+    AssignmentEpoch, PlacementIdentity, QueuedWork, ResourceCeilings, SandboxId, SubjectId,
+    TenantId, WorkerId, WorkspaceId,
 };
+use runtrue_sandbox_protocol::{Operation, WorkloadResponse};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     fs::{File, OpenOptions},
     io::Read as _,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     path::{Path, PathBuf},
     str::FromStr as _,
@@ -23,8 +25,10 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 const MIGRATION_LOCK: i64 = 7_223_510_449_421;
 const QUEUE_LOCK: i64 = 7_223_510_449_422;
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 const MAXIMUM_PEM_BYTES: u64 = 1024 * 1024;
+const MAXIMUM_OPERATION_BYTES: usize = 512 * 1024;
+const MAXIMUM_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 const MIGRATION: &str = r#"
 CREATE SCHEMA IF NOT EXISTS sandboxd_placement;
@@ -124,6 +128,31 @@ ALTER TABLE sandboxd_placement.audit ALTER COLUMN subject_id SET NOT NULL;
 UPDATE sandboxd_placement.schema_version SET version = 2 WHERE singleton = TRUE;
 "#;
 
+const MIGRATION_V3: &str = r#"
+ALTER TABLE sandboxd_placement.workers
+    ADD COLUMN IF NOT EXISTS broker_address TEXT,
+    ADD COLUMN IF NOT EXISTS resource_ceilings TEXT;
+UPDATE sandboxd_placement.workers
+SET state = 'quarantined'
+WHERE broker_address IS NULL OR resource_ceilings IS NULL;
+
+ALTER TABLE sandboxd_placement.requests ADD COLUMN IF NOT EXISTS operation TEXT;
+ALTER TABLE sandboxd_placement.requests ADD COLUMN IF NOT EXISTS terminal_response TEXT;
+UPDATE sandboxd_placement.requests
+SET state = 'expired',
+    terminal_unix_ms = COALESCE(
+        terminal_unix_ms,
+        (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT
+    )
+WHERE operation IS NULL AND state IN ('queued', 'assigned');
+UPDATE sandboxd_placement.requests
+SET operation = '{"kind":"ping"}'
+WHERE operation IS NULL;
+ALTER TABLE sandboxd_placement.requests ALTER COLUMN operation SET NOT NULL;
+
+UPDATE sandboxd_placement.schema_version SET version = 3 WHERE singleton = TRUE;
+"#;
+
 #[derive(Debug, Clone, Copy)]
 pub struct PlacementStoreConfig {
     pub global_queue_limit: i64,
@@ -132,6 +161,7 @@ pub struct PlacementStoreConfig {
     pub default_tenant_concurrency_limit: i32,
     pub worker_heartbeat_timeout: Duration,
     pub lease_lifetime: Duration,
+    pub broker_port: u16,
 }
 
 impl PlacementStoreConfig {
@@ -147,6 +177,7 @@ impl PlacementStoreConfig {
             || self.worker_heartbeat_timeout > Duration::from_secs(300)
             || self.lease_lifetime.is_zero()
             || self.lease_lifetime > Duration::from_secs(300)
+            || self.broker_port == 0
         {
             return Err(PlacementStoreError::Invalid(
                 "placement store configuration is invalid".to_owned(),
@@ -165,6 +196,7 @@ impl Default for PlacementStoreConfig {
             default_tenant_concurrency_limit: 10,
             worker_heartbeat_timeout: Duration::from_secs(30),
             lease_lifetime: Duration::from_secs(30),
+            broker_port: 8081,
         }
     }
 }
@@ -183,6 +215,7 @@ pub struct PlacementSubmission {
     pub topology: String,
     pub resource_shape: String,
     pub compatibility_cohort: String,
+    pub operation: Operation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +224,8 @@ pub struct WorkerRegistration {
     pub topology: String,
     pub resource_shape: String,
     pub compatibility_cohort: String,
+    pub broker_address: SocketAddr,
+    pub resource_ceilings: ResourceCeilings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +249,7 @@ pub struct PlacementRecord {
     pub assignment_epoch: Option<AssignmentEpoch>,
     pub lease_expires_unix_ms: Option<u64>,
     pub result_digest: Option<String>,
+    pub response: Option<WorkloadResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +267,9 @@ pub struct Assignment {
     pub worker_id: WorkerId,
     pub epoch: AssignmentEpoch,
     pub lease_expires_unix_ms: u64,
+    pub broker_address: SocketAddr,
+    pub resource_ceilings: ResourceCeilings,
+    pub operation: Operation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +391,7 @@ impl PostgresPlacementStore {
             .query_one("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
             .await?;
         transaction.batch_execute(MIGRATION).await?;
-        let version: i32 = transaction
+        let mut version: i32 = transaction
             .query_one(
                 "SELECT version FROM sandboxd_placement.schema_version
                  WHERE singleton = TRUE",
@@ -362,8 +401,13 @@ impl PostgresPlacementStore {
             .get("version");
         if version == 1 {
             transaction.batch_execute(MIGRATION_V2).await?;
+            version = 2;
         }
-        if !matches!(version, 1 | SCHEMA_VERSION) {
+        if version == 2 {
+            transaction.batch_execute(MIGRATION_V3).await?;
+            version = 3;
+        }
+        if version != SCHEMA_VERSION {
             return Err(PlacementStoreError::Invalid(format!(
                 "placement database schema version {version} is not supported"
             )));
@@ -441,6 +485,8 @@ impl PostgresPlacementStore {
         now_unix_ms: u64,
     ) -> Result<EnqueueOutcome, PlacementStoreError> {
         validate_submission(submission, now_unix_ms)?;
+        let operation = serde_json::to_string(&submission.operation)
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
         let now = to_i64(now_unix_ms)?;
         let deadline = to_i64(submission.work.deadline_unix_ms)?;
         let mut client = self.client.lock().await;
@@ -537,8 +583,8 @@ impl PostgresPlacementStore {
                 "INSERT INTO sandboxd_placement.requests
                  (request_id, idempotency_key, tenant_id, workspace_id, sandbox_id, subject_id,
                   topology, resource_shape, compatibility_cohort, deadline_unix_ms,
-                  created_unix_ms, fair_finish, state)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'queued')",
+                  created_unix_ms, fair_finish, operation, state)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'queued')",
                 &[
                     &request_id(&submission.work),
                     &submission.work.idempotency_key,
@@ -552,6 +598,7 @@ impl PostgresPlacementStore {
                     &deadline,
                     &now,
                     &fair_finish,
+                    &operation,
                 ],
             )
             .await?;
@@ -572,8 +619,11 @@ impl PostgresPlacementStore {
         registration: &WorkerRegistration,
         now_unix_ms: u64,
     ) -> Result<(), PlacementStoreError> {
-        validate_worker(registration)?;
+        validate_worker(registration, self.config.broker_port)?;
         let now = to_i64(now_unix_ms)?;
+        let broker_address = registration.broker_address.to_string();
+        let resource_ceilings = serde_json::to_string(&registration.resource_ceilings)
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
         let updated = self
             .client
             .lock()
@@ -581,20 +631,25 @@ impl PostgresPlacementStore {
             .execute(
                 "INSERT INTO sandboxd_placement.workers
                  (worker_id, topology, resource_shape, compatibility_cohort, state,
-                  heartbeat_unix_ms, registered_unix_ms)
-                 VALUES ($1,$2,$3,$4,'clean',$5,$5)
+                  heartbeat_unix_ms, registered_unix_ms, broker_address, resource_ceilings)
+                 VALUES ($1,$2,$3,$4,'clean',$5,$5,$6,$7)
                  ON CONFLICT (worker_id) DO UPDATE SET
-                 heartbeat_unix_ms = EXCLUDED.heartbeat_unix_ms
+                 heartbeat_unix_ms = EXCLUDED.heartbeat_unix_ms,
+                 broker_address = EXCLUDED.broker_address,
+                 resource_ceilings = EXCLUDED.resource_ceilings
                  WHERE sandboxd_placement.workers.state = 'clean'
                  AND sandboxd_placement.workers.topology = EXCLUDED.topology
                  AND sandboxd_placement.workers.resource_shape = EXCLUDED.resource_shape
-                 AND sandboxd_placement.workers.compatibility_cohort = EXCLUDED.compatibility_cohort",
+                 AND sandboxd_placement.workers.compatibility_cohort = EXCLUDED.compatibility_cohort
+                 AND sandboxd_placement.workers.broker_address = EXCLUDED.broker_address",
                 &[
                     &registration.worker_id.as_str(),
                     &registration.topology,
                     &registration.resource_shape,
                     &registration.compatibility_cohort,
                     &now,
+                    &broker_address,
+                    &resource_ceilings,
                 ],
             )
             .await?;
@@ -625,6 +680,38 @@ impl PostgresPlacementStore {
         Ok(())
     }
 
+    pub async fn clean_workers(
+        &self,
+        now_unix_ms: u64,
+        limit: u16,
+    ) -> Result<Vec<WorkerId>, PlacementStoreError> {
+        if limit == 0 || limit > 1_024 {
+            return Err(PlacementStoreError::Invalid(
+                "worker scan limit is invalid".to_owned(),
+            ));
+        }
+        let heartbeat_cutoff = to_i64(now_unix_ms)?
+            .checked_sub(duration_millis(self.config.worker_heartbeat_timeout)?)
+            .ok_or_else(|| PlacementStoreError::Invalid("invalid heartbeat time".to_owned()))?;
+        self.client
+            .lock()
+            .await
+            .query(
+                "SELECT worker_id FROM sandboxd_placement.workers
+                 WHERE state = 'clean' AND heartbeat_unix_ms > $1
+                 AND broker_address IS NOT NULL AND resource_ceilings IS NOT NULL
+                 ORDER BY registered_unix_ms, worker_id LIMIT $2",
+                &[&heartbeat_cutoff, &i64::from(limit)],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                WorkerId::parse(row.get::<_, String>("worker_id"))
+                    .map_err(|error| PlacementStoreError::Invalid(error.to_string()))
+            })
+            .collect()
+    }
+
     pub async fn assign_next(
         &self,
         worker_id: &WorkerId,
@@ -644,9 +731,11 @@ impl PostgresPlacementStore {
             .await?;
         let worker = transaction
             .query_opt(
-                "SELECT topology, resource_shape, compatibility_cohort
+                "SELECT topology, resource_shape, compatibility_cohort,
+                        broker_address, resource_ceilings
                  FROM sandboxd_placement.workers
                  WHERE worker_id = $1 AND state = 'clean' AND heartbeat_unix_ms > $2
+                 AND broker_address IS NOT NULL AND resource_ceilings IS NOT NULL
                  FOR UPDATE",
                 &[&worker_id.as_str(), &heartbeat_cutoff],
             )
@@ -657,6 +746,16 @@ impl PostgresPlacementStore {
         let topology: String = worker.get("topology");
         let resource_shape: String = worker.get("resource_shape");
         let cohort: String = worker.get("compatibility_cohort");
+        let broker_address = worker
+            .get::<_, String>("broker_address")
+            .parse::<SocketAddr>()
+            .map_err(|_| PlacementStoreError::Invalid("invalid broker address".to_owned()))?;
+        let resource_ceilings: ResourceCeilings =
+            serde_json::from_str(worker.get::<_, &str>("resource_ceilings"))
+                .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+        resource_ceilings
+            .validate()
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
         expire_queued(&transaction, now).await?;
         let active: i64 = transaction
             .query_one(
@@ -689,6 +788,8 @@ impl PostgresPlacementStore {
             transaction.commit().await?;
             return Ok(None);
         };
+        let operation: Operation = serde_json::from_str(candidate.get::<_, &str>("operation"))
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
         let tenant: String = candidate.get("tenant_id");
         let workspace: String = candidate.get("workspace_id");
         let sandbox: String = candidate.get("sandbox_id");
@@ -735,7 +836,8 @@ impl PostgresPlacementStore {
             .await?;
         let record = record_from_row(&row)?;
         append_audit(&transaction, &record, now, "assigned").await?;
-        let assignment = assignment_from_record(record)?;
+        let assignment =
+            assignment_from_record(record, broker_address, resource_ceilings, operation)?;
         transaction.commit().await?;
         Ok(Some(assignment))
     }
@@ -779,6 +881,43 @@ impl PostgresPlacementStore {
         result_digest: &str,
         now_unix_ms: u64,
     ) -> Result<CompletionOutcome, PlacementStoreError> {
+        self.complete_inner(assignment, result_digest, None, now_unix_ms)
+            .await
+    }
+
+    pub async fn complete_response(
+        &self,
+        assignment: &Assignment,
+        response: &WorkloadResponse,
+        now_unix_ms: u64,
+    ) -> Result<CompletionOutcome, PlacementStoreError> {
+        response
+            .validate_for(&assignment.request_id)
+            .map_err(|error| PlacementStoreError::Invalid(error.to_owned()))?;
+        let encoded = serde_json::to_string(response)
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+        if encoded.len() > MAXIMUM_RESPONSE_BYTES {
+            return Err(PlacementStoreError::Invalid(
+                "worker response exceeds its size limit".to_owned(),
+            ));
+        }
+        let result_digest = format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())));
+        self.complete_inner(
+            assignment,
+            &result_digest,
+            Some((encoded, response.clone())),
+            now_unix_ms,
+        )
+        .await
+    }
+
+    async fn complete_inner(
+        &self,
+        assignment: &Assignment,
+        result_digest: &str,
+        response: Option<(String, WorkloadResponse)>,
+        now_unix_ms: u64,
+    ) -> Result<CompletionOutcome, PlacementStoreError> {
         if !valid_digest(result_digest) {
             return Err(PlacementStoreError::Invalid(
                 "result digest is invalid".to_owned(),
@@ -814,8 +953,14 @@ impl PostgresPlacementStore {
         transaction
             .execute(
                 "UPDATE sandboxd_placement.requests SET state = 'completed',
-                 result_digest = $2, terminal_unix_ms = $3 WHERE request_id = $1",
-                &[&assignment.request_id, &result_digest, &now],
+                 result_digest = $2, terminal_response = $3, terminal_unix_ms = $4
+                 WHERE request_id = $1",
+                &[
+                    &assignment.request_id,
+                    &result_digest,
+                    &response.as_ref().map(|(encoded, _)| encoded),
+                    &now,
+                ],
             )
             .await?;
         transaction
@@ -827,6 +972,7 @@ impl PostgresPlacementStore {
         let mut completed = record;
         completed.state = PlacementState::Completed;
         completed.result_digest = Some(result_digest.to_owned());
+        completed.response = response.map(|(_, response)| response);
         append_audit(&transaction, &completed, now, "completed").await?;
         transaction.commit().await?;
         Ok(CompletionOutcome::Published)
@@ -1095,10 +1241,20 @@ fn record_from_row(row: &Row) -> Result<PlacementRecord, PlacementStoreError> {
         assignment_epoch: epoch,
         lease_expires_unix_ms: expiry,
         result_digest: row.get("result_digest"),
+        response: row
+            .get::<_, Option<String>>("terminal_response")
+            .map(|encoded| serde_json::from_str(&encoded))
+            .transpose()
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?,
     })
 }
 
-fn assignment_from_record(record: PlacementRecord) -> Result<Assignment, PlacementStoreError> {
+fn assignment_from_record(
+    record: PlacementRecord,
+    broker_address: SocketAddr,
+    resource_ceilings: ResourceCeilings,
+    operation: Operation,
+) -> Result<Assignment, PlacementStoreError> {
     Ok(Assignment {
         request_id: record.request_id,
         idempotency_key: record.idempotency_key,
@@ -1113,6 +1269,9 @@ fn assignment_from_record(record: PlacementRecord) -> Result<Assignment, Placeme
         lease_expires_unix_ms: record.lease_expires_unix_ms.ok_or_else(|| {
             PlacementStoreError::Invalid("assignment has no lease expiration".to_owned())
         })?,
+        broker_address,
+        resource_ceilings,
+        operation,
     })
 }
 
@@ -1120,6 +1279,9 @@ fn validate_submission(
     submission: &PlacementSubmission,
     now_unix_ms: u64,
 ) -> Result<(), PlacementStoreError> {
+    let operation_bytes = serde_json::to_vec(&submission.operation)
+        .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+    let workload_operation = submission.operation.work_order_operation();
     if submission.work.idempotency_key.is_empty()
         || submission.work.idempotency_key.len() > 128
         || !submission
@@ -1131,6 +1293,9 @@ fn validate_submission(
         || !bounded_label(&submission.topology)
         || !bounded_label(&submission.resource_shape)
         || !bounded_label(&submission.compatibility_cohort)
+        || operation_bytes.len() > MAXIMUM_OPERATION_BYTES
+        || workload_operation.is_none_or(|operation| !operation.requires_sandbox())
+        || submission.operation.sandbox() != Some(submission.work.sandbox_id.as_str())
     {
         return Err(PlacementStoreError::Invalid(
             "placement submission is invalid".to_owned(),
@@ -1140,13 +1305,24 @@ fn validate_submission(
 }
 
 fn request_id(work: &QueuedWork) -> String {
-    format!("{}/{}", work.tenant_id, work.idempotency_key)
+    let mut digest = Sha256::new();
+    digest.update(work.tenant_id.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(work.idempotency_key.as_bytes());
+    hex::encode(digest.finalize())
 }
 
-fn validate_worker(registration: &WorkerRegistration) -> Result<(), PlacementStoreError> {
+fn validate_worker(
+    registration: &WorkerRegistration,
+    broker_port: u16,
+) -> Result<(), PlacementStoreError> {
     if !bounded_label(&registration.topology)
         || !bounded_label(&registration.resource_shape)
         || !bounded_label(&registration.compatibility_cohort)
+        || registration.broker_address.port() != broker_port
+        || registration.broker_address.ip().is_unspecified()
+        || registration.broker_address.ip().is_multicast()
+        || registration.resource_ceilings.validate().is_err()
     {
         return Err(PlacementStoreError::Invalid(
             "worker registration is invalid".to_owned(),

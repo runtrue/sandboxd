@@ -2,6 +2,9 @@ use crate::{
     api::{self, AppState},
     auth::AuthPolicy,
     config::read_database_url,
+    dispatcher::Dispatcher,
+    signer::WorkOrderSigner,
+    worker_auth::WorkerAuthPolicy,
 };
 use clap::{Args, Parser, Subcommand};
 use runtrue_sandbox_placement::{
@@ -49,6 +52,12 @@ struct ServeArgs {
     /// Owner-only JSON file mapping bearer key IDs to hashed secrets and tenant policy.
     #[arg(long)]
     auth_policy: PathBuf,
+    /// Owner-only JSON file binding worker credentials to exact advertised identities.
+    #[arg(long)]
+    worker_auth_policy: PathBuf,
+    /// Owner-only file containing the shared 32-byte work-order HMAC key.
+    #[arg(long)]
+    work_order_key: PathBuf,
     #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
     /// Confirm that TLS is terminated by a trusted local ingress or service mesh.
@@ -64,8 +73,18 @@ struct ServeArgs {
     default_tenant_concurrency_limit: i32,
     #[arg(long, default_value_t = 30)]
     worker_heartbeat_timeout_seconds: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 60)]
     lease_lifetime_seconds: u64,
+    #[arg(long, default_value_t = 45)]
+    work_order_lifetime_seconds: u64,
+    #[arg(long, default_value_t = 40)]
+    dispatch_timeout_seconds: u64,
+    #[arg(long, default_value_t = 250)]
+    dispatch_interval_milliseconds: u64,
+    #[arg(long, default_value_t = 64)]
+    dispatch_worker_scan_limit: u16,
+    #[arg(long, default_value_t = 8081)]
+    broker_port: u16,
 }
 
 pub(crate) async fn execute(cli: Cli) -> Result<(), String> {
@@ -82,6 +101,14 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
                 .to_owned(),
         );
     }
+    if args.dispatch_timeout_seconds > args.work_order_lifetime_seconds
+        || args.work_order_lifetime_seconds >= args.lease_lifetime_seconds
+    {
+        return Err(
+            "dispatch timeout must not exceed work-order lifetime, which must be shorter than the lease"
+                .to_owned(),
+        );
+    }
     let database_url = read_database_url(&args.database.database_url_file)?;
     let config = PlacementStoreConfig {
         global_queue_limit: args.global_queue_limit,
@@ -90,6 +117,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         default_tenant_concurrency_limit: args.default_tenant_concurrency_limit,
         worker_heartbeat_timeout: Duration::from_secs(args.worker_heartbeat_timeout_seconds),
         lease_lifetime: Duration::from_secs(args.lease_lifetime_seconds),
+        broker_port: args.broker_port,
     };
     let store = if args.database.database_insecure_local {
         PostgresPlacementStore::connect_local_insecure(&database_url, config).await
@@ -97,10 +125,24 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         PostgresPlacementStore::connect(&database_url, &database_tls(&args.database)?, config).await
     }
     .map_err(|error| error.to_string())?;
+    let store = Arc::new(store);
+    let signer = Arc::new(WorkOrderSigner::load(
+        &args.work_order_key,
+        Duration::from_secs(args.work_order_lifetime_seconds),
+    )?);
+    let dispatcher = Dispatcher::new(
+        Arc::clone(&store),
+        signer,
+        Duration::from_millis(args.dispatch_interval_milliseconds),
+        Duration::from_secs(args.dispatch_timeout_seconds),
+        args.dispatch_worker_scan_limit,
+    )?;
     let state = AppState {
-        store: Arc::new(store),
+        store,
         auth: Arc::new(AuthPolicy::load(&args.auth_policy)?),
+        worker_auth: Arc::new(WorkerAuthPolicy::load(&args.worker_auth_policy)?),
     };
+    tokio::spawn(dispatcher.run());
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .map_err(|error| format!("bind gateway listener: {error}"))?;
