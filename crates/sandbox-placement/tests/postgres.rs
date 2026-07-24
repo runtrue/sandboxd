@@ -3,7 +3,7 @@ use runtrue_sandbox_core::{
     WorkspaceId,
 };
 use runtrue_sandbox_placement::{
-    CompletionOutcome, EnqueueOutcome, PlacementStoreConfig, PlacementStoreError,
+    Assignment, CompletionOutcome, EnqueueOutcome, PlacementStoreConfig, PlacementStoreError,
     PlacementSubmission, PostgresPlacementStore, WorkerRegistration,
 };
 use runtrue_sandbox_protocol::Operation;
@@ -124,7 +124,7 @@ async fn exercise(url: &str) {
         )
         .await
         .expect("fill global queue");
-    for sequence in 0..400 {
+    for sequence in 0..500 {
         let overflow = submission(
             "tenant-b",
             &format!("overflow-{sequence}"),
@@ -220,6 +220,187 @@ async fn exercise(url: &str) {
         observed.result_digest.as_deref(),
         Some(digest('a').as_str())
     );
+    assert_terminal_audit(url, &source, &digest('a')).await;
+
+    let worker_d = worker("worker-d");
+    replica_b
+        .register_worker(&worker_d, 200)
+        .await
+        .expect("worker to drain");
+    replica_b
+        .drain_worker(&worker_d.worker_id)
+        .await
+        .expect("drain worker");
+    replica_b
+        .heartbeat_worker(&worker_d.worker_id, 201)
+        .await
+        .expect("draining worker heartbeat");
+    assert!(!replica_b
+        .clean_workers(201, 16)
+        .await
+        .expect("clean workers")
+        .contains(&worker_d.worker_id));
+    replica_b
+        .quarantine_worker(&worker_d.worker_id, 202)
+        .await
+        .expect("quarantine worker");
+    assert!(matches!(
+        replica_b.heartbeat_worker(&worker_d.worker_id, 202).await,
+        Err(PlacementStoreError::WorkerUnavailable)
+    ));
+
+    let expiring = submission(
+        "tenant-expiry",
+        "deadline-expiry",
+        "sandbox-deadline-expiry",
+        300,
+    );
+    replica_b
+        .enqueue(&expiring, 200)
+        .await
+        .expect("enqueue deadline test");
+    replica_b
+        .fence_expired(301)
+        .await
+        .expect("periodic deadline reconciliation");
+    let expired = replica_b
+        .get_by_idempotency(
+            &expiring.work.tenant_id,
+            &expiring.subject_id,
+            &expiring.work.idempotency_key,
+        )
+        .await
+        .expect("lookup expired request")
+        .expect("expired request");
+    assert_eq!(
+        expired.state,
+        runtrue_sandbox_placement::PlacementState::Expired
+    );
+    replica_b
+        .enqueue(
+            &submission(
+                "tenant-expiry",
+                "after-expiry",
+                "sandbox-after-expiry",
+                10_000,
+            ),
+            302,
+        )
+        .await
+        .expect("expired queue entry releases capacity");
+
+    let mut quarantined_submission = submission(
+        "tenant-quarantine",
+        "quarantine-assignment",
+        "sandbox-quarantine",
+        10_000,
+    );
+    quarantined_submission.topology = "quarantine-topology".to_owned();
+    replica_b
+        .enqueue(&quarantined_submission, 303)
+        .await
+        .expect("enqueue quarantine test");
+    let mut worker_e = worker("worker-e");
+    worker_e.topology = "quarantine-topology".to_owned();
+    replica_b
+        .register_worker(&worker_e, 303)
+        .await
+        .expect("quarantine source worker");
+    let quarantined_assignment = replica_b
+        .assign_next(&worker_e.worker_id, 304)
+        .await
+        .expect("assign quarantine source")
+        .expect("quarantine assignment");
+    replica_b
+        .quarantine_worker(&worker_e.worker_id, 305)
+        .await
+        .expect("fence quarantined worker");
+    assert!(matches!(
+        replica_b
+            .complete(&quarantined_assignment, &digest('e'), 306)
+            .await,
+        Err(PlacementStoreError::StaleAssignment)
+    ));
+    let mut worker_f = worker("worker-f");
+    worker_f.topology = "quarantine-topology".to_owned();
+    replica_b
+        .register_worker(&worker_f, 306)
+        .await
+        .expect("quarantine destination worker");
+    let replacement = replica_b
+        .assign_next(&worker_f.worker_id, 307)
+        .await
+        .expect("assign quarantine replacement")
+        .expect("replacement assignment");
+    assert!(replacement.epoch > quarantined_assignment.epoch);
+    replica_b
+        .complete(&replacement, &digest('f'), 308)
+        .await
+        .expect("replacement wins");
+}
+
+async fn assert_terminal_audit(url: &str, assignment: &Assignment, result_digest: &str) {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .expect("audit database");
+    tokio::spawn(async move {
+        connection.await.expect("audit database connection");
+    });
+    let row = client
+        .query_one(
+            "SELECT request_id, tenant_id, workspace_id, sandbox_id, subject_id,
+                    worker_id, assignment_epoch, event, result_digest
+             FROM sandboxd_placement.audit
+             WHERE request_id = $1 AND event = 'completed'",
+            &[&assignment.request_id],
+        )
+        .await
+        .expect("terminal audit row");
+    assert_eq!(row.get::<_, String>("request_id"), assignment.request_id);
+    assert_eq!(
+        row.get::<_, String>("tenant_id"),
+        assignment.identity.tenant_id.as_str()
+    );
+    assert_eq!(
+        row.get::<_, String>("workspace_id"),
+        assignment.identity.workspace_id.as_str()
+    );
+    assert_eq!(
+        row.get::<_, String>("sandbox_id"),
+        assignment.identity.sandbox_id.as_str()
+    );
+    assert_eq!(
+        row.get::<_, String>("subject_id"),
+        assignment.subject_id.as_str()
+    );
+    assert_eq!(
+        row.get::<_, Option<String>>("worker_id").as_deref(),
+        Some(assignment.worker_id.as_str())
+    );
+    assert_eq!(
+        row.get::<_, Option<i64>>("assignment_epoch"),
+        Some(i64::try_from(assignment.epoch.get()).expect("epoch"))
+    );
+    assert_eq!(row.get::<_, String>("event"), "completed");
+    assert_eq!(
+        row.get::<_, Option<String>>("result_digest").as_deref(),
+        Some(result_digest)
+    );
+
+    let columns = client
+        .query(
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_schema = 'sandboxd_placement' AND table_name = 'audit'",
+            &[],
+        )
+        .await
+        .expect("audit columns");
+    assert!(columns.into_iter().all(|row| {
+        let column = row.get::<_, String>(0);
+        !["secret", "token", "credential", "operation", "response"]
+            .iter()
+            .any(|forbidden| column.contains(forbidden))
+    }));
 }
 
 async fn reset(url: &str) {

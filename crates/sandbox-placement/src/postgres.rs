@@ -679,6 +679,79 @@ impl PostgresPlacementStore {
         Ok(())
     }
 
+    pub async fn drain_worker(&self, worker_id: &WorkerId) -> Result<(), PlacementStoreError> {
+        let updated = self
+            .client
+            .lock()
+            .await
+            .execute(
+                "UPDATE sandboxd_placement.workers SET state = 'draining'
+                 WHERE worker_id = $1 AND state IN ('clean', 'leased', 'draining')",
+                &[&worker_id.as_str()],
+            )
+            .await?;
+        if updated != 1 {
+            return Err(PlacementStoreError::WorkerUnavailable);
+        }
+        Ok(())
+    }
+
+    pub async fn quarantine_worker(
+        &self,
+        worker_id: &WorkerId,
+        now_unix_ms: u64,
+    ) -> Result<(), PlacementStoreError> {
+        let now = to_i64(now_unix_ms)?;
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        transaction
+            .query_one("SELECT pg_advisory_xact_lock($1)", &[&QUEUE_LOCK])
+            .await?;
+        let updated = transaction
+            .execute(
+                "UPDATE sandboxd_placement.workers SET state = 'quarantined'
+                 WHERE worker_id = $1
+                 AND state IN ('clean', 'leased', 'draining', 'quarantined')",
+                &[&worker_id.as_str()],
+            )
+            .await?;
+        if updated != 1 {
+            return Err(PlacementStoreError::WorkerUnavailable);
+        }
+        let rows = transaction
+            .query(
+                "SELECT * FROM sandboxd_placement.requests
+                 WHERE worker_id = $1 AND state = 'assigned' FOR UPDATE",
+                &[&worker_id.as_str()],
+            )
+            .await?;
+        for row in rows {
+            let record = record_from_row(&row)?;
+            let deadline: i64 = row.get("deadline_unix_ms");
+            if deadline <= now {
+                transaction
+                    .execute(
+                        "UPDATE sandboxd_placement.requests SET state = 'expired',
+                         terminal_unix_ms = $2 WHERE request_id = $1",
+                        &[&record.request_id, &now],
+                    )
+                    .await?;
+            } else {
+                transaction
+                    .execute(
+                        "UPDATE sandboxd_placement.requests SET state = 'queued',
+                         worker_id = NULL, assignment_epoch = NULL,
+                         lease_expires_unix_ms = NULL WHERE request_id = $1",
+                        &[&record.request_id],
+                    )
+                    .await?;
+            }
+            append_audit(&transaction, &record, now, "worker_quarantined").await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn clean_workers(
         &self,
         now_unix_ms: u64,
@@ -1038,6 +1111,7 @@ impl PostgresPlacementStore {
         transaction
             .query_one("SELECT pg_advisory_xact_lock($1)", &[&QUEUE_LOCK])
             .await?;
+        expire_queued(&transaction, now).await?;
         let rows = transaction
             .query(
                 "SELECT * FROM sandboxd_placement.requests

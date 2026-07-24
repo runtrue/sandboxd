@@ -121,8 +121,20 @@ ceilings. A credential cannot register or heartbeat a different worker
 identity. NetworkPolicy admits these routes only from labeled worker
 registration clients.
 
+The same exact worker credential may request a fail-closed state transition at
+`POST /internal/v1/workers/{worker_id}/drain` or
+`POST /internal/v1/workers/{worker_id}/quarantine`. Draining workers continue
+heartbeating but receive no new assignment. Quarantined workers neither
+heartbeat nor re-register; quarantine atomically fences and requeues (or
+deadline-expires) any active assignment before a higher epoch can be issued.
+They require operator reconciliation or replacement. Consumed workers cannot
+return to service through either endpoint.
+
 The dispatcher uses bounded worker scans and request timeouts. An ambiguous
 network failure leaves the assignment leased; lease reconciliation quarantines
-that worker before a higher epoch is requeued. PostgreSQL stores the complete
+that worker before a higher epoch is requeued. The same periodic transaction
+terminalizes queued requests whose client deadlines elapsed, even when no
+worker is available, so they cannot retain queue quota indefinitely.
+PostgreSQL stores the complete
 typed operation and terminal response, while audit rows contain only identity,
 epoch, worker, event, and result digest.
