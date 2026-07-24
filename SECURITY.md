@@ -1,97 +1,116 @@
-# Security policy
+# Security
 
-## Project status
+`sandboxd` is designed as a hardened execution worker for untrusted OCI
+workloads. It combines gVisor isolation with host namespaces, cgroup v2,
+default-deny networking, signed workload authorization, and encrypted snapshot
+storage.
 
-`sandboxd` is experimental security software. There are no supported stable
-releases. The `main` branch is the only maintained source state.
+The current release channel is alpha. Security fixes are maintained on `main`.
 
-Do not expose either daemon socket to tenant clients or treat the repository as
-a complete multi-tenant security boundary without an independent review.
+## Deployment model
 
-## Reporting a vulnerability
+Run `sandboxd` in a dedicated worker container behind a trusted control plane.
+The container runs in a standard Linux pod and remains compatible with runtimes
+that add a VM boundary. It uses a private containerd daemon in its own mount
+namespace and does not mount the Kubernetes node's containerd socket or
+snapshotter storage. Tenant clients authenticate to the surrounding identity
+and policy service, which issues narrowly scoped work orders through a local
+broker.
 
-Use GitHub private vulnerability reporting for security-sensitive reports. Do
-not open a public issue containing exploit details, tenant data, credentials,
-or a working escape technique.
+The operator socket accepts UID 0 only. The optional workload socket accepts one
+configured non-root broker UID and requires a short-lived signed work order for
+every request.
 
-A useful report includes:
+The trusted computing base includes:
 
-- the commit and runsc versions;
-- host kernel, architecture, and cgroup configuration;
-- the smallest reproducing topology or artifact;
-- the security boundary that was crossed;
-- observed cleanup and host-resource state; and
-- whether the behavior reproduces after a clean worker restart.
+- the worker operator and host kernel;
+- `sandboxd`, its configuration, signer, and local broker;
+- containerd, runsc, and the required host isolation tools;
+- the worker state and artifact stores; and
+- work-order and artifact master keys.
 
-## Security model
+Topology documents, OCI images, guest arguments and environment, workload
+requests, guest network traffic, filesystem activity, and checkpoint-time
+process state are treated as untrusted.
 
-The supported model has a trusted worker operator, root-owned daemon, root-only
-operator Unix socket, trusted local toolchain, and untrusted guest code inside
-gVisor. An optional workload socket accepts one configured broker UID and
-requires a signed, short-lived, operation-bound work order. Tenant clients
-authenticate to a separate control-plane service and never connect directly to
-the daemon. Guest inputs include topology values, OCI image contents,
-arguments, environment variables, filesystem activity, network traffic inside
-the sandbox, and checkpoint-time process state.
+## Enforced controls
 
-The worker verifies local peer credentials, work-order integrity and expiry,
-durable nonce replay state, resource ceilings, tenant/workspace ownership, and
-assignment epochs. Tenant-visible state is scoped before lookup. The signer and
-configured broker are trusted; this repository does not implement their
-tenant-facing identity or policy layer. The local containerd daemon,
-snapshotter, and `ctr` client participate in image preparation and belong to
-the trusted operator boundary. The loop driver, ext4 implementation, overlayfs,
-`losetup`, `fsfreeze`, `mkfs.ext4`, and the local volume provider join that
-trusted host boundary when writable roots or named volumes are enabled. OCI
-registries and their transport remain outside the worker
-boundary, so every admitted descriptor and blob is verified against the locked
-digest and size.
+The worker enforces:
 
-External guest networking is default-deny. A signed operation digest approves
-the exact sandbox-wide DNS, egress, and ingress policy in the topology lock.
-Host nftables state prevents a guest from bypassing the tenant-scoped resolver
-or policy proxy, and recovery records bind the nftables table, bridge, namespace,
-and runtime identities together for crash cleanup. HTTP egress never accepts IP
-literals or protected address resolutions. Restricted TCP CIDRs are a stronger
-operator grant and must not be issued from untrusted tenant input without an
-independent policy decision. Ingress credentials are secrets and status output
-containing them must remain within the owning tenant/workspace scope.
+- one gVisor isolation boundary per sandbox;
+- host namespace and cgroup v2 containment;
+- digest-pinned image admission with bounded archive extraction;
+- read-only image roots unless a quota-backed writable root is authorized;
+- typed volumes without tenant-supplied host paths;
+- default-deny networking with signed DNS, egress, and ingress policy;
+- tenant and workspace scoping before state lookup;
+- signed resource ceilings and operation digests;
+- durable replay protection and assignment fencing;
+- bounded subprocess, transport, output, and cleanup operations; and
+- encrypted, authenticated snapshots with conditional publication and
+  restore-time compatibility checks.
 
-Snapshot objects are tenant/workspace-scoped, content-addressed, encrypted with
-tenant-derived envelope keys, and published before their immutable manifest
-reference. Stop-and-move records a durable local fence before checkpointing,
-publishes a transfer grant only after source cleanup, and binds a destination
-claim to one worker and a newer assignment epoch. The current local provider
-still supports one worker only, so these records do not establish a distributed
-lease. The artifact master key remains an operator-managed secret.
+Unsupported topology and runtime input is rejected rather than silently
+downgraded.
 
-Writable roots are private, quota-backed overlays created only from
-provider-issued identities. Named-volume keys bind tenant, workspace, and
-volume ID; customer input contains only the guest destination and never a host
-path, loop device, mount option, or provider handle. Attachment ownership is
-written durably before guest mounting, and startup recovery clears stale
-attachments, removes ephemeral and secret state, and retains unattached
-persistent data. Read-only artifacts are verified against their digest from the
-provider-owned artifact root. Secret source files must be owner-only regular
-files, are copied into a dedicated tmpfs, and neither their bytes nor source
-paths enter topology locks or snapshot manifests.
+See [docs/architecture.md](docs/architecture.md) for the detailed isolation
+design and [docs/control-plane.md](docs/control-plane.md) for the authorization
+contract.
 
-Portable named-volume snapshots freeze the ext4 filesystem and publish the raw
-quota image as a typed encrypted artifact. A manifest declares the volume
-provider and portability; a nonportable or explicitly excluded named volume
-causes snapshot rejection. Writable-root snapshots currently reject hard links
-and non-overlay extended attributes. Raw bind mounts, arbitrary CSI plugins,
-key rotation, a remote conditional artifact provider, and cross-backend restore
-remain outside the supported boundary. An artifact being portable does not by
-itself prove that a distributed control plane transferred ownership safely.
+## Operational requirements
 
-## Security-relevant local checks
+- Protect the operator socket, signer, broker, work-order key, and artifact key.
+- Restrict OCI registry credentials and S3 principals to the required tenant,
+  bucket, and prefix scope.
+- Keep the kernel, runsc, containerd, and worker tools patched and validate
+  runtime updates with the worker integration suites.
+- For Kubernetes, keep `privileged: false` and grant only the capabilities,
+  delegated cgroup namespace, pod volumes, and optional devices required by the
+  enabled features. Do not expose Kubernetes node runtime paths.
+- Retain and rotate `audit.jsonl` according to the deployment's audit policy.
+- Keep ingress credentials and credential files out of logs and tenant-visible
+  state.
+- Issue `restricted_tcp` policy only after an independent authorization
+  decision.
+
+The local artifact provider supports same-worker restore. Cross-worker restore
+uses the S3-compatible provider with shared backend configuration, compatible
+workers, and matching runsc versions and runtime configuration.
+
+Tenant-facing identity, placement, and policy remain responsibilities of the
+surrounding control plane. Raw bind mounts, arbitrary CSI plugins, privileged
+containers, tenant-selected capabilities, host namespaces, cross-backend
+restore, and artifact-key rotation are not enabled by this release.
+
+## Security validation
+
+Every pull request runs Rust tests, dependency policy checks, CodeQL analysis,
+and a reproducible release build. The release process adds S3 conformance and
+gVisor lifecycle and snapshot runs on the validated worker cohort.
+
+Run the local security checks with:
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo audit
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo audit --deny warnings
 cargo deny check advisories licenses bans sources
+./tools/test-s3-artifacts.sh
 sudo ./examples/python-compose/run-local.sh
 sudo ./examples/python-compose/run-snapshot-local.sh
 ```
+
+## Report a vulnerability
+
+Use [GitHub private vulnerability reporting](https://github.com/runtrue/sandboxd/security/advisories/new).
+Do not open a public issue containing exploit details, tenant data, credentials,
+or a working escape technique.
+
+Include:
+
+- the sandboxd commit and runsc version;
+- host kernel, architecture, and cgroup configuration;
+- the smallest reproducing topology or artifact;
+- the boundary that was crossed;
+- remaining host resources after cleanup; and
+- whether the issue reproduces after a clean worker restart.
