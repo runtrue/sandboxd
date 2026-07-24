@@ -270,6 +270,15 @@ pub enum PlacementState {
     Expired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementWorkerState {
+    Clean,
+    Leased,
+    Draining,
+    Quarantined,
+    Consumed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementRecord {
     pub request_id: String,
@@ -743,6 +752,105 @@ impl PostgresPlacementStore {
         Ok(())
     }
 
+    pub async fn drain_workers_if_clean(
+        &self,
+        worker_ids: &[WorkerId],
+    ) -> Result<bool, PlacementStoreError> {
+        if worker_ids.is_empty() || worker_ids.len() > 1_024 {
+            return Err(PlacementStoreError::Invalid(
+                "worker drain set is invalid".to_owned(),
+            ));
+        }
+        let mut identities = worker_ids
+            .iter()
+            .map(|worker| worker.as_str().to_owned())
+            .collect::<Vec<_>>();
+        identities.sort();
+        identities.dedup();
+        if identities.len() != worker_ids.len() {
+            return Err(PlacementStoreError::Invalid(
+                "worker drain set contains duplicates".to_owned(),
+            ));
+        }
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        transaction
+            .query_one("SELECT pg_advisory_xact_lock($1)", &[&QUEUE_LOCK])
+            .await?;
+        let rows = transaction
+            .query(
+                "SELECT worker_id, state FROM sandboxd_placement.workers
+                 WHERE worker_id = ANY($1) FOR UPDATE",
+                &[&identities],
+            )
+            .await?;
+        if rows.len() != identities.len()
+            || rows
+                .iter()
+                .any(|row| row.get::<_, &str>("state") != "clean")
+        {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE sandboxd_placement.workers SET state = 'draining'
+                 WHERE worker_id = ANY($1) AND state = 'clean'",
+                &[&identities],
+            )
+            .await?;
+        if usize::try_from(updated).ok() != Some(identities.len()) {
+            return Err(PlacementStoreError::Invalid(
+                "worker drain set changed concurrently".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn worker_states(
+        &self,
+        worker_ids: &[WorkerId],
+    ) -> Result<Vec<(WorkerId, PlacementWorkerState)>, PlacementStoreError> {
+        if worker_ids.is_empty() || worker_ids.len() > 1_024 {
+            return Err(PlacementStoreError::Invalid(
+                "worker state query is invalid".to_owned(),
+            ));
+        }
+        let identities = worker_ids
+            .iter()
+            .map(|worker| worker.as_str().to_owned())
+            .collect::<Vec<_>>();
+        self.client
+            .lock()
+            .await
+            .query(
+                "SELECT worker_id, state FROM sandboxd_placement.workers
+                 WHERE worker_id = ANY($1) ORDER BY worker_id",
+                &[&identities],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                let worker = WorkerId::parse(row.get::<_, String>("worker_id"))
+                    .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+                let state = match row.get::<_, &str>("state") {
+                    "clean" => PlacementWorkerState::Clean,
+                    "leased" => PlacementWorkerState::Leased,
+                    "draining" => PlacementWorkerState::Draining,
+                    "quarantined" => PlacementWorkerState::Quarantined,
+                    "consumed" => PlacementWorkerState::Consumed,
+                    value => {
+                        return Err(PlacementStoreError::Invalid(format!(
+                            "unknown worker state `{value}`"
+                        )))
+                    }
+                };
+                Ok((worker, state))
+            })
+            .collect()
+    }
+
     pub async fn quarantine_worker(
         &self,
         worker_id: &WorkerId,
@@ -900,7 +1008,7 @@ impl PostgresPlacementStore {
             .and_then(|row| row.get::<_, Option<i64>>("idle_since_unix_ms"))
             .map(to_u64)
             .transpose()?;
-        let idle_since_unix_ms = if queued_assignments == 0 {
+        let idle_since_unix_ms = if queued_assignments == 0 && assigned == 0 {
             previous_idle.or(Some(now_unix_ms))
         } else {
             None

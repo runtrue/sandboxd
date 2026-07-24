@@ -161,6 +161,9 @@ pub(crate) struct ServeArgs {
     pub(crate) io_timeout_seconds: u64,
     #[arg(long, default_value = "worker-local")]
     pub(crate) worker_id: String,
+    /// Downward-API environment variable containing the Pod UID.
+    #[arg(long)]
+    pub(crate) worker_pod_uid_env: Option<String>,
     /// Operator-reviewed aggregate sandbox budget enforced by the worker Pod.
     #[arg(long, default_value = "standard-v1")]
     pub(crate) resource_shape: String,

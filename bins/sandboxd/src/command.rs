@@ -18,6 +18,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 maximum_connections,
                 io_timeout_seconds,
                 worker_id,
+                worker_pod_uid_env,
                 resource_shape,
                 sandbox_cpu_millis,
                 sandbox_memory_bytes,
@@ -104,6 +105,11 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                     }
                 },
             };
+            let worker_id = worker_pod_uid_env
+                .as_deref()
+                .map(worker_id_from_pod_uid_environment)
+                .transpose()?
+                .unwrap_or(worker_id);
             match server::serve(server::ServerConfig {
                 operator_socket: socket,
                 workload_socket,
@@ -264,6 +270,32 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
         ),
         Command::Shutdown { socket } => client::send(&socket, Operation::Shutdown),
     }
+}
+
+fn worker_id_from_pod_uid_environment(name: &str) -> Result<String, SandboxError> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(SandboxError::Runtime(
+            "Pod UID environment variable name is invalid".to_owned(),
+        ));
+    }
+    let uid = std::env::var(name)
+        .map_err(|_| SandboxError::Runtime("Pod UID environment variable is unset".to_owned()))?;
+    if uid.is_empty()
+        || uid.len() > 48
+        || !uid
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(SandboxError::Runtime(
+            "Pod UID environment variable is invalid".to_owned(),
+        ));
+    }
+    Ok(format!("worker-{uid}"))
 }
 
 fn validate_timeout(timeout_seconds: u64) -> Result<(), SandboxError> {

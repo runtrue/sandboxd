@@ -4,6 +4,20 @@
     {
       "name": "fixed-standard-warm",
       "kubernetes_stateful_set": "sandboxd-fixed-standard-warm",
+      "placement_topology": "fixed-v1",
+      "resource_ceilings": {
+        "allowed_guest_profiles": [{"name": "strict", "version": 1}],
+        "maximum_services": 8,
+        "maximum_timeout_ms": 30000,
+        "memory_bytes_per_service": 1073741824,
+        "cpu_per_service_millis": 1000,
+        "pids_per_service": 256,
+        "tmpfs_bytes": 67108864,
+        "writable_root_bytes_per_service": 67108864,
+        "maximum_volumes": 8,
+        "maximum_volume_bytes": 536870912,
+        "maximum_output_bytes": 1048576
+      },
       "key": {
         "attested_root_cohort": "fixed-rootset-20260724",
         "resource_shape": "standard-v1",
@@ -28,14 +42,28 @@
     {
       "name": "reviewed-cold-fallback",
       "kubernetes_stateful_set": "sandboxd-reviewed-cold",
+      "placement_topology": "fixed-v1",
+      "resource_ceilings": {
+        "allowed_guest_profiles": [{"name": "strict", "version": 1}],
+        "maximum_services": 8,
+        "maximum_timeout_ms": 30000,
+        "memory_bytes_per_service": 1073741824,
+        "cpu_per_service_millis": 1000,
+        "pids_per_service": 256,
+        "tmpfs_bytes": 67108864,
+        "writable_root_bytes_per_service": 67108864,
+        "maximum_volumes": 8,
+        "maximum_volume_bytes": 536870912,
+        "maximum_output_bytes": 1048576
+      },
       "key": {
-        "attested_root_cohort": "prepared-rootset-20260724",
+        "attested_root_cohort": "fixed-rootset-20260724",
         "resource_shape": "cold-standard-v1",
         "guest_profile": {
           "name": "strict",
           "version": 1
         },
-        "runtime_compatibility_cohort": "runsc-20260714-prepared",
+        "runtime_compatibility_cohort": "runsc-20260714-fixed",
         "network_tier": "loopback",
         "storage_tier": "ephemeral"
       },

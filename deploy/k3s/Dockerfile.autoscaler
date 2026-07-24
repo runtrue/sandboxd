@@ -1,0 +1,24 @@
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb AS runtime-libs
+
+FROM runtime-libs AS autoscaler-binary
+COPY target/release/runtrue-sandbox-autoscaler /autoscaler
+RUN chmod 0755 /autoscaler \
+    && install -d -m 0750 \
+        /image/run/config/worker-pools \
+        /image/run/secrets/database \
+    && chown -R 65531:65531 /image/run
+
+FROM scratch
+
+ARG SANDBOXD_BUILD_ID=local
+LABEL org.opencontainers.image.revision="${SANDBOXD_BUILD_ID}"
+
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libm.so.6 /lib/x86_64-linux-gnu/libm.so.6
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
+COPY --from=runtime-libs /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+COPY --from=autoscaler-binary /autoscaler /usr/local/bin/runtrue-sandbox-autoscaler
+COPY --from=autoscaler-binary /image/run /run
+
+USER 65531:65531
+ENTRYPOINT ["/usr/local/bin/runtrue-sandbox-autoscaler"]

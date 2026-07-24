@@ -397,6 +397,16 @@ async fn exercise(url: &str) {
             .drain_clean_workers,
         2
     );
+    assert!(replica_b
+        .drain_workers_if_clean(&[idle_a.worker_id.clone(), idle_b.worker_id.clone()])
+        .await
+        .expect("atomic clean drain"));
+    assert!(replica_b
+        .worker_states(&[idle_a.worker_id.clone(), idle_b.worker_id.clone()])
+        .await
+        .expect("draining state")
+        .iter()
+        .all(|(_, state)| *state == runtrue_sandbox_placement::PlacementWorkerState::Draining));
 
     let mut pool_bound = submission(
         "tenant-pool-bound",
@@ -433,6 +443,10 @@ async fn exercise(url: &str) {
         .await
         .expect("pool assignment")
         .expect("matching pool demand");
+    assert!(!replica_b
+        .drain_workers_if_clean(&[matching_pool.worker_id])
+        .await
+        .expect("active worker is not drainable"));
     assert_eq!(
         pool_assignment.identity.tenant_id,
         pool_bound.work.tenant_id

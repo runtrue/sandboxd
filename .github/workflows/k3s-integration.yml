@@ -13,6 +13,7 @@ on:
       - "tools/test-k3s-fixed-runtime.sh"
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
+      - "tools/test-k3s-autoscaling.sh"
   push:
     branches: [main]
     paths:
@@ -26,6 +27,7 @@ on:
       - "tools/test-k3s-fixed-runtime.sh"
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
+      - "tools/test-k3s-autoscaling.sh"
   schedule:
     - cron: "41 3 * * 2"
   workflow_dispatch:
@@ -97,6 +99,11 @@ jobs:
             --build-arg "SANDBOXD_BUILD_ID=$build_id" \
             --tag sandbox-broker:local \
             --file deploy/k3s/Dockerfile.broker \
+            .
+          docker build \
+            --build-arg "SANDBOXD_BUILD_ID=$build_id" \
+            --tag sandbox-autoscaler:local \
+            --file deploy/k3s/Dockerfile.autoscaler \
             .
           docker pull postgres:17.5-alpine@sha256:ec68817297c5984a00c85c9e3bbd88079d0217284f1a3f0525603a6f9b883916
           docker tag \
@@ -183,6 +190,7 @@ jobs:
             sandboxd-fixed-runtime:local \
             sandbox-gateway:local \
             sandbox-broker:local \
+            sandbox-autoscaler:local \
             postgres:17.5-alpine \
             | sudo /usr/local/bin/k3s ctr images import -
 
@@ -202,12 +210,19 @@ jobs:
           bash tools/test-k3s-brokered-runtime.sh \
             | tee k3s-diagnostics/brokered-runtime.log
 
+      - name: Run warm-pool autoscaling conformance
+        env:
+          AUTOSCALE_DIAGNOSTICS_DIR: k3s-diagnostics
+        run: |
+          bash tools/test-k3s-autoscaling.sh \
+            | tee k3s-diagnostics/autoscaling.log
+
       - name: Collect diagnostics
         if: always()
         run: |
           mkdir -p k3s-diagnostics
           kubectl get \
-            namespace,serviceaccount,deployment,replicaset,pod,networkpolicy,service,ingress \
+            namespace,serviceaccount,role,rolebinding,deployment,statefulset,replicaset,pod,networkpolicy,service,ingress \
             --all-namespaces \
             -o wide >k3s-diagnostics/resources.txt 2>&1 || true
           kubectl describe namespace sandboxd-system \
@@ -234,6 +249,7 @@ jobs:
             | tee k3s-diagnostics/listeners.txt >/dev/null || true
           docker image inspect \
             sandboxd-fixed-runtime:local sandbox-gateway:local sandbox-broker:local \
+            sandbox-autoscaler:local \
             >k3s-diagnostics/image.json 2>&1 || true
 
       - name: Upload diagnostics
