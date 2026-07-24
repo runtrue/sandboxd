@@ -2,7 +2,12 @@ FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b706
 
 FROM runtime-libs AS gateway-binary
 COPY target/release/runtrue-sandbox-gateway /gateway
-RUN chmod 0755 /gateway
+RUN chmod 0755 /gateway \
+    && install -d -m 0750 \
+        /image/run/secrets/auth \
+        /image/run/secrets/database \
+        /image/run/secrets/work-order \
+    && chown -R 65532:65532 /image/run
 
 FROM scratch
 
@@ -14,6 +19,7 @@ COPY --from=runtime-libs /lib/x86_64-linux-gnu/libm.so.6 /lib/x86_64-linux-gnu/l
 COPY --from=runtime-libs /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
 COPY --from=runtime-libs /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
 COPY --from=gateway-binary /gateway /usr/local/bin/runtrue-sandbox-gateway
+COPY --from=gateway-binary /image/run /run
 
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/runtrue-sandbox-gateway"]

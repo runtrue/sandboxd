@@ -8,6 +8,7 @@ pub(crate) struct ServerConfig {
     pub(crate) operator_socket: PathBuf,
     pub(crate) workload_socket: Option<PathBuf>,
     pub(crate) broker_uid: Option<u32>,
+    pub(crate) broker_gid: Option<u32>,
     pub(crate) work_order_key: Option<PathBuf>,
     pub(crate) worker_id: WorkerId,
     pub(crate) resource_shape: WorkerResourceShape,
@@ -55,6 +56,16 @@ impl ServerConfig {
         if self.broker_uid == Some(0) {
             return Err(SandboxError::Runtime(
                 "workload broker UID must be a non-root identity".to_owned(),
+            ));
+        }
+        if self.broker_gid == Some(0) {
+            return Err(SandboxError::Runtime(
+                "workload broker GID must be a non-root identity".to_owned(),
+            ));
+        }
+        if self.broker_gid.is_some() && self.workload_socket.is_none() {
+            return Err(SandboxError::Runtime(
+                "workload broker GID requires a workload socket".to_owned(),
             ));
         }
         if self.workload_socket.as_ref() == Some(&self.operator_socket) {
@@ -122,6 +133,7 @@ mod tests {
             operator_socket: PathBuf::from("/run/sandboxd/operator.sock"),
             workload_socket: Some(PathBuf::from("/run/sandboxd/workload.sock")),
             broker_uid: Some(991),
+            broker_gid: None,
             work_order_key: Some(PathBuf::from("/etc/sandboxd/work-order.key")),
             worker_id: WorkerId::parse("worker-a").expect("worker ID"),
             resource_shape: WorkerResourceShape {
@@ -172,6 +184,14 @@ mod tests {
         let mut incomplete = config();
         incomplete.work_order_key = None;
         assert!(incomplete.validate().is_err());
+
+        let mut root_group = config();
+        root_group.broker_gid = Some(0);
+        assert!(root_group.validate().is_err());
+
+        let mut shared_group = config();
+        shared_group.broker_gid = Some(991);
+        shared_group.validate().expect("shared broker group");
     }
 
     #[test]

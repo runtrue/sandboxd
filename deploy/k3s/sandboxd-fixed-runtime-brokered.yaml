@@ -1,0 +1,320 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandboxd-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandboxd-brokered
+  namespace: sandboxd-system
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-control-plane
+  namespace: sandboxd-system
+data:
+  gateway-address: sandbox-gateway.sandboxd-system.svc:8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandboxd-brokered-default-deny
+  namespace: sandboxd-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandboxd-fixed-runtime-brokered
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandboxd-brokered-control-plane
+  namespace: sandboxd-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandboxd-fixed-runtime-brokered
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-gateway
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-fixed-runtime-brokered
+  namespace: sandboxd-system
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandboxd-fixed-runtime-brokered
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandboxd-fixed-runtime-brokered
+        runtrue.io/resource-shape: standard-v1
+        runtrue.io/worker-broker: "true"
+        runtrue.io/worker-registration-client: "true"
+    spec:
+      hostUsers: false
+      restartPolicy: Always
+      nodeSelector:
+        runtrue.io/sandbox-node: "true"
+      tolerations:
+        - key: runtrue.io/sandbox
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      serviceAccountName: sandboxd-brokered
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 65533
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: broker
+          restartPolicy: Always
+          image: sandbox-broker:local
+          imagePullPolicy: Never
+          args:
+            - --listen
+            - 0.0.0.0:8081
+            - --allow-non-loopback-http
+            - --workload-socket
+            - /run/runtrue-sandboxd/workload.sock
+            - --registration-config
+            - /run/secrets/worker/registration.json
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SANDBOX_GATEWAY_ADDRESS
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-control-plane
+                  key: gateway-address
+          ports:
+            - name: broker
+              containerPort: 8081
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65533
+            runAsGroup: 65533
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+            appArmorProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: broker
+            periodSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: broker
+            periodSeconds: 10
+          volumeMounts:
+            - name: sandboxd-runtime
+              mountPath: /run/runtrue-sandboxd
+            - name: worker-registration
+              mountPath: /run/secrets/worker/registration.json
+              subPath: registration.json
+              readOnly: true
+      containers:
+        - name: sandboxd
+          restartPolicy: Never
+          image: sandboxd-fixed-runtime:local
+          imagePullPolicy: Never
+          command:
+            - /usr/local/bin/runtrue-sandboxd
+          args:
+            - serve
+            - --worker-id
+            - worker-fixed-a
+            - --resource-shape
+            - standard-v1
+            - --sandbox-cpu-millis
+            - "1000"
+            - --sandbox-memory-bytes
+            - "1073741824"
+            - --sandbox-pids
+            - "256"
+            - --sandbox-ephemeral-storage-bytes
+            - "2147483648"
+            - --maximum-services
+            - "8"
+            - --socket
+            - /run/runtrue-sandboxd-operator/control.sock
+            - --workload-socket
+            - /run/runtrue-sandboxd/workload.sock
+            - --broker-uid
+            - "65533"
+            - --broker-gid
+            - "65533"
+            - --work-order-key
+            - /run/secrets/work-order/key
+            - --state-root
+            - /var/lib/runtrue-sandboxd/state
+            - --image-store
+            - /var/lib/runtrue-sandboxd/images
+            - --fixed-rootfs
+            - /opt/runtrue-sandboxd/fixed-rootfs
+            - --fixed-topology-lock
+            - /opt/runtrue-sandboxd/fixed-runtime.lock.json
+            - --fixed-rootfs-digest
+            - sha256:c73e49867e5b68681c2222e1e7b60aca9218d5a83ded507226f89438cea40db1
+            - --fixed-rootfs-entries
+            - "5621"
+            - --fixed-rootfs-bytes
+            - "118293769"
+            - --network-mode
+            - loopback
+            - --cgroup-mode
+            - external
+            - --runsc
+            - /usr/local/bin/runsc
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              drop: [ALL]
+              add:
+                - SETGID
+                - SETUID
+                - SYS_ADMIN
+                - SYS_CHROOT
+            seccompProfile:
+              type: Unconfined
+            appArmorProfile:
+              type: Unconfined
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 4Gi
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/runtrue-sandboxd
+                - ready
+                - --socket
+                - /run/runtrue-sandboxd-operator/control.sock
+            periodSeconds: 5
+          startupProbe:
+            exec:
+              command:
+                - /usr/local/bin/runtrue-sandboxd
+                - ping
+                - --socket
+                - /run/runtrue-sandboxd-operator/control.sock
+            periodSeconds: 2
+            failureThreshold: 90
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/local/bin/runtrue-sandboxd
+                  - shutdown
+                  - --socket
+                  - /run/runtrue-sandboxd-operator/control.sock
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/runtrue-sandboxd
+                - ping
+                - --socket
+                - /run/runtrue-sandboxd-operator/control.sock
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: sandboxd-tmp
+              mountPath: /tmp
+            - name: sandboxd-runtime
+              mountPath: /run/runtrue-sandboxd
+            - name: sandboxd-operator-runtime
+              mountPath: /run/runtrue-sandboxd-operator
+            - name: sandboxd-state
+              mountPath: /var/lib/runtrue-sandboxd
+            - name: work-order-key
+              mountPath: /run/secrets/work-order/key
+              subPath: key
+              readOnly: true
+      volumes:
+        - name: sandboxd-tmp
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: sandboxd-runtime
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: sandboxd-operator-runtime
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: sandboxd-state
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: worker-registration
+          secret:
+            secretName: sandbox-worker-auth
+            defaultMode: 0440
+        - name: work-order-key
+          secret:
+            secretName: sandbox-work-order
+            defaultMode: 0440

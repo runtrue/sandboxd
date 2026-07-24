@@ -1,12 +1,26 @@
-use runtrue_sandbox_core::{SignedWorkOrder, SnapshotMode, WorkOrderOperation, WORK_ORDER_VERSION};
+use runtrue_sandbox_core::{
+    ResourceCeilings, SignedWorkOrder, SnapshotMode, WorkOrderOperation, WorkerId,
+    WORK_ORDER_VERSION,
+};
 use runtrue_sandbox_oci::TopologyLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const LEGACY_OPERATOR_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerAdvertisement {
+    pub worker_id: WorkerId,
+    pub topology: String,
+    pub resource_shape: String,
+    pub compatibility_cohort: String,
+    pub broker_address: SocketAddr,
+    pub resource_ceilings: ResourceCeilings,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

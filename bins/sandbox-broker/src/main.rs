@@ -1,6 +1,7 @@
 mod broker;
 mod cli;
 mod protocol;
+mod registration;
 
 use clap::Parser as _;
 

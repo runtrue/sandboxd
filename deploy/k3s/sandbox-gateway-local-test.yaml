@@ -1,0 +1,242 @@
+# Integration-only control plane. PostgreSQL is a native sidecar reachable only
+# on Pod loopback; production uses sandbox-gateway.yaml and external HA TLS.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-gateway-local-test
+  namespace: sandboxd-system
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-gateway
+  namespace: sandboxd-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-gateway
+        app.kubernetes.io/part-of: sandbox-gateway
+    spec:
+      serviceAccountName: sandbox-gateway-local-test
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: postgres
+          restartPolicy: Always
+          image: postgres:17.5-alpine@sha256:ec68817297c5984a00c85c9e3bbd88079d0217284f1a3f0525603a6f9b883916
+          env:
+            - name: POSTGRES_USER
+              value: sandboxd
+            - name: POSTGRES_PASSWORD
+              value: sandboxd
+            - name: POSTGRES_DB
+              value: sandboxd_placement_test
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - sandboxd
+                - -d
+                - sandboxd_placement_test
+            periodSeconds: 1
+            failureThreshold: 60
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+        - name: migrate
+          image: sandbox-gateway:local
+          imagePullPolicy: Never
+          args:
+            - migrate
+            - --database-url-file
+            - /run/secrets/database/url
+            - --database-insecure-local
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: database-url
+              mountPath: /run/secrets/database/url
+              subPath: url
+              readOnly: true
+      containers:
+        - name: gateway
+          image: sandbox-gateway:local
+          imagePullPolicy: Never
+          args:
+            - serve
+            - --database-url-file
+            - /run/secrets/database/url
+            - --database-insecure-local
+            - --auth-policy
+            - /run/secrets/auth/policy.json
+            - --worker-auth-policy
+            - /run/secrets/auth/worker-policy.json
+            - --work-order-key
+            - /run/secrets/work-order/key
+            - --listen
+            - 0.0.0.0:8080
+            - --allow-non-loopback-http
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+            appArmorProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: database-url
+              mountPath: /run/secrets/database/url
+              subPath: url
+              readOnly: true
+            - name: gateway-auth
+              mountPath: /run/secrets/auth/policy.json
+              subPath: policy.json
+              readOnly: true
+            - name: gateway-auth
+              mountPath: /run/secrets/auth/worker-policy.json
+              subPath: worker-policy.json
+              readOnly: true
+            - name: work-order-key
+              mountPath: /run/secrets/work-order/key
+              subPath: key
+              readOnly: true
+      volumes:
+        - name: postgres-data
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: database-url
+          secret:
+            secretName: sandbox-gateway-local-database
+            defaultMode: 0440
+        - name: gateway-auth
+          secret:
+            secretName: sandbox-gateway-auth
+            defaultMode: 0440
+        - name: work-order-key
+          secret:
+            secretName: sandbox-work-order
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-gateway
+  namespace: sandboxd-system
+spec:
+  selector:
+    app.kubernetes.io/name: sandbox-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-gateway-local-test
+  namespace: sandboxd-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              runtrue.io/worker-registration-client: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              runtrue.io/gateway-client: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              runtrue.io/worker-broker: "true"
+      ports:
+        - protocol: TCP
+          port: 8081
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

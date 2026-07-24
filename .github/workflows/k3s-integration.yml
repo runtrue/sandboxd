@@ -12,6 +12,7 @@ on:
       - "deploy/k3s/**"
       - "tools/test-k3s-fixed-runtime.sh"
       - "tools/test-k3s-resource-limits.sh"
+      - "tools/test-k3s-brokered-runtime.sh"
   push:
     branches: [main]
     paths:
@@ -24,6 +25,7 @@ on:
       - "deploy/k3s/**"
       - "tools/test-k3s-fixed-runtime.sh"
       - "tools/test-k3s-resource-limits.sh"
+      - "tools/test-k3s-brokered-runtime.sh"
   schedule:
     - cron: "41 3 * * 2"
   workflow_dispatch:
@@ -45,7 +47,7 @@ jobs:
   fixed-runtime:
     name: Fixed runtime in local-only k3s
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,6 +85,24 @@ jobs:
             --file deploy/k3s/Dockerfile.fixed-runtime \
             .
 
+      - name: Build control-plane images
+        run: |
+          build_id=$(git rev-parse HEAD)
+          docker build \
+            --build-arg "SANDBOXD_BUILD_ID=$build_id" \
+            --tag sandbox-gateway:local \
+            --file deploy/k3s/Dockerfile.gateway \
+            .
+          docker build \
+            --build-arg "SANDBOXD_BUILD_ID=$build_id" \
+            --tag sandbox-broker:local \
+            --file deploy/k3s/Dockerfile.broker \
+            .
+          docker pull postgres:17.5-alpine@sha256:ec68817297c5984a00c85c9e3bbd88079d0217284f1a3f0525603a6f9b883916
+          docker tag \
+            postgres@sha256:ec68817297c5984a00c85c9e3bbd88079d0217284f1a3f0525603a6f9b883916 \
+            postgres:17.5-alpine
+
       - name: Install checksum-pinned k3s
         run: |
           encoded_version=${K3S_VERSION//+/%2B}
@@ -113,7 +133,6 @@ jobs:
             - traefik
             - servicelb
             - metrics-server
-            - coredns
             - local-storage
           kubelet-arg:
             - pod-max-pids=256
@@ -158,8 +177,14 @@ jobs:
           node=$(kubectl get node -o jsonpath='{.items[0].metadata.name}')
           kubectl label node "$node" runtrue.io/sandbox-node=true --overwrite
 
-      - name: Import fixed-runtime image
-        run: docker save sandboxd-fixed-runtime:local | sudo /usr/local/bin/k3s ctr images import -
+      - name: Import integration images
+        run: |
+          docker save \
+            sandboxd-fixed-runtime:local \
+            sandbox-gateway:local \
+            sandbox-broker:local \
+            postgres:17.5-alpine \
+            | sudo /usr/local/bin/k3s ctr images import -
 
       - name: Run k3s fixed-runtime conformance
         run: |
@@ -171,6 +196,11 @@ jobs:
         run: |
           bash tools/test-k3s-resource-limits.sh \
             | tee k3s-diagnostics/resource-limits.log
+
+      - name: Run brokered control-plane conformance
+        run: |
+          bash tools/test-k3s-brokered-runtime.sh \
+            | tee k3s-diagnostics/brokered-runtime.log
 
       - name: Collect diagnostics
         if: always()
@@ -188,13 +218,22 @@ jobs:
             -l app.kubernetes.io/name=sandboxd-fixed-runtime \
             --all-containers \
             --prefix >k3s-diagnostics/sandboxd.log 2>&1 || true
+          kubectl logs -n sandboxd-system \
+            -l app.kubernetes.io/name=sandboxd-fixed-runtime-brokered \
+            --all-containers \
+            --prefix >k3s-diagnostics/brokered-worker.log 2>&1 || true
+          kubectl logs -n sandboxd-system \
+            -l app.kubernetes.io/name=sandbox-gateway \
+            --all-containers \
+            --prefix >k3s-diagnostics/gateway.log 2>&1 || true
           sudo journalctl -u sandboxd-ci-k3s.service --no-pager 2>&1 \
             | tee k3s-diagnostics/k3s.log >/dev/null || true
           sudo iptables-save 2>&1 \
             | tee k3s-diagnostics/iptables.txt >/dev/null || true
           sudo ss -lntp 2>&1 \
             | tee k3s-diagnostics/listeners.txt >/dev/null || true
-          docker image inspect sandboxd-fixed-runtime:local \
+          docker image inspect \
+            sandboxd-fixed-runtime:local sandbox-gateway:local sandbox-broker:local \
             >k3s-diagnostics/image.json 2>&1 || true
 
       - name: Upload diagnostics

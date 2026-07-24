@@ -12,6 +12,7 @@ matrix is in [`SECURITY-PROFILES.md`](SECURITY-PROFILES.md).
 | Profile | Manifest | Image build | Intended use |
 | --- | --- | --- | --- |
 | Fixed runtime | `sandboxd-fixed-runtime.yaml` | `Dockerfile.fixed-runtime` | Recommended minimum-authority profile. One attested, pre-expanded rootfs; internal loopback only; pod-level resource limits. |
+| Brokered fixed runtime | `sandboxd-fixed-runtime-brokered.yaml` | `Dockerfile.fixed-runtime` + `Dockerfile.broker` | Fixed worker plus a capability-free native broker sidecar, signed workload socket, authenticated registration, and default-deny control-plane routing. |
 | Dynamic runtime | `sandboxd-dynamic-runtime.yaml` | `Dockerfile.host-integrated` | Private containerd in the worker container for arbitrary pinned OCI images. No host socket, path, device, or namespace. |
 | Host integrated | `sandboxd-host-integrated.yaml` | `Dockerfile.host-integrated` | Compatibility profile for features implemented with host containerd, loop devices, mounts, networking, and cgroups. Requires dedicated trusted nodes. |
 
@@ -36,11 +37,27 @@ or permit cleartext ingress directly to the Pod listener.
 a scratch image. The broker runs with a read-only root filesystem, no
 capabilities, no privilege escalation, no service-account token, and only the
 shared workload-socket directory. It does not receive the work-order signing
-key or the operator socket. Non-loopback use requires authenticated mTLS
+key or the separate operator-socket `emptyDir`. The workload directory is
+pre-provisioned with broker GID 65533, so sandboxd creates a group-accessible
+socket without `CAP_CHOWN`; Unix peer credentials still require broker UID
+65533. Non-loopback use requires authenticated mTLS
 termination plus NetworkPolicy restricting ingress to the placement
-dispatcher. The brokered worker manifest is intentionally introduced with the
-dispatcher so its network route cannot exist without the corresponding
-identity and policy.
+dispatcher. The broker waits for sandboxd's workload socket before registering,
+then sends authenticated heartbeats. It is a Kubernetes native sidecar
+(`initContainers[*].restartPolicy: Always`), so kubelet terminates it when the
+single-use sandboxd container exits and the ReplicaSet can replace the whole
+Pod.
+
+The brokered manifest requires `sandbox-work-order` with key `key` and
+`sandbox-worker-auth` with key `registration.json`. The HMAC key is mounted
+only into sandboxd and the gateway. The registration credential is mounted only
+into the broker. Both mounts use `subPath` so the strict regular-file readers
+never follow Kubernetes Secret symlinks.
+
+The checked-in worker identity represents one statically provisioned slot.
+Production pools issue a unique worker identity and registration credential per
+Pod, then remove or rotate it when the slot is consumed. Do not share one
+credential across replicas. The warm-pool controller owns that lifecycle.
 
 The fixed and dynamic profiles use a Kubernetes user namespace
 (`hostUsers: false`), disable service-account token mounting, expose no Service
@@ -84,7 +101,6 @@ disable:
   - traefik
   - servicelb
   - metrics-server
-  - coredns
   - local-storage
 kubelet-arg:
   - pod-max-pids=256
@@ -199,6 +215,19 @@ kubectl exec -n sandboxd-system "$pod" -- \
 The result must have exit code zero, contain
 `"marker": "nested-container-passed"`, report kernel `4.19.0-gvisor`, and run
 as UID 65534.
+
+`tools/test-k3s-brokered-runtime.sh` exercises the network-facing path through
+an integration-only loopback PostgreSQL sidecar:
+
+```text
+tenant HTTP -> gateway -> durable assignment -> signed work order
+            -> broker UID 65533 -> workload Unix socket -> sandboxd -> gVisor
+```
+
+It requires a terminal result containing the nested gVisor kernel, UID 65534,
+and the fixture marker; repeats the tenant idempotency key; rejects an operator
+request at the broker; and inspects the live Pod to confirm the broker has no
+capabilities, signing key, operator socket, or service-account token.
 
 ## Runtime configuration
 

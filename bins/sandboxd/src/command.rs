@@ -13,6 +13,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 socket,
                 workload_socket,
                 broker_uid,
+                broker_gid,
                 work_order_key,
                 maximum_connections,
                 io_timeout_seconds,
@@ -107,6 +108,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 operator_socket: socket,
                 workload_socket,
                 broker_uid,
+                broker_gid,
                 work_order_key,
                 worker_id: runtrue_sandbox_core::WorkerId::parse(worker_id)
                     .map_err(|error| SandboxError::Runtime(error.to_string()))?,

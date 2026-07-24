@@ -150,6 +150,9 @@ pub(crate) struct ServeArgs {
     pub(crate) workload_socket: Option<PathBuf>,
     #[arg(long)]
     pub(crate) broker_uid: Option<u32>,
+    /// Shared socket GID. Avoids CAP_CHOWN when the runtime directory already has this group.
+    #[arg(long)]
+    pub(crate) broker_gid: Option<u32>,
     #[arg(long)]
     pub(crate) work_order_key: Option<PathBuf>,
     #[arg(long, default_value_t = 64)]
