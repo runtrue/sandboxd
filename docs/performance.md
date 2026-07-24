@@ -1,9 +1,5 @@
 # Performance testing
 
-Performance runs provide comparison data; they are not merge or release gates.
-GitHub-hosted results are noisy, so confirm important changes on the intended
-worker cohort.
-
 ## Pull request benchmark
 
 A collaborator with `write`, `maintain`, or `admin` permission can comment
