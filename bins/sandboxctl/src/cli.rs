@@ -54,6 +54,24 @@ pub(crate) enum Command {
         #[arg(long, default_value = "/usr/bin/tar")]
         tar: PathBuf,
     },
+    /// Sign a canonical image-preparation attestation with an owner-only Ed25519 key.
+    SignImageAttestation {
+        #[arg(long)]
+        attestation: PathBuf,
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Verify a signed image-preparation attestation.
+    VerifyImageAttestation {
+        #[arg(long)]
+        attestation: PathBuf,
+        #[arg(long)]
+        public_key: PathBuf,
+    },
     /// Run a locked topology through the embedded gVisor executor.
     Run {
         #[arg(long)]

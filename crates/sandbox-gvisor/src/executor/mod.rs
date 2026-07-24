@@ -576,6 +576,7 @@ fn start_services(
             sandbox_network.http_proxy.as_deref(),
             sandbox_network.no_proxy.as_deref(),
             lock.policy.tmpfs_bytes,
+            lock.policy.pids_per_service,
             &resources.service_volumes[service_name],
             role,
         )?;

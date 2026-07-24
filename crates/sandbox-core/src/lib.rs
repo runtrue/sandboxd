@@ -1,16 +1,28 @@
 mod assignment;
+mod attestation;
+mod autoscale;
 mod backend;
 mod capability;
 mod error;
 mod guest_profile;
 mod identity;
 mod lifecycle;
+mod placement;
 mod snapshot;
 mod specification;
 mod volume;
 mod work_order;
+mod worker;
 
 pub use assignment::AssignmentEpoch;
+pub use attestation::{
+    sign_image_attestation, verify_image_attestation, verify_trusted_image_attestation,
+    AttestationTrustPolicy, AttestedDescriptor, ImagePreparationAttestation,
+    SignedImageAttestation, IMAGE_ATTESTATION_VERSION,
+};
+pub use autoscale::{
+    reconcile as reconcile_worker_pool, AutoscaleDecision, PoolObservation, PoolPolicy,
+};
 pub use backend::{BackendDescriptor, BackendKind};
 pub use capability::{BackendCapabilities, SnapshotPortability};
 pub use error::CoreError;
@@ -23,6 +35,10 @@ pub use identity::{
     WorkspaceId,
 };
 pub use lifecycle::{Lifecycle, LifecycleState};
+pub use placement::{
+    BoundedFairQueue, LeaseBook, LeaseRejection, LeaseState, PlacementIdentity, PlacementLease,
+    QueueLimits, QueueRejection, QueuedWork,
+};
 pub use snapshot::{
     ArtifactDescriptor, ArtifactRole, RestoreRequirements, RestoreTarget, SnapshotManifest,
     SnapshotMode, SnapshotObject, SNAPSHOT_MANIFEST_VERSION,
@@ -37,4 +53,7 @@ pub use volume::{
 pub use work_order::{
     ResourceCeilings, SignedWorkOrder, WorkOrderClaims, WorkOrderOperation,
     MAXIMUM_WORK_ORDER_LIFETIME_MILLIS, WORK_ORDER_VERSION,
+};
+pub use worker::{
+    SandboxResourceDemand, WorkerResourceShape, WorkerState, WORKER_RESOURCE_SHAPE_VERSION,
 };

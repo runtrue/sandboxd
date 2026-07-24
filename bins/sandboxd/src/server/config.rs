@@ -1,4 +1,4 @@
-use runtrue_sandbox_core::{GuestProfile, WorkerId, STRICT_GUEST_PROFILE};
+use runtrue_sandbox_core::{GuestProfile, WorkerId, WorkerResourceShape, STRICT_GUEST_PROFILE};
 use runtrue_sandbox_gvisor::executor::ExecutorConfiguration;
 use runtrue_sandbox_oci::provider::FixedRootfsConfig;
 use runtrue_sandbox_oci::SandboxError;
@@ -10,6 +10,7 @@ pub(crate) struct ServerConfig {
     pub(crate) broker_uid: Option<u32>,
     pub(crate) work_order_key: Option<PathBuf>,
     pub(crate) worker_id: WorkerId,
+    pub(crate) resource_shape: WorkerResourceShape,
     pub(crate) guest_profiles: Vec<GuestProfile>,
     pub(crate) artifact_master_key: Option<PathBuf>,
     pub(crate) artifact_s3_bucket: Option<String>,
@@ -104,6 +105,9 @@ impl ServerConfig {
                     .to_owned(),
             ));
         }
+        self.resource_shape
+            .validate()
+            .map_err(|error| SandboxError::Runtime(error.to_string()))?;
         Ok(())
     }
 }
@@ -111,6 +115,7 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtrue_sandbox_core::WORKER_RESOURCE_SHAPE_VERSION;
 
     fn config() -> ServerConfig {
         ServerConfig {
@@ -119,6 +124,15 @@ mod tests {
             broker_uid: Some(991),
             work_order_key: Some(PathBuf::from("/etc/sandboxd/work-order.key")),
             worker_id: WorkerId::parse("worker-a").expect("worker ID"),
+            resource_shape: WorkerResourceShape {
+                schema_version: WORKER_RESOURCE_SHAPE_VERSION,
+                name: "standard-v1".to_owned(),
+                sandbox_cpu_millis: 1_000,
+                sandbox_memory_bytes: 1024 * 1024 * 1024,
+                sandbox_pids: 256,
+                sandbox_ephemeral_storage_bytes: 2 * 1024 * 1024 * 1024,
+                maximum_services: 8,
+            },
             guest_profiles: vec![GuestProfile::strict()],
             artifact_master_key: None,
             artifact_s3_bucket: None,

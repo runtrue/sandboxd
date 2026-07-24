@@ -1,0 +1,35 @@
+name: fixed-pids-conformance
+
+services:
+  stress:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import json, os, signal, time
+        children = []
+        try:
+            while True:
+                pid = os.fork()
+                if pid == 0:
+                    time.sleep(60)
+                    os._exit(0)
+                children.append(pid)
+        except OSError as error:
+            print(json.dumps({
+                "marker": "pid-ceiling-passed",
+                "children": len(children),
+                "errno": error.errno
+            }), flush=True)
+        finally:
+            for pid in children:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            for pid in children:
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+    read_only: true

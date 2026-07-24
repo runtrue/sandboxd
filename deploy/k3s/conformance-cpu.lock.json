@@ -1,0 +1,109 @@
+{
+  "schema_version": 6,
+  "topology_digest": "sha256:e3ca29a466d5020fd6571f4754136d98ac511e8bd230a79889ba4c6a65b22071",
+  "name": "fixed-cpu-conformance",
+  "services": {
+    "stress": {
+      "image": {
+        "source": "mirror.gcr.io/library/python:3.13-slim",
+        "exact_reference": "mirror.gcr.io/library/python@sha256:afe189875f1d2f9b45e287834fb9f2c273a5d59d354ae4050ab9affbf0a6ba06",
+        "image_id": "sha256:d2e817ebc2100d636b091f9156fc75ecf6d9f3bbbd0b69751baaf15c66e29399",
+        "index": {
+          "media_type": "application/vnd.oci.image.index.v1+json",
+          "digest": "sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91",
+          "size": 10373
+        },
+        "manifest": {
+          "media_type": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:afe189875f1d2f9b45e287834fb9f2c273a5d59d354ae4050ab9affbf0a6ba06",
+          "size": 1746
+        },
+        "config": {
+          "media_type": "application/vnd.oci.image.config.v1+json",
+          "digest": "sha256:d2e817ebc2100d636b091f9156fc75ecf6d9f3bbbd0b69751baaf15c66e29399",
+          "size": 5510
+        },
+        "layers": [
+          {
+            "media_type": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:062e450697faa5f02a3a74eba9864ee4d79bc9cfbd65769fc6cdff2c05c6a053",
+            "size": 29780905
+          },
+          {
+            "media_type": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:cd384decb92718ac6ca0ea7ee45412390d4550c2d90cb5ae66c1f5568c72256f",
+            "size": 1293290
+          },
+          {
+            "media_type": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:463aa101532a7abeef6c2a0f4bc54076803889e951e68c0ab73f8ce3c998e08e",
+            "size": 11887670
+          },
+          {
+            "media_type": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:4a633c382b0646fccf87ab8d848c41265bd33dffb57fc16216ad04da8ca69b0a",
+            "size": 249
+          }
+        ],
+        "operating_system": "linux",
+        "architecture": "amd64",
+        "variant": null
+      },
+      "command": [
+        "import os\nfor _ in range(8):\n    if os.fork() == 0:\n        value = 0\n        while True:\n            value = (value + 1) % 1000003\nos.wait()\n"
+      ],
+      "entrypoint": [
+        "/usr/local/bin/python3",
+        "-c"
+      ],
+      "environment": {},
+      "depends_on": {},
+      "healthcheck": null,
+      "networks": [
+        "default"
+      ],
+      "working_dir": "/work",
+      "root_filesystem": "read_only",
+      "volumes": []
+    }
+  },
+  "networks": {
+    "default": {
+      "internal": true,
+      "driver": "bridge"
+    }
+  },
+  "volumes": {},
+  "startup_order": [
+    "stress"
+  ],
+  "policy": {
+    "guest_profile": {
+      "name": "strict",
+      "version": 1
+    },
+    "runtime": "runsc",
+    "memory_bytes_per_service": 134217728,
+    "cpu_per_service_millis": 500,
+    "pids_per_service": 96,
+    "tmpfs_bytes": 16777216,
+    "writable_root_bytes_per_service": 67108864,
+    "maximum_output_bytes": 1048576,
+    "network": {
+      "profile": "none",
+      "http_rules": [],
+      "tcp_rules": [],
+      "dns": {
+        "maximum_queries": 256,
+        "maximum_response_bytes": 4096,
+        "maximum_total_bytes": 1048576
+      },
+      "limits": {
+        "maximum_connections": 32,
+        "maximum_bytes": 67108864,
+        "bandwidth_bytes_per_second": 8388608
+      },
+      "ingress": []
+    }
+  }
+}

@@ -10,6 +10,7 @@ use crate::{
     audit::AuditLog,
     authorization::{ConnectionEndpoint, WorkOrderVerifier},
     state::{Counters, DaemonState},
+    worker::WorkerSlot,
 };
 use limit::ConnectionLimiter;
 use nix::{
@@ -21,12 +22,12 @@ use runtrue_sandbox_artifact::{ArtifactLimits, ArtifactStore, LocalArtifactStore
 use runtrue_sandbox_artifact::{S3ArtifactConfig, S3ArtifactStore};
 use runtrue_sandbox_gvisor::executor;
 use runtrue_sandbox_oci::{
-    io_error,
+    compiler, io_error,
     provider::{
-        ContainerdImageProvider, ContainerdProviderConfig, ImageLimits, ImagePlatform,
-        WritableRootfsConfig,
+        ContainerdImageProvider, ContainerdProviderConfig, FixedRootfsConfig, ImageLimits,
+        ImagePlatform, ImmutableRootfs, WritableRootfsConfig,
     },
-    SandboxError,
+    SandboxError, TopologyLock,
 };
 use runtrue_sandbox_volume::{
     ArtifactVolumeStore, LocalSecretResolver, LocalVolumeConfig, LocalVolumeProvider,
@@ -37,8 +38,9 @@ pub(crate) const MAXIMUM_WRITABLE_ROOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    os::{fd::AsFd as _, unix::net::UnixListener},
+    os::{fd::AsFd as _, unix::fs::PermissionsExt as _, unix::net::UnixListener},
     path::PathBuf,
+    process::{Command, Stdio},
     sync::{atomic::Ordering, Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -58,7 +60,13 @@ impl Drop for BoundEndpoint {
     }
 }
 
-pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServeOutcome {
+    Shutdown,
+    Recycle,
+}
+
+pub(crate) fn serve(config: ServerConfig) -> Result<ServeOutcome, SandboxError> {
     socket::require_root()?;
     config.validate()?;
     socket::validate_paths(
@@ -72,9 +80,13 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
     let artifact_root = config.state_root.join("artifacts");
     let snapshot_staging_root = config.state_root.join("snapshot-staging");
     let control_root = config.state_root.join("control");
-    let recovery = executor::recover(&sandbox_root, &config.runsc, &config.ip, &config.nft)?;
+    let runsc = validate_runsc(&config.runsc)?;
+    let recovery = executor::recover(&sandbox_root, &runsc, &config.ip, &config.nft)?;
     let assignments = AssignmentLedger::open(&control_root)?;
     assignments.reconcile_after_recovery()?;
+    let Some(worker) = WorkerSlot::open(&control_root, config.resource_shape.clone())? else {
+        return Ok(ServeOutcome::Recycle);
+    };
     let audit = AuditLog::open(&control_root)?;
     let artifact_store: Arc<dyn ArtifactStore> = if let Some(bucket) = &config.artifact_s3_bucket {
         #[cfg(not(feature = "s3-artifacts"))]
@@ -130,24 +142,27 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         .as_deref()
         .map(|path| WorkOrderVerifier::from_key_file(path, &control_root))
         .transpose()?;
-    let image_provider = Arc::new(ContainerdImageProvider::new(ContainerdProviderConfig {
-        ctr_program: config.ctr,
-        address: config.containerd_address,
-        namespace: config.containerd_namespace,
-        snapshotter: config.snapshotter,
-        mount_root: config.image_store,
-        writable_rootfs: WritableRootfsConfig {
-            root: config.state_root.join("writable-roots"),
-            mkfs_ext4_program: config.mkfs_ext4.clone(),
-            losetup_program: config.losetup.clone(),
-            minimum_bytes: runtrue_sandbox_oci::provider::MINIMUM_WRITABLE_ROOT_BYTES,
-            maximum_bytes: MAXIMUM_WRITABLE_ROOT_BYTES,
-            operation_timeout: Duration::from_secs(60),
-        },
-        platform: ImagePlatform::parse(&config.image_platform)?,
-        limits: ImageLimits::default(),
-        fixed_rootfs: config.fixed_rootfs,
-    })?);
+    let fixed_rootfs = config.fixed_rootfs.clone();
+    let image_provider: Arc<dyn runtrue_sandbox_oci::provider::ImageProvider> =
+        Arc::new(ContainerdImageProvider::new(ContainerdProviderConfig {
+            ctr_program: config.ctr,
+            address: config.containerd_address,
+            namespace: config.containerd_namespace,
+            snapshotter: config.snapshotter,
+            mount_root: config.image_store,
+            writable_rootfs: WritableRootfsConfig {
+                root: config.state_root.join("writable-roots"),
+                mkfs_ext4_program: config.mkfs_ext4.clone(),
+                losetup_program: config.losetup.clone(),
+                minimum_bytes: runtrue_sandbox_oci::provider::MINIMUM_WRITABLE_ROOT_BYTES,
+                maximum_bytes: MAXIMUM_WRITABLE_ROOT_BYTES,
+                operation_timeout: Duration::from_secs(60),
+            },
+            platform: ImagePlatform::parse(&config.image_platform)?,
+            limits: ImageLimits::default(),
+            fixed_rootfs: config.fixed_rootfs,
+        })?);
+    let preloaded_images = preload_fixed_images(fixed_rootfs.as_ref(), &image_provider)?;
     let mut volume_config = LocalVolumeConfig::new(config.state_root.join("volumes"));
     volume_config.mkfs_ext4_program = config.mkfs_ext4.clone();
     volume_config.losetup_program = config.losetup.clone();
@@ -194,9 +209,10 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         nft: config.nft,
         executor: config.executor,
         assignments,
+        worker,
         audit,
         work_orders,
-        cache: Mutex::new(BTreeMap::new()),
+        cache: Mutex::new(preloaded_images),
         active: Mutex::new(BTreeSet::new()),
         sandboxes: Mutex::new(BTreeMap::new()),
         counters: Mutex::new(Counters {
@@ -206,17 +222,98 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), SandboxError> {
         tenant_counters: Mutex::new(BTreeMap::new()),
         shutdown: std::sync::atomic::AtomicBool::new(false),
     });
+    daemon.worker.mark_clean()?;
     print_ready(&endpoints, &daemon);
     let limiter = ConnectionLimiter::new(config.maximum_connections);
     accept_connections(&endpoints, &daemon, &limiter, config.io_timeout)?;
     wait_for_connections(&limiter, config.io_timeout)?;
+    if daemon.worker.recycle_required() {
+        let sandboxes = std::mem::take(&mut *daemon.sandboxes.lock().expect("sandbox lock"));
+        drop(sandboxes);
+        release_image_cache(&daemon)?;
+        return Ok(ServeOutcome::Recycle);
+    }
     if !daemon.active.lock().expect("active lock").is_empty() {
         return Err(SandboxError::Runtime(
             "shutdown raced with active sandboxes".to_owned(),
         ));
     }
     release_image_cache(&daemon)?;
-    Ok(())
+    Ok(ServeOutcome::Shutdown)
+}
+
+fn validate_runsc(path: &std::path::Path) -> Result<PathBuf, SandboxError> {
+    if !path.is_absolute() {
+        return Err(SandboxError::Runtime(
+            "runsc executable must be an absolute path".to_owned(),
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
+    let metadata = fs::metadata(&canonical).map_err(|source| io_error(&canonical, source))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(SandboxError::Runtime(
+            "runsc must be an executable regular file".to_owned(),
+        ));
+    }
+    let mut child = Command::new(&canonical)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|source| io_error(&canonical, source))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|source| SandboxError::Runtime(format!("wait for runsc version: {source}")))?
+        {
+            if status.success() {
+                return Ok(canonical);
+            }
+            return Err(SandboxError::Runtime(format!(
+                "runsc version check failed with status {status}"
+            )));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(SandboxError::Timeout(
+                "validate runsc executable".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn preload_fixed_images(
+    fixed: Option<&FixedRootfsConfig>,
+    provider: &Arc<dyn runtrue_sandbox_oci::provider::ImageProvider>,
+) -> Result<BTreeMap<String, Arc<ImmutableRootfs>>, SandboxError> {
+    let Some(fixed) = fixed else {
+        return Ok(BTreeMap::new());
+    };
+    let bytes =
+        fs::read(&fixed.topology_lock).map_err(|source| io_error(&fixed.topology_lock, source))?;
+    let topology: TopologyLock = serde_json::from_slice(&bytes)
+        .map_err(|error| SandboxError::Lock(format!("decode fixed topology lock: {error}")))?;
+    compiler::verify_lock(&topology)?;
+    let mut images = BTreeMap::new();
+    for service in topology.services.values() {
+        if images.contains_key(&service.image.image_id) {
+            continue;
+        }
+        images.insert(
+            service.image.image_id.clone(),
+            Arc::new(provider.admit(&service.image)?),
+        );
+    }
+    if images.is_empty() {
+        return Err(SandboxError::Runtime(
+            "fixed worker did not preload an attested root set".to_owned(),
+        ));
+    }
+    Ok(images)
 }
 
 fn release_image_cache(daemon: &DaemonState) -> Result<(), SandboxError> {
@@ -338,6 +435,7 @@ fn print_ready(endpoints: &[BoundEndpoint], daemon: &DaemonState) {
             "operator_socket": endpoints[0].path,
             "workload_socket": endpoints.get(1).map(|endpoint| &endpoint.path),
             "recovered_projects": daemon.counters.lock().expect("counter lock").recovered_projects,
+            "worker": daemon.worker.status(),
         })
     );
 }

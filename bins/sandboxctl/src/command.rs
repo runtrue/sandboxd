@@ -1,4 +1,8 @@
 use crate::cli::{Cli, Command};
+use runtrue_sandbox_core::{
+    sign_image_attestation, verify_image_attestation, ImagePreparationAttestation,
+    SignedImageAttestation,
+};
 use runtrue_sandbox_gvisor::executor;
 use runtrue_sandbox_oci::{
     compiler, io_error, prepared,
@@ -8,7 +12,15 @@ use runtrue_sandbox_oci::{
     },
     Docker, SandboxError, TopologyLock,
 };
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Read as _,
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
     let provider_options = ProviderOptions {
@@ -42,6 +54,16 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
             image_store,
             tar,
         } => prepare_docker_image(docker, reference, image_store, tar),
+        Command::SignImageAttestation {
+            attestation,
+            private_key,
+            key_id,
+            output,
+        } => sign_attestation(attestation, private_key, key_id, output),
+        Command::VerifyImageAttestation {
+            attestation,
+            public_key,
+        } => verify_attestation(attestation, public_key),
         Command::Run {
             lock,
             project,
@@ -67,6 +89,95 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
             )
         }
     }
+}
+
+fn sign_attestation(
+    attestation_path: PathBuf,
+    private_key_path: PathBuf,
+    key_id: String,
+    output: PathBuf,
+) -> Result<(), SandboxError> {
+    let attestation: ImagePreparationAttestation = decode_json(&attestation_path)?;
+    let private_key = read_exact_key(&private_key_path, true)?;
+    let signed = sign_image_attestation(&key_id, &private_key, attestation)
+        .map_err(|error| SandboxError::Lock(error.to_string()))?;
+    write_new_json(&output, &signed)?;
+    println!(
+        "{}",
+        serde_json::json!({"output": output, "key_id": key_id})
+    );
+    Ok(())
+}
+
+fn verify_attestation(
+    attestation_path: PathBuf,
+    public_key_path: PathBuf,
+) -> Result<(), SandboxError> {
+    let signed: SignedImageAttestation = decode_json(&attestation_path)?;
+    let public_key = read_exact_key(&public_key_path, false)?;
+    verify_image_attestation(&public_key, &signed)
+        .map_err(|error| SandboxError::Lock(error.to_string()))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "verified": true,
+            "key_id": signed.key_id,
+            "worker_artifact_digest": signed.attestation.worker_artifact_digest,
+            "expanded_root_digest": signed.attestation.expanded_root_digest,
+        })
+    );
+    Ok(())
+}
+
+fn decode_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, SandboxError> {
+    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| SandboxError::Lock(format!("decode `{}`: {error}", path.display())))
+}
+
+fn read_exact_key(path: &Path, private: bool) -> Result<[u8; 32], SandboxError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let file = options
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+    if !metadata.file_type().is_file()
+        || (private
+            && (metadata.mode() & 0o077 != 0 || metadata.uid() != nix::unistd::geteuid().as_raw()))
+    {
+        return Err(SandboxError::Lock(format!(
+            "{} key must be a regular {} file",
+            if private { "private" } else { "public" },
+            if private {
+                "owner-only non-symlink owned by the invoking identity"
+            } else {
+                "non-symlink"
+            }
+        )));
+    }
+    let mut bytes = Vec::with_capacity(33);
+    file.take(33)
+        .read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
+    bytes.try_into().map_err(|_| {
+        SandboxError::Lock(format!(
+            "key `{}` must contain exactly 32 bytes",
+            path.display()
+        ))
+    })
+}
+
+fn write_new_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), SandboxError> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| SandboxError::Lock(format!("encode `{}`: {error}", path.display())))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    std::io::Write::write_all(&mut file, &bytes).map_err(|source| io_error(path, source))?;
+    file.sync_all().map_err(|source| io_error(path, source))
 }
 
 struct ProviderOptions {

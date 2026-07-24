@@ -49,6 +49,7 @@ metadata:
   namespace: sandboxd-system
 spec:
   replicas: 1
+  revisionHistoryLimit: 1
   strategy:
     type: Recreate
   selector:
@@ -58,8 +59,10 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: sandboxd-dynamic-runtime
+        runtrue.io/resource-shape: dynamic-v1
     spec:
       hostUsers: false
+      restartPolicy: Always
       nodeSelector:
         runtrue.io/sandbox-node: "true"
       tolerations:
@@ -74,10 +77,28 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: sandboxd
+          restartPolicy: Never
           image: sandboxd-dynamic-runtime:local
           imagePullPolicy: Never
           command:
             - /usr/local/bin/run-sandboxd-dynamic-runtime
+          env:
+            - name: SANDBOXD_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SANDBOXD_RESOURCE_SHAPE
+              value: dynamic-v1
+            - name: SANDBOXD_SANDBOX_CPU_MILLIS
+              value: "2000"
+            - name: SANDBOXD_SANDBOX_MEMORY_BYTES
+              value: "2147483648"
+            - name: SANDBOXD_SANDBOX_PIDS
+              value: "512"
+            - name: SANDBOXD_SANDBOX_EPHEMERAL_STORAGE_BYTES
+              value: "6442450944"
+            - name: SANDBOXD_MAXIMUM_SERVICES
+              value: "16"
           securityContext:
             privileged: false
             allowPrivilegeEscalation: true
@@ -111,11 +132,19 @@ spec:
             exec:
               command:
                 - /usr/local/bin/runtrue-sandboxd
+                - ready
+                - --socket
+                - /run/runtrue-sandboxd/control.sock
+            periodSeconds: 5
+          startupProbe:
+            exec:
+              command:
+                - /usr/local/bin/runtrue-sandboxd
                 - ping
                 - --socket
                 - /run/runtrue-sandboxd/control.sock
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            periodSeconds: 2
+            failureThreshold: 90
           livenessProbe:
             exec:
               command:

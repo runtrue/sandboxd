@@ -49,6 +49,7 @@ pub(crate) struct DaemonState {
     pub(crate) nft: PathBuf,
     pub(crate) executor: ExecutorConfiguration,
     pub(crate) assignments: AssignmentLedger,
+    pub(crate) worker: crate::worker::WorkerSlot,
     pub(crate) audit: AuditLog,
     pub(crate) work_orders: Option<WorkOrderVerifier>,
     pub(crate) cache: Mutex<BTreeMap<String, Arc<ImmutableRootfs>>>,

@@ -29,6 +29,11 @@ pub(crate) enum Command {
         #[arg(long, default_value = DEFAULT_SOCKET)]
         socket: PathBuf,
     },
+    /// Fail unless this worker is a clean, unleased scheduling target.
+    Ready {
+        #[arg(long, default_value = DEFAULT_SOCKET)]
+        socket: PathBuf,
+    },
     Stats {
         #[arg(long, default_value = DEFAULT_SOCKET)]
         socket: PathBuf,
@@ -153,6 +158,19 @@ pub(crate) struct ServeArgs {
     pub(crate) io_timeout_seconds: u64,
     #[arg(long, default_value = "worker-local")]
     pub(crate) worker_id: String,
+    /// Operator-reviewed aggregate sandbox budget enforced by the worker Pod.
+    #[arg(long, default_value = "standard-v1")]
+    pub(crate) resource_shape: String,
+    #[arg(long, default_value_t = 1_000)]
+    pub(crate) sandbox_cpu_millis: u32,
+    #[arg(long, default_value_t = 1024 * 1024 * 1024)]
+    pub(crate) sandbox_memory_bytes: u64,
+    #[arg(long, default_value_t = 256)]
+    pub(crate) sandbox_pids: u32,
+    #[arg(long, default_value_t = 2 * 1024 * 1024 * 1024)]
+    pub(crate) sandbox_ephemeral_storage_bytes: u64,
+    #[arg(long, default_value_t = 8)]
+    pub(crate) maximum_services: u16,
     /// Enable an additional reviewed guest profile (root-in-sandbox-v1 or oci-compat-v1).
     #[arg(long = "guest-profile")]
     pub(crate) guest_profiles: Vec<String>,

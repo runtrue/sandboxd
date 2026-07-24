@@ -11,6 +11,7 @@ on:
       - "crates/**"
       - "deploy/k3s/**"
       - "tools/test-k3s-fixed-runtime.sh"
+      - "tools/test-k3s-resource-limits.sh"
   push:
     branches: [main]
     paths:
@@ -22,6 +23,7 @@ on:
       - "crates/**"
       - "deploy/k3s/**"
       - "tools/test-k3s-fixed-runtime.sh"
+      - "tools/test-k3s-resource-limits.sh"
   schedule:
     - cron: "41 3 * * 2"
   workflow_dispatch:
@@ -113,6 +115,10 @@ jobs:
             - metrics-server
             - coredns
             - local-storage
+          kubelet-arg:
+            - pod-max-pids=256
+          kube-controller-manager-arg:
+            - terminated-pod-gc-threshold=32
           disable-network-policy: false
           EOF
           sudo chmod 0600 /etc/rancher/k3s/config.yaml
@@ -156,14 +162,22 @@ jobs:
         run: docker save sandboxd-fixed-runtime:local | sudo /usr/local/bin/k3s ctr images import -
 
       - name: Run k3s fixed-runtime conformance
-        run: bash tools/test-k3s-fixed-runtime.sh
+        run: |
+          mkdir -p k3s-diagnostics
+          bash tools/test-k3s-fixed-runtime.sh \
+            | tee k3s-diagnostics/conformance.log
+
+      - name: Run k3s resource-boundary conformance
+        run: |
+          bash tools/test-k3s-resource-limits.sh \
+            | tee k3s-diagnostics/resource-limits.log
 
       - name: Collect diagnostics
         if: always()
         run: |
           mkdir -p k3s-diagnostics
           kubectl get \
-            namespace,serviceaccount,deployment,pod,networkpolicy,service,ingress \
+            namespace,serviceaccount,deployment,replicaset,pod,networkpolicy,service,ingress \
             --all-namespaces \
             -o wide >k3s-diagnostics/resources.txt 2>&1 || true
           kubectl describe namespace sandboxd-system \

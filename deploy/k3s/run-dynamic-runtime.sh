@@ -39,6 +39,14 @@ done
 /usr/bin/ctr --address "$containerd_address" version >/dev/null
 
 /usr/local/bin/runtrue-sandboxd serve \
+  --worker-id "worker-${SANDBOXD_WORKER_ID:-local}" \
+  --resource-shape "${SANDBOXD_RESOURCE_SHAPE:-dynamic-v1}" \
+  --sandbox-cpu-millis "${SANDBOXD_SANDBOX_CPU_MILLIS:-2000}" \
+  --sandbox-memory-bytes "${SANDBOXD_SANDBOX_MEMORY_BYTES:-2147483648}" \
+  --sandbox-pids "${SANDBOXD_SANDBOX_PIDS:-512}" \
+  --sandbox-ephemeral-storage-bytes \
+    "${SANDBOXD_SANDBOX_EPHEMERAL_STORAGE_BYTES:-6442450944}" \
+  --maximum-services "${SANDBOXD_MAXIMUM_SERVICES:-16}" \
   --socket "$sandboxd_socket" \
   --state-root /var/lib/runtrue-sandboxd/state \
   --image-store /var/lib/runtrue-sandboxd/images \

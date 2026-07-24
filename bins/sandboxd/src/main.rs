@@ -10,6 +10,7 @@ mod protocol;
 mod server;
 mod service;
 mod state;
+mod worker;
 
 use clap::Parser as _;
 use cli::Cli;

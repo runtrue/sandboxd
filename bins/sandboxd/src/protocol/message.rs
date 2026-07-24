@@ -43,6 +43,7 @@ pub(crate) enum RequestAuthorization {
 #[derive(Clone)]
 pub(crate) enum Operation {
     Ping,
+    Ready,
     Stats,
     Admit {
         topology: TopologyLock,
@@ -99,6 +100,7 @@ impl Operation {
     pub(crate) fn work_order_operation(&self) -> Option<WorkOrderOperation> {
         Some(match self {
             Self::Ping => WorkOrderOperation::Ping,
+            Self::Ready => return None,
             Self::Stats => WorkOrderOperation::Stats,
             Self::Admit { .. } => WorkOrderOperation::Admit,
             Self::Run { .. } => WorkOrderOperation::Run,
@@ -128,6 +130,7 @@ impl Operation {
             | Self::Logs { sandbox, .. }
             | Self::Snapshot { sandbox, .. } => Some(sandbox),
             Self::Ping
+            | Self::Ready
             | Self::Stats
             | Self::Admit { .. }
             | Self::PublishArtifact { .. }
@@ -158,6 +161,7 @@ impl Operation {
             | Self::Create { topology, .. }
             | Self::Restore { topology, .. } => Some(topology),
             Self::Ping
+            | Self::Ready
             | Self::Stats
             | Self::Inspect { .. }
             | Self::Pause { .. }

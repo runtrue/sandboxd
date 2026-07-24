@@ -23,6 +23,7 @@ pub(super) fn write_bundle(
     http_proxy: Option<&str>,
     no_proxy: Option<&str>,
     tmpfs_bytes: u64,
+    guest_process_limit: u32,
     volumes: &[MountedVolume],
     role: ContainerRole<'_>,
 ) -> Result<(), SandboxError> {
@@ -129,7 +130,12 @@ pub(super) fn write_bundle(
             },
             "rlimits": [
                 {"type": "RLIMIT_NOFILE", "hard": 256, "soft": 256},
-                {"type": "RLIMIT_CORE", "hard": 0, "soft": 0}
+                {"type": "RLIMIT_CORE", "hard": 0, "soft": 0},
+                {
+                    "type": "RLIMIT_NPROC",
+                    "hard": guest_process_limit,
+                    "soft": guest_process_limit
+                }
             ]
         },
         "root": {"path": rootfs, "readonly": rootfs_read_only},
@@ -216,6 +222,7 @@ mod tests {
             None,
             None,
             1024,
+            96,
             &[],
             ContainerRole::Sandbox,
         )
@@ -237,6 +244,10 @@ mod tests {
             assert_eq!(config["process"]["capabilities"]["bounding"], json!([]));
             assert_eq!(config["process"]["capabilities"]["ambient"], json!([]));
             assert_eq!(config["process"]["noNewPrivileges"], true);
+            assert_eq!(
+                config["process"]["rlimits"][2],
+                json!({"type": "RLIMIT_NPROC", "hard": 96, "soft": 96})
+            );
         }
     }
 

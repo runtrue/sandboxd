@@ -32,6 +32,7 @@ pub(crate) fn handle(
     }
     match operation {
         Operation::Ping => Ok(capabilities(daemon)),
+        Operation::Ready => readiness(daemon, context),
         Operation::Stats => metrics::collect(daemon, context),
         Operation::Admit { topology } => admit(daemon, &topology),
         Operation::Run {
@@ -71,9 +72,27 @@ pub(crate) fn handle(
     }
 }
 
+fn readiness(daemon: &DaemonState, context: &AccessContext) -> Result<Value, SandboxError> {
+    if !context.is_operator() {
+        return Err(SandboxError::Runtime(
+            "worker readiness is restricted to the operator endpoint".to_owned(),
+        ));
+    }
+    let status = daemon.worker.status();
+    if !status.ready() {
+        return Err(SandboxError::Runtime(format!(
+            "worker is not ready: state is {:?}",
+            status.state()
+        )));
+    }
+    serde_json::to_value(status)
+        .map_err(|error| SandboxError::Runtime(format!("encode worker readiness: {error}")))
+}
+
 fn capabilities(daemon: &DaemonState) -> Value {
     serde_json::json!({
         "status": "ready",
+        "worker": daemon.worker.status(),
         "protocol_versions": [1, 2],
         "workload_protocol_version": 2,
         "backends": [
@@ -115,12 +134,19 @@ fn run(
     validate_timeout(timeout_ms)?;
     let key = sandbox_key(context, sandbox)?;
     let _reservation = ProjectReservation::acquire(daemon, &key)?;
-    let epoch = daemon.assignments.begin(&key, context.assignment_epoch())?;
+    daemon.worker.lease(&key)?;
+    let epoch = match daemon.assignments.begin(&key, context.assignment_epoch()) {
+        Ok(epoch) => epoch,
+        Err(error) => return Err(quarantine_after_failure(daemon, &key, error)),
+    };
     let runtime_project = key.runtime_project(epoch);
     let admitted = match admit_topology(daemon, &topology) {
         Ok(admitted) => admitted,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
     };
+    if let Err(error) = daemon.worker.mark_running(&key) {
+        return Err(mark_failed(daemon, &key, epoch, error));
+    }
     let result = executor::run_admitted(
         &topology,
         &runtime_project,
@@ -138,9 +164,9 @@ fn run(
     );
     match result {
         Ok(result) => {
-            daemon
-                .assignments
-                .mark(&key, epoch, AssignmentState::Stopped)?;
+            if let Err(error) = finish_terminal_assignment(daemon, &key, epoch) {
+                return Err(quarantine_after_failure(daemon, &key, error));
+            }
             record_run(daemon, context, true);
             scoped_value(result, &key, context.is_operator())
         }
@@ -171,7 +197,11 @@ fn create(
         )));
     }
     let _reservation = ProjectReservation::acquire(daemon, &key)?;
-    let epoch = daemon.assignments.begin(&key, context.assignment_epoch())?;
+    daemon.worker.lease(&key)?;
+    let epoch = match daemon.assignments.begin(&key, context.assignment_epoch()) {
+        Ok(epoch) => epoch,
+        Err(error) => return Err(quarantine_after_failure(daemon, &key, error)),
+    };
     let admitted = match admit_topology(daemon, &topology) {
         Ok(admitted) => admitted,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
@@ -209,6 +239,10 @@ fn create(
         drop(instance);
         return Err(mark_failed(daemon, &key, epoch, error));
     }
+    if let Err(error) = daemon.worker.mark_running(&key) {
+        drop(instance);
+        return Err(mark_failed(daemon, &key, epoch, error));
+    }
     daemon.sandboxes.lock().expect("sandbox lock").insert(
         key.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(instance)),
@@ -239,9 +273,15 @@ fn restore(
         )));
     }
     let _reservation = ProjectReservation::acquire(daemon, &key)?;
-    let epoch = daemon
-        .assignments
-        .begin_restore(&key, context.assignment_epoch(), &snapshot_id)?;
+    daemon.worker.lease(&key)?;
+    let epoch =
+        match daemon
+            .assignments
+            .begin_restore(&key, context.assignment_epoch(), &snapshot_id)
+        {
+            Ok(epoch) => epoch,
+            Err(error) => return Err(quarantine_after_failure(daemon, &key, error)),
+        };
     let admitted = match admit_topology(daemon, &topology) {
         Ok(admitted) => admitted,
         Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
@@ -290,6 +330,10 @@ fn restore(
         return Err(mark_failed(daemon, &key, epoch, error));
     }
     if let Err(error) = instance.activate_ingress() {
+        drop(instance);
+        return Err(mark_failed(daemon, &key, epoch, error));
+    }
+    if let Err(error) = daemon.worker.mark_running(&key) {
         drop(instance);
         return Err(mark_failed(daemon, &key, epoch, error));
     }
@@ -342,12 +386,22 @@ fn stop(
         .ok_or_else(|| SandboxError::Runtime(format!("sandbox `{sandbox}` does not exist")))?;
     let mut instance = instance.lock().expect("sandbox instance lock");
     daemon.assignments.require_current(&key, Some(epoch))?;
-    let status = instance.stop()?;
-    daemon
+    daemon.worker.begin_draining(&key)?;
+    let status = match instance.stop() {
+        Ok(status) => status,
+        Err(error) => return Err(mark_failed(daemon, &key, epoch, error)),
+    };
+    if let Err(error) = daemon
         .assignments
-        .mark(&key, epoch, AssignmentState::Stopped)?;
+        .mark(&key, epoch, AssignmentState::Stopped)
+    {
+        return Err(mark_failed(daemon, &key, epoch, error));
+    }
     drop(instance);
     daemon.sandboxes.lock().expect("sandbox lock").remove(&key);
+    if let Err(error) = complete_worker_cleanup(daemon, &key) {
+        return Err(quarantine_after_failure(daemon, &key, error));
+    }
     scoped_value(status, &key, context.is_operator())
 }
 
@@ -388,9 +442,14 @@ fn snapshot(
     let mut source_fence_millis = 0;
     if stop_and_move {
         let fence_started = Instant::now();
-        instance.fence_ingress()?;
+        daemon.worker.begin_draining(&key)?;
+        if let Err(error) = instance.fence_ingress() {
+            daemon.worker.cancel_draining(&key)?;
+            return Err(error);
+        }
         if let Err(error) = daemon.assignments.begin_fencing(&key, epoch, &snapshot_id) {
             instance.activate_ingress()?;
+            daemon.worker.cancel_draining(&key)?;
             return Err(error);
         }
         source_fence_millis = fence_started.elapsed().as_millis();
@@ -415,6 +474,7 @@ fn snapshot(
                 .assignments
                 .mark(&key, epoch, AssignmentState::Active)?;
             instance.activate_ingress()?;
+            daemon.worker.cancel_draining(&key)?;
             return Err(error);
         }
         Err(error) if stop_and_move => {
@@ -445,7 +505,12 @@ fn snapshot(
             .assignments
             .mark_transferable(&key, epoch, &snapshot_id);
         daemon.sandboxes.lock().expect("sandbox lock").remove(&key);
-        assignment_result?;
+        if let Err(error) = assignment_result {
+            return Err(mark_failed(daemon, &key, epoch, error));
+        }
+        if let Err(error) = complete_worker_cleanup(daemon, &key) {
+            return Err(quarantine_after_failure(daemon, &key, error));
+        }
     }
     let mut value = serde_json::to_value(summary)
         .map_err(|error| SandboxError::Runtime(format!("encode snapshot result: {error}")))?;
@@ -530,18 +595,55 @@ fn scoped_value<T: Serialize>(
     Ok(value)
 }
 
+fn finish_terminal_assignment(
+    daemon: &DaemonState,
+    key: &SandboxKey,
+    epoch: runtrue_sandbox_core::AssignmentEpoch,
+) -> Result<(), SandboxError> {
+    daemon.worker.begin_draining(key)?;
+    daemon
+        .assignments
+        .mark(key, epoch, AssignmentState::Stopped)?;
+    complete_worker_cleanup(daemon, key)
+}
+
+fn complete_worker_cleanup(daemon: &DaemonState, key: &SandboxKey) -> Result<(), SandboxError> {
+    daemon.worker.begin_cleaning(key)?;
+    daemon.worker.recycle_clean(key)?;
+    daemon.shutdown.store(true, Ordering::Release);
+    Ok(())
+}
+
+fn quarantine_after_failure(
+    daemon: &DaemonState,
+    key: &SandboxKey,
+    error: SandboxError,
+) -> SandboxError {
+    daemon.shutdown.store(true, Ordering::Release);
+    match daemon
+        .worker
+        .quarantine(Some(key), "sandbox-operation-failed")
+    {
+        Ok(()) => error,
+        Err(quarantine_error) => SandboxError::Runtime(format!(
+            "sandbox operation failed: {error}; worker quarantine failed: {quarantine_error}"
+        )),
+    }
+}
+
 fn mark_failed(
     daemon: &DaemonState,
     key: &SandboxKey,
     epoch: runtrue_sandbox_core::AssignmentEpoch,
     error: SandboxError,
 ) -> SandboxError {
-    match daemon.assignments.mark(key, epoch, AssignmentState::Failed) {
+    let error = match daemon.assignments.mark(key, epoch, AssignmentState::Failed) {
         Ok(()) => error,
         Err(journal_error) => SandboxError::Runtime(format!(
             "sandbox operation failed: {error}; assignment journal failed: {journal_error}"
         )),
-    }
+    };
+    quarantine_after_failure(daemon, key, error)
 }
 
 fn record_run(daemon: &DaemonState, context: &AccessContext, succeeded: bool) {
