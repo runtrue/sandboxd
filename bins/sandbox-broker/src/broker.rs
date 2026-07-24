@@ -6,8 +6,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use runtrue_sandbox_protocol::WorkloadResponse;
 use serde::Serialize;
-use serde_json::Value;
 use std::{
     os::unix::fs::FileTypeExt as _,
     path::{Path, PathBuf},
@@ -69,7 +69,7 @@ async fn ready(State(state): State<BrokerState>) -> Result<StatusCode, BrokerErr
 async fn dispatch(
     State(state): State<BrokerState>,
     Json(request): Json<BrokerRequest>,
-) -> Result<Json<Value>, BrokerError> {
+) -> Result<Json<WorkloadResponse>, BrokerError> {
     request.validate().map_err(|_| BrokerError::Invalid)?;
     let encoded = serde_json::to_vec(&request).map_err(|_| BrokerError::Invalid)?;
     if encoded.len() >= MAXIMUM_MESSAGE_BYTES {
@@ -78,10 +78,13 @@ async fn dispatch(
     let response = timeout(state.io_timeout, exchange(&state.socket, &encoded))
         .await
         .map_err(|_| BrokerError::Timeout)??;
+    response
+        .validate_for(&request.request_id)
+        .map_err(|_| BrokerError::Unavailable)?;
     Ok(Json(response))
 }
 
-async fn exchange(socket: &Path, request: &[u8]) -> Result<Value, BrokerError> {
+async fn exchange(socket: &Path, request: &[u8]) -> Result<WorkloadResponse, BrokerError> {
     let mut stream = UnixStream::connect(socket)
         .await
         .map_err(|_| BrokerError::Unavailable)?;
@@ -138,7 +141,6 @@ impl IntoResponse for BrokerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::PROTOCOL_VERSION;
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
@@ -147,6 +149,10 @@ mod tests {
         AssignmentEpoch, GuestProfile, ResourceCeilings, SandboxId, SignedWorkOrder, SubjectId,
         TenantId, WorkOrderClaims, WorkOrderOperation, WorkspaceId, WORK_ORDER_VERSION,
     };
+    use runtrue_sandbox_protocol::{
+        Operation, WorkloadAuthorization as BrokerAuthorization, PROTOCOL_VERSION,
+    };
+    use serde_json::Value;
     use tempfile::tempdir;
     use tokio::{io::AsyncBufReadExt as _, net::UnixListener};
     use tower::ServiceExt as _;
@@ -155,7 +161,7 @@ mod tests {
         serde_json::to_vec(&BrokerRequest {
             schema_version: PROTOCOL_VERSION,
             request_id: "request-a".to_owned(),
-            authorization: crate::protocol::BrokerAuthorization::WorkOrder {
+            authorization: BrokerAuthorization::WorkOrder {
                 work_order: Box::new(SignedWorkOrder {
                     claims: WorkOrderClaims {
                         schema_version: WORK_ORDER_VERSION,
@@ -187,10 +193,9 @@ mod tests {
                     signature: "a".repeat(64),
                 }),
             },
-            operation: serde_json::json!({
-                "kind": "inspect",
-                "parameters": {"sandbox": "sandbox-a"}
-            }),
+            operation: Operation::Inspect {
+                sandbox: "sandbox-a".to_owned(),
+            },
         })
         .expect("request")
     }
