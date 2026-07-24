@@ -1,40 +1,34 @@
-# Authenticated control plane
+# Control-plane integration
 
-## Deployment boundary
-
-`sandboxd` is a privileged worker component, not a tenant-facing API server.
-The supported request path is:
+`sandboxd` exposes local Unix sockets for operator and workload traffic. A
+control plane authenticates users, applies policy, signs authorized operations,
+and delivers them through a local broker.
 
 ```text
-tenant client -> identity/policy service -> work-order signer -> local broker
-              -> workload Unix socket -> sandboxd -> gVisor sandbox
+client -> identity and policy -> work-order signer -> local broker
+       -> workload socket -> sandboxd -> gVisor sandbox
 
-root operator -------------------------------------> operator Unix socket
+operator ---------------------> operator socket
 ```
 
-The identity and policy service authenticates the tenant and decides whether a
-request is allowed. A trusted signer turns that decision into a narrowly scoped
-work order. A single configured broker UID may deliver it over the local
-workload socket. The broker may receive already-signed orders and does not need
-access to the signing key.
+## Request path
 
-Network permissions are part of that decision. The signed operation digest
-covers the complete topology lock, including its sandbox-wide network profile,
-domain/CIDR rules, limits, and ingress declarations. In particular,
-`restricted_tcp` is an operator grant rather than a tenant-controlled Compose
-escape hatch. The worker returns server-allocated ingress endpoints only after
-the assignment is active; the tenant-facing control plane is responsible for
-delivering those endpoint credentials to the owning principal without logging
-or cross-tenant caching them.
+The control plane owns tenant authentication, policy, placement, and work-order
+issuance. The signed operation digest covers the complete topology lock,
+including guest profile, resource ceilings, network policy, and ingress
+declarations.
 
-The root-only operator socket is a separate recovery and development path. It
-is not an authorization boundary between tenants: the operator is trusted to
-select any local tenant/workspace scope.
+One configured broker UID may submit signed requests without holding the
+signing key. `sandboxd` verifies the broker's Unix peer credentials and the work
+order independently.
+
+The root-only operator socket provides administration and recovery access. It
+may select any local tenant and workspace scope.
 
 ## Worker configuration
 
-The workload endpoint is disabled unless its socket, broker UID, and verifier
-key are all configured:
+The workload socket is enabled only when its path, broker UID, and verifier key
+are configured together:
 
 ```bash
 sudo runtrue-sandboxd serve \
@@ -47,30 +41,37 @@ sudo runtrue-sandboxd serve \
   --io-timeout-seconds 5
 ```
 
-`strict-v1` is always installed. Repeat `--guest-profile` to enable the
-reviewed `root-in-sandbox-v1` and/or `oci-compat-v1` profiles. The flag accepts
-only those versioned built-ins; it does not accept raw UIDs or capabilities.
-The selected set is worker policy and is returned, with exact restrictions, by
-the ping capability response.
-
-The key file contains exactly 32 bytes encoded as 64 lowercase or uppercase
-hexadecimal characters, optionally followed by one newline. It must be a
-root-owned regular file, must not be group-writable, and must have no world
-permissions. A symlink is rejected. The daemon supports one active HMAC key;
-rotation requires replacing the file and restarting the worker.
-
 The operator socket is mode `0600` and accepts UID 0. The workload socket is
 mode `0600`, is owned by the configured non-root broker UID, and accepts that
-UID only. Configuring UID 0 as the broker is rejected. Both checks use Unix
-peer credentials rather than caller-supplied fields.
+UID only.
 
-## Protocol v2
+The key file contains exactly 32 bytes encoded as 64 hexadecimal characters,
+with an optional trailing newline. It must be a root-owned regular file, must
+not be group-writable, and must have no world permissions. Symlinks are
+rejected. Replace the file and restart the worker to rotate the active key.
 
-Requests and responses are newline-delimited JSON. A message is limited to four
-MiB, request identifiers are limited to 64 ASCII letters, digits, hyphens, or
-underscores, and unknown fields are rejected.
+`strict-v1` is always installed. Repeat `--guest-profile` to enable the reviewed
+`root-in-sandbox-v1` or `oci-compat-v1` profiles. The worker returns the enabled
+profiles and their restrictions in its capability response.
 
-A workload request has this outer form:
+## Protocol
+
+Requests and responses are newline-delimited JSON. Messages are limited to four
+MiB. Request IDs may contain up to 64 ASCII letters, digits, hyphens, or
+underscores. Unknown fields are rejected.
+
+Current workload operations are:
+
+```text
+ping stats admit run create restore inspect pause resume stop logs snapshot
+```
+
+`shutdown`, artifact publication, and artifact garbage collection are
+operator-only.
+
+### Signed request
+
+The workload socket uses protocol v2 and work-order schema 4:
 
 ```json
 {
@@ -116,87 +117,73 @@ A workload request has this outer form:
 }
 ```
 
-The supported workload operations are `ping`, `stats`, `admit`, `run`,
-`create`, `restore`, `inspect`, `pause`, `resume`, `stop`, `logs`, and
-`snapshot`. `shutdown` is operator-only and cannot be represented by a work
-order.
-
-## Signing contract
+### Signing contract
 
 The operation digest is SHA-256 over the compact UTF-8 JSON encoding of the
-`operation` object, including its `kind` and, where present, `parameters`. It is
-encoded as `sha256:` followed by lowercase hexadecimal.
+complete `operation` object. Encode it as `sha256:` followed by lowercase
+hexadecimal.
 
-The signature is HMAC-SHA-256 over the compact UTF-8 JSON encoding of the
-`claims` object. The fields must appear in the order shown above, including the
-fields inside `resource_ceilings`; no whitespace is inserted. The signature is
-encoded as 64 hexadecimal characters. Identifiers are validated before use, and
-the signed request ID, operation type, sandbox ID, and operation digest must
-match the outer request exactly.
+The signature is HMAC-SHA-256 over the compact UTF-8 JSON encoding of `claims`.
+Fields must appear in the order shown above, including fields inside
+`resource_ceilings`, with no inserted whitespace. Encode the signature as 64
+hexadecimal characters.
 
-Work orders must have a nonzero assignment epoch, cannot live longer than five
-minutes, and are accepted with at most 30 seconds of future clock skew. An
-expired order is rejected. Each tenant/workspace/nonce combination is consumed
-at most once. Only the nonce digest is persisted, and replay rejection survives
-a daemon restart. The nonce record reaches durable storage before its operation
-may execute.
+The worker verifies that the signed request ID, operation, sandbox ID, and
+operation digest match the outer request.
 
-For operations containing a topology, the worker verifies the signed guest
-profile allowlist plus service, memory, CPU, PID, tmpfs, writable-root, and
-captured-output ceilings before image admission or execution. Run, create, and
-restore deadlines must not exceed the signed maximum. The topology compiler
-and runtime also apply their
-stricter absolute limits; a work order cannot widen them.
+Work orders:
 
-## Ownership and recovery
+- use a nonzero assignment epoch;
+- expire within five minutes;
+- allow at most 30 seconds of future clock skew; and
+- use each tenant, workspace, and nonce combination once.
 
-The internal key for live handles, operation reservations, assignment records,
-logs, snapshots, and workload metrics contains the verified tenant and
-workspace identity. A caller-supplied sandbox string is never used as a global
-lookup key. The gVisor project name is an opaque digest of tenant, workspace,
-sandbox, and assignment epoch.
+The nonce digest is persisted before the operation runs, so replay protection
+survives restart.
 
-Create, run, and restore consume a monotonically increasing assignment epoch.
-Follow-up lifecycle operations must carry the current active epoch, and the
-worker rechecks it after acquiring the sandbox lock so an operation queued
-before a fence cannot run afterward. Stop-and-move persists `fencing` before
-checkpoint work and `transferable` only after the source is no longer
-executable. Restore persists `restoring` and must advance the source epoch when
-it preserves the sandbox identity. Consumed epochs cannot be reused. If the
-daemon restarts while an assignment is provisioning, restoring, active, or
-fencing, recovery marks it failed; a completed transferable assignment remains
-fenced and bound to its snapshot.
+For topology-bearing operations, the worker checks the signed guest-profile,
+service, memory, CPU, PID, tmpfs, writable-root, volume, timeout, and output
+ceilings before admission. Runtime limits may be stricter than the signed
+ceiling; a work order cannot widen them.
+
+## Ownership and fencing
+
+All live handles, reservations, assignments, logs, snapshots, and workload
+metrics are keyed by verified tenant and workspace identity. Runtime project IDs
+are opaque digests of tenant, workspace, sandbox, and assignment epoch.
+
+Create, run, and restore consume monotonically increasing assignment epochs.
+Lifecycle operations must present the active epoch, which is rechecked after
+the sandbox lock is acquired.
+
+Stop-and-move records `fencing` before checkpoint work and `transferable` only
+after the source can no longer execute. Restore records `restoring` and advances
+the epoch when preserving the sandbox identity. Consumed epochs cannot be
+reused.
+
+## Durable state and recovery
 
 The private control directory contains:
 
-- `assignments.wal`, the ownership and assignment-epoch journal;
-- `replay.wal`, the live nonce-digest journal; and
-- `audit.jsonl`, the operation audit journal.
+- `assignments.wal` for ownership and assignment transitions;
+- `replay.wal` for live nonce digests; and
+- `audit.jsonl` for authorized operation events.
 
-These files are append-only during normal operation. A bounded writer queue
-preserves journal order and groups concurrent appends into one durable commit.
-Assignment transitions and nonce consumption return only after their records
-are durable. Periodic ordered replacement compacts the assignment and replay
-journals without losing appends that were already acknowledged. Startup
-discards only a torn final record, validates strict file and record bounds, and
-fails closed on complete malformed records. Audit records use the same bounded
-group-commit path; each record has a bounded size, while retention and rotation
-remain an operator responsibility.
+Assignment transitions and nonce consumption are acknowledged only after a
+durable commit. Bounded queues preserve order and group concurrent appends.
+Compaction retains acknowledged state.
 
-Audit records contain the verified tenant/workspace/subject only after
-successful authorization. They omit operation parameters, topology content,
-environment values, work orders, signatures, and keys. Operator stats may
-enumerate worker state; workload stats contain only the verified scope and do
-not expose shared image-cache contents or global counters.
+Startup discards a torn final record and rejects complete malformed records. An
+assignment interrupted during provisioning, restore, active execution, or
+fencing is marked failed. A completed transferable assignment remains fenced
+and bound to its snapshot.
+
+Audit records contain verified tenant, workspace, and subject identities. They
+exclude operation parameters, topology content, environment values, work
+orders, signatures, and keys. Operators manage audit retention and rotation.
 
 ## Compatibility
 
-Protocol v2 is used by current local commands and is required on the workload
-socket. Signed requests use work-order schema 4, which adds `maximum_volumes`
-and `maximum_volume_bytes` to the canonical HMAC payload. The daemon verifies
-each service mount against its top-level volume definition and sums each volume
-in the executable set once, even when several containers attach the same named
-volume. The same schema adds the versioned `allowed_guest_profiles` ceiling.
-Protocol v1 requests without an authorization object remain accepted only from
-UID 0 on the operator socket. This is an explicit migration path, not a
-workload compatibility mode.
+Protocol v2 and work-order schema 4 are required on the workload socket.
+Protocol v1 remains available to UID 0 on the operator socket for local
+migration. It is not accepted as workload authorization.
