@@ -1,4 +1,4 @@
-use runtrue_sandbox_core::{QueuedWork, SandboxId, TenantId, WorkerId, WorkspaceId};
+use runtrue_sandbox_core::{QueuedWork, SandboxId, SubjectId, TenantId, WorkerId, WorkspaceId};
 use runtrue_sandbox_placement::{
     CompletionOutcome, EnqueueOutcome, PlacementStoreConfig, PlacementStoreError,
     PlacementSubmission, PostgresPlacementStore, WorkerRegistration,
@@ -197,7 +197,7 @@ async fn exercise(url: &str) {
         .expect("new epoch wins");
 
     let observed = replica_b
-        .get_by_idempotency(&tenant_b, &source.idempotency_key)
+        .get_by_idempotency(&tenant_b, &source.subject_id, &source.idempotency_key)
         .await
         .expect("durable lookup")
         .expect("completed request");
@@ -234,6 +234,7 @@ fn submission(
             sandbox_id: SandboxId::parse(sandbox_name).expect("sandbox"),
             deadline_unix_ms,
         },
+        subject_id: SubjectId::parse("gateway-a").expect("subject"),
         topology: "topology-v1".to_owned(),
         resource_shape: "standard-v1".to_owned(),
         compatibility_cohort: "runsc-v1".to_owned(),

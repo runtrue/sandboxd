@@ -1,0 +1,19 @@
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb AS runtime-libs
+
+FROM runtime-libs AS gateway-binary
+COPY target/release/runtrue-sandbox-gateway /gateway
+RUN chmod 0755 /gateway
+
+FROM scratch
+
+ARG SANDBOXD_BUILD_ID=local
+LABEL org.opencontainers.image.revision="${SANDBOXD_BUILD_ID}"
+
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libm.so.6 /lib/x86_64-linux-gnu/libm.so.6
+COPY --from=runtime-libs /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
+COPY --from=runtime-libs /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+COPY --from=gateway-binary /gateway /usr/local/bin/runtrue-sandbox-gateway
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/runtrue-sandbox-gateway"]
