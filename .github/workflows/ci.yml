@@ -21,6 +21,22 @@ jobs:
     name: Rust quality
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      SANDBOX_PLACEMENT_POSTGRES_URL: postgres://sandboxd:sandboxd@127.0.0.1:5432/sandboxd_placement_test
+    services:
+      postgres:
+        image: postgres:17.5-alpine@sha256:ec68817297c5984a00c85c9e3bbd88079d0217284f1a3f0525603a6f9b883916
+        env:
+          POSTGRES_USER: sandboxd
+          POSTGRES_PASSWORD: sandboxd
+          POSTGRES_DB: sandboxd_placement_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sandboxd -d sandboxd_placement_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

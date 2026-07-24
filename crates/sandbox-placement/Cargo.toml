@@ -1,0 +1,23 @@
+[package]
+name = "runtrue-sandbox-placement"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+runtrue-sandbox-core.workspace = true
+libc.workspace = true
+nix.workspace = true
+rustls.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
