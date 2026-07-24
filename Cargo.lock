@@ -1271,6 +1271,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtrue-sandbox-broker"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "axum",
+ "clap",
+ "runtrue-sandbox-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "runtrue-sandbox-core"
 version = "0.1.0-alpha.1"
 dependencies = [

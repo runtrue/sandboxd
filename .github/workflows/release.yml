@@ -61,12 +61,12 @@ jobs:
       - name: Build release binaries twice
         run: |
           cargo build --workspace --release --locked
-          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd > /tmp/first-build.sha256
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway target/release/runtrue-sandbox-broker > /tmp/first-build.sha256
           mkdir -p /tmp/first-build
-          cp target/release/runtrue-sandboxctl target/release/runtrue-sandboxd /tmp/first-build/
+          cp target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway target/release/runtrue-sandbox-broker /tmp/first-build/
           cargo clean
           cargo build --workspace --release --locked
-          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd > /tmp/second-build.sha256
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway target/release/runtrue-sandbox-broker > /tmp/second-build.sha256
           diff --unified /tmp/first-build.sha256 /tmp/second-build.sha256
       - name: Create deterministic archive and checksums
         env:
@@ -76,6 +76,8 @@ jobs:
           mkdir -p "dist/${package}"
           install -m 0755 /tmp/first-build/runtrue-sandboxctl "dist/${package}/"
           install -m 0755 /tmp/first-build/runtrue-sandboxd "dist/${package}/"
+          install -m 0755 /tmp/first-build/runtrue-sandbox-gateway "dist/${package}/"
+          install -m 0755 /tmp/first-build/runtrue-sandbox-broker "dist/${package}/"
           install -m 0644 README.md SECURITY.md LICENSE "dist/${package}/"
           commit_time="$(git show -s --format=%ct HEAD)"
           tar \

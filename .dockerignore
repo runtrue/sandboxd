@@ -10,3 +10,4 @@ target/release/*
 !target/release/runtrue-sandboxd
 !target/release/runtrue-sandboxctl
 !target/release/runtrue-sandbox-gateway
+!target/release/runtrue-sandbox-broker

@@ -99,10 +99,10 @@ jobs:
       - name: Build release binaries
         run: |
           cargo build --workspace --release --locked
-          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway > /tmp/sandboxd-first-build.sha256
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway target/release/runtrue-sandbox-broker > /tmp/sandboxd-first-build.sha256
       - name: Rebuild from clean outputs
         run: |
           cargo clean
           cargo build --workspace --release --locked
-          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway > /tmp/sandboxd-second-build.sha256
+          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway target/release/runtrue-sandbox-broker > /tmp/sandboxd-second-build.sha256
           diff --unified /tmp/sandboxd-first-build.sha256 /tmp/sandboxd-second-build.sha256

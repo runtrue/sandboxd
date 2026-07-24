@@ -22,6 +22,14 @@ One configured broker UID may submit signed requests without holding the
 signing key. `sandboxd` verifies the broker's Unix peer credentials and the work
 order independently.
 
+`runtrue-sandbox-broker` is the network-to-Unix bridge. It accepts only
+protocol-v2 `work_order` authorization and the workload operation set listed
+below. It has no operator authorization variant and cannot forward readiness,
+shutdown, artifact publication, or artifact garbage-collection operations.
+The broker performs structural checks and identity matching; sandboxd remains
+the final authority for the HMAC signature, expiry, nonce replay, assignment
+epoch, operation digest, and resource ceilings.
+
 The root-only operator socket provides administration and recovery access. It
 may select any local tenant and workspace scope.
 
@@ -53,6 +61,25 @@ rejected. Replace the file and restart the worker to rotate the active key.
 `strict-v1` is always installed. Repeat `--guest-profile` to enable the reviewed
 `root-in-sandbox-v1` or `oci-compat-v1` profiles. The worker returns the enabled
 profiles and their restrictions in its capability response.
+
+Run the broker as the exact configured non-root UID and mount only the workload
+socket directory:
+
+```bash
+runtrue-sandbox-broker \
+  --listen 127.0.0.1:8081 \
+  --workload-socket /run/runtrue-sandboxd/workload.sock \
+  --io-timeout-seconds 30
+```
+
+The listener defaults to loopback. A non-loopback listener is rejected unless
+`--allow-non-loopback-http` explicitly acknowledges that a trusted mTLS
+service mesh terminates and authenticates the connection. The broker itself
+does not terminate TLS, hold the signing key, mount the operator socket, use a
+service-account token, or require Linux capabilities. Its request body,
+response, concurrency, and I/O time are bounded. Kubernetes must additionally
+apply default-deny policy and allow the broker port only from the placement
+dispatcher identity.
 
 ## Protocol
 
