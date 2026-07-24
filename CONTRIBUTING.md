@@ -30,9 +30,9 @@ Run these commands before submitting a change:
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo audit
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo audit --deny warnings
 cargo deny check advisories licenses bans sources
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/performance/tests
 shellcheck tools/performance/run-control-plane.sh
@@ -40,15 +40,14 @@ git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 ```
 
-Changes to lifecycle, networking, resource limits, snapshots, recovery, or
-cleanup should also run both root-required example scripts on a clean worker.
+For lifecycle, networking, resource-limit, snapshot, recovery, or cleanup
+changes, also run both privileged example scripts on a clean worker.
 
 The `CI` workflow runs portable quality, dependency-policy, and same-run
 reproducibility checks on GitHub-hosted workers. The manually dispatched
-`gVisor integration` workflow runs only on a dedicated, ephemeral, root-owned
-self-hosted worker labeled `sandboxd-gvisor`. Do not register a long-lived or
-general-purpose privileged runner with this public repository. The privileged
-workflow has no pull-request trigger.
+`gVisor integration` workflow uses a dedicated, ephemeral, root-owned worker
+labeled `sandboxd-gvisor`. The privileged workflow has no pull-request trigger;
+register its runner only for the duration of the integration run.
 
 Releases follow the additional gates in [docs/releasing.md](docs/releasing.md).
 All project interactions must follow the [Code of Conduct](CODE_OF_CONDUCT.md).

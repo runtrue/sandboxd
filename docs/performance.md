@@ -19,18 +19,17 @@ artifact for 14 days. The benchmark measures:
 - signed work-order, replay-journal, and audit-journal overhead; and
 - stripped release binary size.
 
-It does not run a guest or measure gVisor lifecycle and snapshot operations.
-Use the dedicated gVisor workflow for those tests.
+The dedicated gVisor workflow measures guest lifecycle and snapshot operations.
 
-### Security model
+### Workflow isolation
 
 Workflow and harness code come from `main`. The benchmark job verifies the
 GitHub-provided base and head commit IDs, has read-only repository access,
 receives no repository secrets, and does not persist checkout credentials.
 
-The benchmark executes pull request code as root on an ephemeral hosted runner.
-Review the change before starting it. Jobs that authorize and report the run do
-not execute pull request code.
+The benchmark executes approved pull request code as root on an ephemeral
+hosted runner. Jobs that authorize and report the run do not execute pull
+request code.
 
 ## Local control-plane benchmark
 
@@ -56,9 +55,8 @@ checkpoint and publication latency, source cleanup, materialization, cohort
 validation, transfer claims, and runtime restore. Writable-root snapshots also
 report diff-export latency.
 
-Runtime restore ends when runsc reports the selected services restored. It is
-not guest time to first instruction; measuring that requires an instrumented
-guest workload.
+Runtime restore ends when runsc reports the selected services restored.
+Guest-level startup measurements can be added with an instrumented workload.
 
 Measure the stripped worker binary with:
 
@@ -80,6 +78,5 @@ It covers single-part and multipart objects, cross-worker materialization,
 concurrent publication, corruption, interrupted transfers, pagination,
 garbage-collection races, and abandoned multipart cleanup.
 
-Loopback MinIO measurements isolate provider overhead; they do not predict WAN
-or AWS S3 latency. Record the commit, host cohort, configuration, and raw JSON
-with any published result.
+Loopback MinIO measurements isolate provider overhead. For WAN or AWS S3
+measurements, record the commit, host cohort, configuration, and raw JSON.

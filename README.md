@@ -6,9 +6,9 @@
 inside [gVisor](https://gvisor.dev/). A sandbox may contain multiple containers,
 but it has one lifecycle, network stack, resource boundary, and checkpoint.
 
-> [!WARNING]
-> `sandboxd` is experimental security software. Deploy it behind a trusted
-> control plane and review [SECURITY.md](SECURITY.md) before production use.
+> [!IMPORTANT]
+> `sandboxd` is currently in alpha. Production deployments should integrate it
+> with a trusted control plane and follow [SECURITY.md](SECURITY.md).
 
 ## What it provides
 
@@ -24,7 +24,7 @@ but it has one lifecycle, network stack, resource boundary, and checkpoint.
 
 The operator socket is root-only. An optional workload socket accepts one local
 broker UID and requires a short-lived signed work order for every request.
-Tenant identity and policy services are outside this repository.
+Tenant identity and policy integrate through the signed broker interface.
 
 ## Requirements
 
@@ -38,10 +38,10 @@ The validated host is Linux x86-64 with:
 - outbound HTTPS access for OCI image preparation.
 
 The worker runs as root because it manages host isolation and runtime
-resources. Release archives do not bundle these host dependencies. The listed
-runtime versions are a known-good reference, not global pins. Other versions
-must pass the privileged lifecycle and snapshot suites on the target host.
-Snapshot restore additionally requires source and destination workers to report
+resources. Install the host dependencies separately from the release archive.
+The listed runtime versions are a known-good reference rather than global pins.
+Qualify other versions with the privileged lifecycle and snapshot suites on the
+target host. Snapshot restore requires source and destination workers to report
 the same `runsc` version and runtime configuration.
 
 ## Get started
@@ -76,19 +76,19 @@ see [Installation and operation](docs/install.md).
 | [Security policy](SECURITY.md) | Supported boundary and vulnerability reporting |
 | [Contributing](CONTRIBUTING.md) | Development checks and design rules |
 
-## Current limitations
+## Supported scope
 
-- Only Linux x86-64 is regularly tested. Runtime versions outside the reference
-  cohort require operator validation.
-- Containers in a sandbox share one network and port namespace.
-- Host CPU and memory accounting applies to the complete sandbox, not
-  independently to each guest container.
-- The local artifact provider restores on the same worker only. Cross-worker
-  restore requires the S3-compatible provider and a shared backend cohort.
-- Raw host bind mounts, arbitrary runtime annotations, privileged containers,
-  host namespaces, and ambient capabilities are rejected.
-- The operator remains responsible for OCI registry trust, credentials, signing
-  services, audit retention, and artifact keys.
+- The validated platform is Linux x86-64. Additional runtime versions can be
+  qualified with the integration suites.
+- A sandbox uses one shared network and port namespace.
+- Host CPU and memory limits apply to the complete sandbox.
+- Local artifact storage supports same-worker restore; S3-compatible storage
+  supports cross-worker restore within a compatible backend cohort.
+- The admission model excludes raw host bind mounts, arbitrary runtime
+  annotations, privileged containers, host namespaces, and ambient
+  capabilities.
+- Registry trust, credentials, signing, audit retention, and artifact-key
+  management integrate with operator-controlled services.
 
 ## License
 

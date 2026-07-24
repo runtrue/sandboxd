@@ -1,8 +1,9 @@
 # Installation and operation
 
-`sandboxd` is an experimental privileged worker. Install it only on a dedicated
-Linux host that matches the [validated cohort](../README.md#requirements). Do
-not expose either Unix socket directly to tenant clients.
+Install `sandboxd` on a dedicated Linux worker that matches the
+[validated platform](../README.md#requirements). Connect tenant-facing services
+through the signed broker interface described in
+[control-plane.md](control-plane.md).
 
 ## Install a release
 
@@ -77,9 +78,9 @@ sudo systemctl enable --now runtrue-sandboxd.service
 sudo runtrue-sandboxd ping
 ```
 
-The worker requires root to manage cgroups, namespaces, nftables, loop devices,
-ext4 mounts, containerd, and gVisor. Test the complete lifecycle and recovery
-suites before adding systemd sandboxing directives.
+The worker runs as root to manage cgroups, namespaces, nftables, loop devices,
+ext4 mounts, containerd, and gVisor. Validate any additional systemd sandboxing
+directives with the complete lifecycle and recovery suites.
 
 For the optional broker socket and signed work orders, see
 [control-plane.md](control-plane.md). Keep artifact keys, work-order keys, and

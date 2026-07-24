@@ -2,15 +2,16 @@
 
 Releases are operator-triggered and must come from `main`.
 
-## Public alpha gate
+## Release checklist
 
 1. Confirm hosted `CI` passes on the intended `main` commit.
 2. Run `gVisor integration` on a dedicated ephemeral worker matching the
    validated host cohort.
-3. Run the manual AWS S3 compatibility check without persisting credentials in
-   the repository or ordinary CI configuration.
+3. Run the manual AWS S3 compatibility check with temporary operator
+   credentials.
 4. Review open security and release-gate issues.
-5. Update `CHANGELOG.md`, the workspace version, and pinned host dependencies.
+5. Update `CHANGELOG.md`, the workspace version, and validated host
+   dependencies.
 6. Create and push a signed annotated version tag from the validated `main`
    commit.
 
@@ -29,6 +30,5 @@ same-run reproducibility comparison. It then creates a deterministic x86-64
 Linux archive, publishes `SHA256SUMS`, and marks hyphenated versions as
 prereleases.
 
-If any release job fails, do not reuse or move the tag. Diagnose the failure,
-increment the prerelease identifier, and begin again from a newly validated
-commit.
+Tags are immutable release inputs. If a release job fails, diagnose the failure
+and publish the fix from a new commit with an incremented prerelease identifier.

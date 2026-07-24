@@ -18,4 +18,4 @@ Write `none` where an item does not apply.
 - [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
 - [ ] Dependency policy checks pass, or dependencies are unchanged
 - [ ] Root-required integration checks pass, or privileged behavior is unchanged
-- [ ] Documentation and retained performance measurements are updated where needed
+- [ ] Documentation and performance guidance are updated where needed
