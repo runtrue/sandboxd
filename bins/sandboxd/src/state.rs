@@ -5,7 +5,7 @@ use crate::{
 };
 use runtrue_sandbox_artifact::ArtifactStore;
 use runtrue_sandbox_core::{GuestProfile, WorkerId};
-use runtrue_sandbox_gvisor::executor::{GvisorSandbox, ImmutableRootfs};
+use runtrue_sandbox_gvisor::executor::{ExecutorConfiguration, GvisorSandbox, ImmutableRootfs};
 use runtrue_sandbox_oci::provider::ImageProvider;
 use runtrue_sandbox_volume::{ArtifactVolumeStore, VolumeProvider};
 use serde::Serialize;
@@ -47,6 +47,7 @@ pub(crate) struct DaemonState {
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
     pub(crate) nft: PathBuf,
+    pub(crate) executor: ExecutorConfiguration,
     pub(crate) assignments: AssignmentLedger,
     pub(crate) audit: AuditLog,
     pub(crate) work_orders: Option<WorkOrderVerifier>,

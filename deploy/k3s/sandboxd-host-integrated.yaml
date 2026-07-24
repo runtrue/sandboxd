@@ -1,0 +1,129 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandboxd-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandboxd
+  namespace: sandboxd-system
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-host-integrated
+  namespace: sandboxd-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandboxd-host-integrated
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandboxd-host-integrated
+    spec:
+      nodeSelector:
+        runtrue.io/sandbox-host-integrated: "true"
+      tolerations:
+        - key: runtrue.io/sandbox
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      serviceAccountName: sandboxd
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: sandboxd
+          image: sandboxd-host-integrated:local
+          imagePullPolicy: Never
+          command:
+            - /usr/local/bin/runtrue-sandboxd
+          args:
+            - serve
+            - --guest-profile
+            - root-in-sandbox-v1
+            - --socket
+            - /run/runtrue-sandboxd/control.sock
+            - --state-root
+            - /var/lib/runtrue-sandboxd/state
+            - --image-store
+            - /var/lib/runtrue-sandboxd/images
+            - --ctr
+            - /usr/bin/ctr
+            - --containerd-address
+            - /run/k3s/containerd/containerd.sock
+            - --containerd-namespace
+            - runtrue-sandboxd
+            - --runsc
+            - /usr/local/bin/runsc
+            - --ip
+            - /usr/sbin/ip
+            - --nft
+            - /usr/sbin/nft
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            runAsUser: 0
+            runAsGroup: 0
+            seccompProfile:
+              type: Unconfined
+            appArmorProfile:
+              type: Unconfined
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/runtrue-sandboxd
+                - ping
+                - --socket
+                - /run/runtrue-sandboxd/control.sock
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/runtrue-sandboxd
+                - ping
+                - --socket
+                - /run/runtrue-sandboxd/control.sock
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: runtime
+              mountPath: /run/runtrue-sandboxd
+            - name: network-namespaces
+              mountPath: /run/netns
+            - name: state
+              mountPath: /var/lib/runtrue-sandboxd
+              mountPropagation: Bidirectional
+            - name: k3s-containerd-runtime
+              mountPath: /run/k3s/containerd
+              readOnly: true
+              mountPropagation: HostToContainer
+            - name: k3s-containerd-root
+              mountPath: /var/lib/rancher/k3s/agent/containerd
+              readOnly: true
+              mountPropagation: HostToContainer
+      volumes:
+        - name: runtime
+          emptyDir: {}
+        - name: network-namespaces
+          emptyDir: {}
+        - name: state
+          hostPath:
+            path: /var/lib/runtrue-sandboxd-k3s
+            type: DirectoryOrCreate
+        - name: k3s-containerd-runtime
+          hostPath:
+            path: /run/k3s/containerd
+            type: Directory
+        - name: k3s-containerd-root
+          hostPath:
+            path: /var/lib/rancher/k3s/agent/containerd
+            type: Directory

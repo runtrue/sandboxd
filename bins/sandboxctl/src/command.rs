@@ -100,6 +100,7 @@ fn provider(
         },
         platform: ImagePlatform::parse(&options.platform)?,
         limits: ImageLimits::default(),
+        fixed_rootfs: None,
     })
     .map(Arc::new)
 }
@@ -209,6 +210,7 @@ fn run(
                 SandboxError::Runtime(format!("open local volume provider: {error}"))
             })?,
         ),
+        executor::ExecutorConfiguration::default(),
     );
     let mut release_error = None;
     for rootfs in admitted.values() {

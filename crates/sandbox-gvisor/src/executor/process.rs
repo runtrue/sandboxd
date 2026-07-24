@@ -1,3 +1,4 @@
+use super::NetworkMode;
 use crate::{error::io_error, SandboxError};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -22,6 +23,7 @@ const DIAGNOSTIC_DIRECTORY: &str = "diagnostics";
 pub(super) struct Runsc {
     program: PathBuf,
     root: PathBuf,
+    network_mode: NetworkMode,
 }
 
 pub(super) struct ServiceProcess {
@@ -42,7 +44,11 @@ pub(super) struct CapturedOutput {
 }
 
 impl Runsc {
-    pub(super) fn new(program: &Path, root: &Path) -> Result<Self, SandboxError> {
+    pub(super) fn new(
+        program: &Path,
+        root: &Path,
+        network_mode: NetworkMode,
+    ) -> Result<Self, SandboxError> {
         if !program.is_absolute()
             || program.file_name().and_then(|name| name.to_str()) != Some("runsc")
         {
@@ -65,6 +71,7 @@ impl Runsc {
         Ok(Self {
             program,
             root: root.to_owned(),
+            network_mode,
         })
     }
 
@@ -119,14 +126,17 @@ impl Runsc {
     where
         I: IntoIterator<Item = String>,
     {
-        let current =
-            std::env::current_exe().map_err(|source| io_error("<current executable>", source))?;
         let diagnostic_path = self.diagnostic_path(&id);
-        let mut command = Command::new(current);
+        let mut command = if cgroup.as_os_str().is_empty() {
+            Command::new(&self.program)
+        } else {
+            let current = std::env::current_exe()
+                .map_err(|source| io_error("<current executable>", source))?;
+            let mut command = Command::new(current);
+            command.arg("__cgroup-exec").arg(cgroup).arg(&self.program);
+            command
+        };
         command
-            .arg("__cgroup-exec")
-            .arg(cgroup)
-            .arg(&self.program)
             .args(self.common_arguments())
             .arg(format!("--log={}", diagnostic_path.display()))
             .arg("--log-format=text")
@@ -409,7 +419,14 @@ impl Runsc {
     fn common_arguments(&self) -> Vec<String> {
         vec![
             format!("--root={}", self.root.display()),
-            "--network=sandbox".to_owned(),
+            format!(
+                "--network={}",
+                if self.network_mode == NetworkMode::Loopback {
+                    "none"
+                } else {
+                    "sandbox"
+                }
+            ),
             "--ignore-cgroups=true".to_owned(),
             "--platform=systrap".to_owned(),
             "--overlay2=none".to_owned(),

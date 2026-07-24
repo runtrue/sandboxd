@@ -1,4 +1,6 @@
 use runtrue_sandbox_core::{GuestProfile, WorkerId, STRICT_GUEST_PROFILE};
+use runtrue_sandbox_gvisor::executor::ExecutorConfiguration;
+use runtrue_sandbox_oci::provider::FixedRootfsConfig;
 use runtrue_sandbox_oci::SandboxError;
 use std::{path::PathBuf, time::Duration};
 
@@ -26,6 +28,8 @@ pub(crate) struct ServerConfig {
     pub(crate) containerd_namespace: String,
     pub(crate) snapshotter: String,
     pub(crate) image_platform: String,
+    pub(crate) fixed_rootfs: Option<FixedRootfsConfig>,
+    pub(crate) executor: ExecutorConfiguration,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
     pub(crate) nft: PathBuf,
@@ -133,6 +137,8 @@ mod tests {
             containerd_namespace: "runtrue-sandboxd".to_owned(),
             snapshotter: "overlayfs".to_owned(),
             image_platform: "linux/amd64".to_owned(),
+            fixed_rootfs: None,
+            executor: ExecutorConfiguration::default(),
             runsc: PathBuf::from("/usr/local/bin/runsc"),
             ip: PathBuf::from("/usr/sbin/ip"),
             nft: PathBuf::from("/usr/sbin/nft"),

@@ -1,0 +1,44 @@
+name: volume-conformance
+x-runtrue-guest-profile: root-in-sandbox-v1
+
+volumes:
+  shared:
+    persistence_class: persistent
+    quota_bytes: 8388608
+
+services:
+  writer:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import time
+        from pathlib import Path
+        Path("/mnt/conformance.txt").write_text("named-volume-passed\n")
+        time.sleep(300)
+    healthcheck:
+      test: [CMD, /usr/local/bin/python3, -c, 'from pathlib import Path; assert Path("/mnt/conformance.txt").read_text() == "named-volume-passed\n"']
+      interval_ms: 50
+      timeout_ms: 500
+      retries: 80
+    volumes:
+      - source: shared
+        target: /mnt
+    read_only: true
+
+  reader:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        from pathlib import Path
+        value = Path("/mnt/conformance.txt").read_text()
+        assert value == "named-volume-passed\n"
+        print(value, end="")
+    depends_on:
+      writer:
+        condition: service_healthy
+    volumes:
+      - source: shared
+        target: /mnt
+    read_only: true

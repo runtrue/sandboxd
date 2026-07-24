@@ -105,6 +105,11 @@ pub(super) fn write_bundle(
             "options": options,
         }));
     }
+    let network_namespace = if network_namespace.is_empty() {
+        json!({"type": "network"})
+    } else {
+        json!({"type": "network", "path": format!("/var/run/netns/{network_namespace}")})
+    };
     let config = json!({
         "ociVersion": "1.2.1",
         "annotations": annotations,
@@ -133,7 +138,7 @@ pub(super) fn write_bundle(
         "linux": {
             "namespaces": [
                 {"type": "pid"},
-                {"type": "network", "path": format!("/var/run/netns/{network_namespace}")},
+                network_namespace,
                 {"type": "ipc"},
                 {"type": "uts"},
                 {"type": "mount"}

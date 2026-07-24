@@ -1,0 +1,58 @@
+FROM mirror.gcr.io/library/python@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS nested-rootfs
+
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
+
+ARG CONTAINERD_VERSION=2.2.3
+ARG GVISOR_VERSION=20260714.0
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        e2fsprogs \
+        iproute2 \
+        jq \
+        nftables \
+        procps \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# sandboxd executes ctr directly, so install the real client matched to the
+# containerd embedded in the pinned k3s node.
+RUN set -eux; \
+    archive="containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"; \
+    curl -fsSL \
+      "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/${archive}" \
+      -o "/tmp/${archive}"; \
+    curl -fsSL \
+      "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/${archive}.sha256sum" \
+      -o "/tmp/${archive}.sha256sum"; \
+    (cd /tmp && sha256sum -c "${archive}.sha256sum"); \
+    tar -xzf "/tmp/${archive}" -C /tmp bin/containerd bin/ctr; \
+    install -m 0755 /tmp/bin/containerd /usr/local/bin/containerd; \
+    install -m 0755 /tmp/bin/ctr /usr/bin/ctr; \
+    rm -rf "/tmp/${archive}" "/tmp/${archive}.sha256sum" /tmp/bin
+
+RUN set -eux; \
+    gvisor_url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/x86_64"; \
+    curl -fsSL "${gvisor_url}/runsc" -o /usr/local/bin/runsc; \
+    curl -fsSL "${gvisor_url}/runsc.sha512" -o /tmp/runsc.sha512; \
+    (cd /usr/local/bin && sha512sum -c /tmp/runsc.sha512); \
+    chmod 0755 /usr/local/bin/runsc; \
+    rm /tmp/runsc.sha512
+
+ARG SANDBOXD_BUILD_ID=local
+RUN test -n "$SANDBOXD_BUILD_ID"
+COPY target/release/runtrue-sandboxd /usr/local/bin/runtrue-sandboxd
+COPY target/release/runtrue-sandboxctl /usr/local/bin/runtrue-sandboxctl
+COPY deploy/k3s/conformance-fixed.yaml /opt/runtrue-sandboxd/conformance-fixed.yaml
+COPY deploy/k3s/fixed-runtime.lock.json /opt/runtrue-sandboxd/fixed-runtime.lock.json
+COPY --from=nested-rootfs / /opt/runtrue-sandboxd/fixed-rootfs
+COPY deploy/k3s/validate-runtime.sh /usr/local/bin/validate-sandboxd-runtime
+COPY deploy/k3s/run-dynamic-runtime.sh /usr/local/bin/run-sandboxd-dynamic-runtime
+RUN chmod 0755 \
+    /usr/local/bin/validate-sandboxd-runtime \
+    /usr/local/bin/run-sandboxd-dynamic-runtime
+
+ENTRYPOINT ["/usr/local/bin/runtrue-sandboxd"]
+CMD ["serve"]

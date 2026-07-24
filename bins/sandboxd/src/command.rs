@@ -35,6 +35,13 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 containerd_namespace,
                 snapshotter,
                 image_platform,
+                fixed_rootfs,
+                fixed_topology_lock,
+                fixed_rootfs_digest,
+                fixed_rootfs_entries,
+                fixed_rootfs_bytes,
+                network_mode,
+                cgroup_mode,
                 runsc,
                 ip,
                 nft,
@@ -53,6 +60,43 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 }
                 installed_guest_profiles.push(profile);
             }
+            let fixed_rootfs =
+                fixed_rootfs
+                    .zip(fixed_topology_lock)
+                    .map(|(rootfs, topology_lock)| {
+                        runtrue_sandbox_oci::provider::FixedRootfsConfig {
+                            rootfs,
+                            topology_lock,
+                            measurement: fixed_rootfs_digest
+                                .zip(fixed_rootfs_entries)
+                                .zip(fixed_rootfs_bytes)
+                                .map(|((digest, entries), bytes)| {
+                                    runtrue_sandbox_oci::provider::FixedRootfsMeasurement {
+                                        digest,
+                                        entries,
+                                        bytes,
+                                    }
+                                }),
+                        }
+                    });
+            let executor = runtrue_sandbox_gvisor::executor::ExecutorConfiguration {
+                network_mode: match network_mode {
+                    crate::cli::NetworkMode::Private => {
+                        runtrue_sandbox_gvisor::executor::NetworkMode::Private
+                    }
+                    crate::cli::NetworkMode::Loopback => {
+                        runtrue_sandbox_gvisor::executor::NetworkMode::Loopback
+                    }
+                },
+                cgroup_mode: match cgroup_mode {
+                    crate::cli::CgroupMode::Managed => {
+                        runtrue_sandbox_gvisor::executor::CgroupMode::Managed
+                    }
+                    crate::cli::CgroupMode::External => {
+                        runtrue_sandbox_gvisor::executor::CgroupMode::External
+                    }
+                },
+            };
             server::serve(server::ServerConfig {
                 operator_socket: socket,
                 workload_socket,
@@ -78,6 +122,8 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 containerd_namespace,
                 snapshotter,
                 image_platform,
+                fixed_rootfs,
+                executor,
                 runsc,
                 ip,
                 nft,

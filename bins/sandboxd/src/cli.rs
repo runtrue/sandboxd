@@ -1,7 +1,19 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 pub(crate) const DEFAULT_SOCKET: &str = "/run/runtrue-sandboxd/control.sock";
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum NetworkMode {
+    Private,
+    Loopback,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum CgroupMode {
+    Managed,
+    External,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "runtrue-sandboxd", about = "Runtrue OCI sandbox worker")]
@@ -178,6 +190,34 @@ pub(crate) struct ServeArgs {
     pub(crate) snapshotter: String,
     #[arg(long, default_value = "linux/amd64")]
     pub(crate) image_platform: String,
+    /// Use one pre-installed, image-identity-bound root filesystem instead of containerd.
+    #[arg(long, requires = "fixed_topology_lock")]
+    pub(crate) fixed_rootfs: Option<PathBuf>,
+    /// Lock file whose single image is bound to --fixed-rootfs.
+    #[arg(long, requires = "fixed_rootfs")]
+    pub(crate) fixed_topology_lock: Option<PathBuf>,
+    /// Prevalidated fixed-rootfs digest; all three measurement fields are required together.
+    #[arg(
+        long,
+        requires_all = ["fixed_rootfs", "fixed_rootfs_entries", "fixed_rootfs_bytes"]
+    )]
+    pub(crate) fixed_rootfs_digest: Option<String>,
+    #[arg(
+        long,
+        requires_all = ["fixed_rootfs", "fixed_rootfs_digest", "fixed_rootfs_bytes"]
+    )]
+    pub(crate) fixed_rootfs_entries: Option<usize>,
+    #[arg(
+        long,
+        requires_all = ["fixed_rootfs", "fixed_rootfs_digest", "fixed_rootfs_entries"]
+    )]
+    pub(crate) fixed_rootfs_bytes: Option<u64>,
+    /// Guest network implementation.
+    #[arg(long, value_enum, default_value_t = NetworkMode::Private)]
+    pub(crate) network_mode: NetworkMode,
+    /// Resource accounting boundary: direct per-sandbox cgroups or the enclosing workload.
+    #[arg(long, value_enum, default_value_t = CgroupMode::Managed)]
+    pub(crate) cgroup_mode: CgroupMode,
     #[arg(long, default_value = "/usr/local/bin/runsc")]
     pub(crate) runsc: PathBuf,
     #[arg(long, default_value = "/usr/sbin/ip")]

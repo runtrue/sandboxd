@@ -1,6 +1,6 @@
 use super::{
     bundle, create_resources, process::Runsc, runtime_id, validate_admitted, validate_project,
-    GvisorSandbox, GvisorSandboxState, ImmutableRootfs, Resources,
+    ExecutorConfiguration, GvisorSandbox, GvisorSandboxState, ImmutableRootfs, Resources,
 };
 use crate::{
     compiler::verify_lock,
@@ -18,7 +18,7 @@ use runtrue_sandbox_oci::RootFilesystemMode;
 use runtrue_sandbox_volume::{VolumeProvider, VolumeScope, VolumeSnapshot};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -41,6 +41,7 @@ pub fn restore_admitted(
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
     volume_provider: Arc<dyn VolumeProvider>,
+    configuration: ExecutorConfiguration,
 ) -> Result<GvisorSandbox, SandboxError> {
     let restore_started = Instant::now();
     verify_lock(lock)?;
@@ -151,7 +152,11 @@ pub fn restore_admitted(
         .prefix("restore-cohort-")
         .tempdir_in(snapshot_staging_root)
         .map_err(|error| crate::io_error(snapshot_staging_root, error))?;
-    let preflight_runsc = Runsc::new(runsc_program, &preflight.path().join("runsc"))?;
+    let preflight_runsc = Runsc::new(
+        runsc_program,
+        &preflight.path().join("runsc"),
+        configuration.network_mode,
+    )?;
     if preflight_runsc.version()? != metadata.runsc_version
         || preflight_runsc.configuration_digest() != metadata.runtime_configuration_digest
         || preflight_runsc.cpu_features_digest()? != metadata.cpu_features_digest
@@ -181,6 +186,7 @@ pub fn restore_admitted(
         rootfs_provider,
         volume_scope,
         volume_provider,
+        configuration,
         Some(&restored.writable_diffs),
         Some(&restored_volumes),
     )?;
@@ -455,11 +461,10 @@ fn restore_services(
             continue;
         }
         let service = &lock.services[service_name];
-        let cgroup = resources
-            .cgroups
-            .as_mut()
-            .expect("cgroups exist")
-            .create_service(service_name, &lock.policy)?;
+        let cgroup = match resources.cgroups.as_mut() {
+            Some(cgroups) => cgroups.create_service(service_name, &lock.policy)?,
+            None => PathBuf::new(),
+        };
         let bundle_path = resources.state.join(format!("bundle-{service_name}"));
         let sandbox_network = resources
             .network

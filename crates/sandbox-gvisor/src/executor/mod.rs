@@ -31,7 +31,7 @@ use runtrue_sandbox_oci::{
 use runtrue_sandbox_volume::{
     AttachmentOwner, MountedVolume, VolumeHandle, VolumeProvider, VolumeScope, VolumeSnapshot,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -63,6 +63,28 @@ pub struct GvisorRunResult {
     cleanup_verified: bool,
     host_task_limit: u32,
     cgroups: BTreeMap<String, CgroupMetrics>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+    #[default]
+    Private,
+    Loopback,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CgroupMode {
+    #[default]
+    Managed,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExecutorConfiguration {
+    pub network_mode: NetworkMode,
+    pub cgroup_mode: CgroupMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -160,6 +182,7 @@ pub fn run_admitted(
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
     volume_provider: Arc<dyn VolumeProvider>,
+    configuration: ExecutorConfiguration,
 ) -> Result<GvisorRunResult, SandboxError> {
     let overall_started = Instant::now();
     verify_lock(lock)?;
@@ -184,6 +207,7 @@ pub fn run_admitted(
         rootfs_provider,
         volume_scope,
         volume_provider,
+        configuration,
         preflight_ms,
         overall_started,
     )
@@ -203,6 +227,7 @@ fn run_admitted_inner(
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
     volume_provider: Arc<dyn VolumeProvider>,
+    configuration: ExecutorConfiguration,
     preflight_ms: u128,
     overall_started: Instant,
 ) -> Result<GvisorRunResult, SandboxError> {
@@ -218,6 +243,7 @@ fn run_admitted_inner(
         rootfs_provider,
         volume_scope,
         volume_provider,
+        configuration,
         None,
         None,
     )?;
@@ -275,6 +301,7 @@ pub fn start_admitted(
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
     volume_provider: Arc<dyn VolumeProvider>,
+    configuration: ExecutorConfiguration,
 ) -> Result<GvisorSandbox, SandboxError> {
     verify_lock(lock)?;
     validate_project(project)?;
@@ -290,6 +317,7 @@ pub fn start_admitted(
         rootfs_provider,
         volume_scope,
         volume_provider,
+        configuration,
         None,
         None,
     )?;
@@ -349,35 +377,55 @@ fn create_resources(
     rootfs_provider: Arc<dyn ImageProvider>,
     volume_scope: &VolumeScope,
     volume_provider: Arc<dyn VolumeProvider>,
+    configuration: ExecutorConfiguration,
     writable_diffs: Option<&BTreeMap<String, PathBuf>>,
     volume_snapshots: Option<&RestoredVolumes>,
 ) -> Result<Resources, SandboxError> {
     let state = prepare_state(state_root, project)?;
-    if let Err(error) = recovery::write_recovery_record(&state, project, lock) {
+    if let Err(error) = recovery::write_recovery_record(&state, project, lock, configuration) {
         let _ = fs::remove_dir_all(&state);
         return Err(error);
     }
-    let cgroups = match CgroupSet::create(project) {
-        Ok(cgroups) => cgroups,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&state);
-            return Err(error);
+    let cgroups = if configuration.cgroup_mode == CgroupMode::External {
+        None
+    } else {
+        match CgroupSet::create(project) {
+            Ok(cgroups) => Some(cgroups),
+            Err(error) => {
+                let _ = fs::remove_dir_all(&state);
+                return Err(error);
+            }
         }
     };
-    let network = match ProjectNetwork::create(ip_program, nft_program, project, lock, &state) {
+    let network = match ProjectNetwork::create(
+        ip_program,
+        nft_program,
+        project,
+        lock,
+        &state,
+        configuration,
+    ) {
         Ok(network) => network,
         Err(error) => {
-            let _ = cgroups.cleanup();
+            if let Some(cgroups) = cgroups {
+                let _ = cgroups.cleanup();
+            }
             let _ = fs::remove_dir_all(&state);
             return Err(error);
         }
     };
-    let runsc = match Runsc::new(runsc_program, &state.join("runsc")) {
+    let runsc = match Runsc::new(
+        runsc_program,
+        &state.join("runsc"),
+        configuration.network_mode,
+    ) {
         Ok(runsc) => runsc,
         Err(error) => {
             let mut network = network;
             let _ = network.cleanup();
-            let _ = cgroups.cleanup();
+            if let Some(cgroups) = cgroups {
+                let _ = cgroups.cleanup();
+            }
             let _ = fs::remove_dir_all(&state);
             return Err(error);
         }
@@ -387,7 +435,7 @@ fn create_resources(
         runsc,
         sandbox_runtime_id: runtime_id(project, &lock.startup_order[0]),
         service_order: lock.startup_order.clone(),
-        cgroups: Some(cgroups),
+        cgroups,
         network: Some(network),
         processes: BTreeMap::new(),
         rootfs_provider,
@@ -496,11 +544,10 @@ fn start_services(
                 }
             }
         }
-        let cgroup = resources
-            .cgroups
-            .as_mut()
-            .expect("cgroups exist")
-            .create_service(service_name, &lock.policy)?;
+        let cgroup = match resources.cgroups.as_mut() {
+            Some(cgroups) => cgroups.create_service(service_name, &lock.policy)?,
+            None => PathBuf::new(),
+        };
         let bundle_path = resources.state.join(format!("bundle-{service_name}"));
         let sandbox_network = resources
             .network

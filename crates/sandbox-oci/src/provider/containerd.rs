@@ -6,13 +6,15 @@ use super::{
     layer::{validate_layer, LayerBudget},
     validation::{
         measure_rootfs, mount_is_read_only, mount_state, valid_digest, validate_locked_image,
-        validate_platform,
+        validate_platform, RootfsMeasurement,
     },
     GarbageCollectionReport, ImageProvider, ImmutableRootfs, PreparationStatus,
     PreparedImageHandle, RegistryCredential, WritableRootfs, WritableRootfsExport,
     WritableRootfsIdentity,
 };
-use crate::{io_error, LockedDescriptor, LockedImage, SandboxError};
+use crate::{
+    compiler::verify_lock, io_error, LockedDescriptor, LockedImage, SandboxError, TopologyLock,
+};
 use serde_json::Value;
 use std::{
     fs::{self, DirBuilder, OpenOptions},
@@ -37,36 +39,57 @@ const MANIFEST_MEDIA_TYPES: &[&str] = &[
 pub struct ContainerdImageProvider {
     config: ContainerdProviderConfig,
     runner: CommandRunner,
-    writable: LoopbackWritableRootfs,
+    writable: Option<LoopbackWritableRootfs>,
+    fixed_rootfs: Option<PathBuf>,
+    fixed_image: Option<LockedImage>,
     operation: Mutex<()>,
 }
 
 impl ContainerdImageProvider {
     pub fn new(config: ContainerdProviderConfig) -> Result<Self, SandboxError> {
         let config = config.validated()?;
-        let writable = LoopbackWritableRootfs::new(
-            config.writable_rootfs.clone(),
-            config.limits.maximum_command_output_bytes,
-        )?;
+        let fixed_rootfs = config
+            .fixed_rootfs
+            .as_ref()
+            .map(|fixed| fixed.rootfs.clone());
+        let fixed_image = config
+            .fixed_rootfs
+            .as_ref()
+            .map(|fixed| load_fixed_image(&fixed.topology_lock))
+            .transpose()?;
+        let writable = if fixed_rootfs.is_some() {
+            None
+        } else {
+            Some(LoopbackWritableRootfs::new(
+                config.writable_rootfs.clone(),
+                config.limits.maximum_command_output_bytes,
+            )?)
+        };
         let runner = CommandRunner::new(
             config.ctr_program.clone(),
             config.address.clone(),
             config.namespace.clone(),
             config.limits.maximum_command_output_bytes,
         );
-        runner.run(
-            &["version".to_owned()],
-            Duration::from_secs(10),
-            "query containerd version",
-        )?;
+        if fixed_rootfs.is_none() {
+            runner.run(
+                &["version".to_owned()],
+                Duration::from_secs(10),
+                "query containerd version",
+            )?;
+        }
         let provider = Self {
             config,
             runner,
             writable,
+            fixed_rootfs,
+            fixed_image,
             operation: Mutex::new(()),
         };
-        provider.ensure_namespace()?;
-        provider.garbage_collect()?;
+        if provider.fixed_rootfs.is_none() {
+            provider.ensure_namespace()?;
+            provider.garbage_collect()?;
+        }
         Ok(provider)
     }
 
@@ -77,7 +100,29 @@ impl ContainerdImageProvider {
 
     fn validate_image(&self, image: &LockedImage) -> Result<(), SandboxError> {
         validate_locked_image(image, &self.config.limits)?;
-        validate_platform(image, &self.config.platform)
+        validate_platform(image, &self.config.platform)?;
+        if self
+            .fixed_image
+            .as_ref()
+            .is_some_and(|expected| image != expected)
+        {
+            return Err(SandboxError::ImageProvider(
+                "locked image does not match the image bound to the fixed rootfs".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn fixed_measurement(&self) -> Option<RootfsMeasurement> {
+        self.config
+            .fixed_rootfs
+            .as_ref()
+            .and_then(|fixed| fixed.measurement.as_ref())
+            .map(|measurement| RootfsMeasurement {
+                digest: measurement.digest.clone(),
+                entries: measurement.entries,
+                bytes: measurement.bytes,
+            })
     }
 
     fn ensure_namespace(&self) -> Result<(), SandboxError> {
@@ -630,6 +675,11 @@ impl ImageProvider for ContainerdImageProvider {
         source: &str,
         credential: Option<&RegistryCredential>,
     ) -> Result<LockedImage, SandboxError> {
+        if self.fixed_rootfs.is_some() {
+            return Err(SandboxError::Unsupported(format!(
+                "fixed-rootfs image provider cannot resolve `{source}`"
+            )));
+        }
         self.resolve_remote(source, credential)
     }
 
@@ -639,6 +689,9 @@ impl ImageProvider for ContainerdImageProvider {
         credential: Option<&RegistryCredential>,
     ) -> Result<PreparationStatus, SandboxError> {
         self.validate_image(image)?;
+        if self.fixed_rootfs.is_some() {
+            return Ok(PreparationStatus::Reused);
+        }
         let _operation = self.operation.lock().expect("image provider lock");
         if self.verify(image).is_ok() && self.unpack(image).is_ok() {
             return Ok(PreparationStatus::Reused);
@@ -668,12 +721,18 @@ impl ImageProvider for ContainerdImageProvider {
 
     fn verify(&self, image: &LockedImage) -> Result<(), SandboxError> {
         self.validate_image(image)?;
+        if self.fixed_rootfs.is_some() {
+            return Ok(());
+        }
         self.verify_descriptor_graph(image)?;
         self.validate_layers(image)
     }
 
     fn unpack(&self, image: &LockedImage) -> Result<(), SandboxError> {
         self.validate_image(image)?;
+        if self.fixed_rootfs.is_some() {
+            return Ok(());
+        }
         let ready_reference = containerd_reference(image)?;
         let result = self.runner.run(
             &[
@@ -714,6 +773,21 @@ impl ImageProvider for ContainerdImageProvider {
             ));
         }
         self.validate_image(&handle.image)?;
+        if let Some(rootfs) = &self.fixed_rootfs {
+            let measured = match self.fixed_measurement() {
+                Some(measured) => measured,
+                None => measure_rootfs(rootfs, &self.config.limits)?,
+            };
+            return Ok(ImmutableRootfs {
+                provider: PROVIDER_ID.to_owned(),
+                activation_key: handle.activation_key.clone(),
+                image: handle.image.clone(),
+                rootfs: rootfs.clone(),
+                rootfs_digest: measured.digest,
+                rootfs_entries: measured.entries,
+                rootfs_bytes: measured.bytes,
+            });
+        }
         let _operation = self.operation.lock().expect("image provider lock");
         let activations = self.config.mount_root.join("activations");
         fs::create_dir_all(&activations).map_err(|source| io_error(&activations, source))?;
@@ -838,6 +912,14 @@ impl ImageProvider for ContainerdImageProvider {
                 "immutable rootfs handle belongs to another provider".to_owned(),
             ));
         }
+        if let Some(fixed_rootfs) = &self.fixed_rootfs {
+            if &rootfs.rootfs != fixed_rootfs {
+                return Err(SandboxError::ImageProvider(
+                    "fixed rootfs path does not match its provider handle".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
         let _operation = self.operation.lock().expect("image provider lock");
         let directory = self.activation_directory(&rootfs.activation_key);
         let expected = directory.join("rootfs");
@@ -856,13 +938,26 @@ impl ImageProvider for ContainerdImageProvider {
         identity: WritableRootfsIdentity,
         quota_bytes: u64,
     ) -> Result<WritableRootfs, SandboxError> {
+        if self.fixed_rootfs.is_some() {
+            return Err(SandboxError::Unsupported(
+                "fixed-rootfs image provider supports read-only roots only".to_owned(),
+            ));
+        }
         let _operation = self.operation.lock().expect("image provider lock");
-        self.writable.create(immutable, identity, quota_bytes)
+        self.writable
+            .as_ref()
+            .expect("dynamic provider has a writable-root provider")
+            .create(immutable, identity, quota_bytes)
     }
 
     fn release_writable_rootfs(&self, rootfs: &WritableRootfs) -> Result<(), SandboxError> {
+        let Some(writable) = &self.writable else {
+            return Err(SandboxError::Unsupported(
+                "fixed-rootfs image provider has no writable roots".to_owned(),
+            ));
+        };
         let _operation = self.operation.lock().expect("image provider lock");
-        self.writable.release(rootfs)
+        writable.release(rootfs)
     }
 
     fn export_writable_rootfs(
@@ -870,8 +965,13 @@ impl ImageProvider for ContainerdImageProvider {
         rootfs: &WritableRootfs,
         destination: &Path,
     ) -> Result<WritableRootfsExport, SandboxError> {
+        let Some(writable) = &self.writable else {
+            return Err(SandboxError::Unsupported(
+                "fixed-rootfs image provider has no writable roots".to_owned(),
+            ));
+        };
         let _operation = self.operation.lock().expect("image provider lock");
-        self.writable.export(rootfs, destination)
+        writable.export(rootfs, destination)
     }
 
     fn restore_writable_rootfs(
@@ -881,17 +981,35 @@ impl ImageProvider for ContainerdImageProvider {
         quota_bytes: u64,
         diff: &Path,
     ) -> Result<WritableRootfs, SandboxError> {
+        if self.fixed_rootfs.is_some() {
+            return Err(SandboxError::Unsupported(
+                "fixed-rootfs image provider cannot restore writable roots".to_owned(),
+            ));
+        }
         let _operation = self.operation.lock().expect("image provider lock");
         self.writable
+            .as_ref()
+            .expect("dynamic provider has a writable-root provider")
             .restore(immutable, identity, quota_bytes, diff)
     }
 
     fn garbage_collect(&self) -> Result<GarbageCollectionReport, SandboxError> {
+        if self.fixed_rootfs.is_some() {
+            return Ok(GarbageCollectionReport {
+                stale_staging_directories: 0,
+                stale_mounts: 0,
+                stale_writable_roots: 0,
+            });
+        }
         let _operation = self.operation.lock().expect("image provider lock");
         let mut report = GarbageCollectionReport {
             stale_staging_directories: 0,
             stale_mounts: 0,
-            stale_writable_roots: self.writable.garbage_collect()?,
+            stale_writable_roots: self
+                .writable
+                .as_ref()
+                .expect("dynamic provider has a writable-root provider")
+                .garbage_collect()?,
         };
         for entry in fs::read_dir(&self.config.mount_root)
             .map_err(|source| io_error(&self.config.mount_root, source))?
@@ -939,6 +1057,29 @@ impl ImageProvider for ContainerdImageProvider {
         let rootfs = self.mount(&activated)?;
         Ok((status, rootfs))
     }
+}
+
+fn load_fixed_image(path: &Path) -> Result<LockedImage, SandboxError> {
+    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    let lock: TopologyLock = serde_json::from_slice(&bytes).map_err(|error| {
+        SandboxError::ImageProvider(format!(
+            "decode fixed-rootfs topology lock `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    verify_lock(&lock)?;
+    let mut images = lock.services.values().map(|service| &service.image);
+    let image = images.next().ok_or_else(|| {
+        SandboxError::ImageProvider(
+            "fixed-rootfs topology lock must contain at least one service".to_owned(),
+        )
+    })?;
+    if images.any(|candidate| candidate != image) {
+        return Err(SandboxError::ImageProvider(
+            "fixed-rootfs topology lock must bind exactly one image".to_owned(),
+        ));
+    }
+    Ok(image.clone())
 }
 
 struct ImageReference<'a> {

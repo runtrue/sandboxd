@@ -1,4 +1,7 @@
-use super::{cgroup, network, process::Runsc, runtime_id, validate_project};
+use super::{
+    cgroup, network, process::Runsc, runtime_id, validate_project, CgroupMode,
+    ExecutorConfiguration, NetworkMode,
+};
 use crate::{error::io_error, model::TopologyLock, SandboxError};
 use runtrue_sandbox_oci::provider::LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID;
 use serde::{Deserialize, Serialize};
@@ -9,7 +12,7 @@ use std::{
     path::Path,
 };
 
-const RECOVERY_SCHEMA_VERSION: u32 = 4;
+const RECOVERY_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,6 +26,10 @@ struct RecoveryRecord {
     network_namespaces: Vec<String>,
     #[serde(default)]
     nft_table: String,
+    #[serde(default)]
+    network_mode: NetworkMode,
+    #[serde(default)]
+    cgroup_mode: CgroupMode,
     #[serde(default)]
     writable_rootfs: Vec<WritableRootfsRecovery>,
 }
@@ -79,7 +86,7 @@ pub fn recover(
         let bytes = fs::read(&record_path).map_err(|source| io_error(&record_path, source))?;
         let record: RecoveryRecord = serde_json::from_slice(&bytes)
             .map_err(|error| SandboxError::Runtime(format!("decode recovery record: {error}")))?;
-        if !matches!(record.schema_version, 2 | 3 | RECOVERY_SCHEMA_VERSION)
+        if !matches!(record.schema_version, 2 | 3 | 4 | RECOVERY_SCHEMA_VERSION)
             || state.file_name().and_then(|name| name.to_str()) != Some(&record.project)
         {
             return Err(SandboxError::Runtime(
@@ -89,7 +96,7 @@ pub fn recover(
         validate_recovery_record(&record)?;
         let runsc_root = state.join("runsc");
         if runsc_root.exists() {
-            let runsc = Runsc::new(runsc_program, &runsc_root)?;
+            let runsc = Runsc::new(runsc_program, &runsc_root, record.network_mode)?;
             let mut active_ids = Vec::new();
             for id in &record.runtime_ids {
                 if runsc.state(id).is_ok() {
@@ -98,18 +105,22 @@ pub fn recover(
             }
             runsc.teardown(&active_ids, &record.sandbox_runtime_id)?;
         }
-        network::recover(
-            ip_program,
-            nft_program,
-            &record.bridge,
-            &record.network_namespaces,
-            &if record.nft_table.is_empty() {
-                network::nft_table_name(&record.project)
-            } else {
-                record.nft_table.clone()
-            },
-        )?;
-        cgroup::recover_project(&record.project)?;
+        if record.network_mode == NetworkMode::Private {
+            network::recover(
+                ip_program,
+                nft_program,
+                &record.bridge,
+                &record.network_namespaces,
+                &if record.nft_table.is_empty() {
+                    network::nft_table_name(&record.project)
+                } else {
+                    record.nft_table.clone()
+                },
+            )?;
+        }
+        if record.cgroup_mode == CgroupMode::Managed {
+            cgroup::recover_project(&record.project)?;
+        }
         fs::remove_dir_all(&state).map_err(|source| io_error(&state, source))?;
         recovered_projects.push(record.project);
     }
@@ -120,8 +131,10 @@ pub(super) fn write_recovery_record(
     state: &Path,
     project: &str,
     lock: &TopologyLock,
+    configuration: ExecutorConfiguration,
 ) -> Result<(), SandboxError> {
-    let (bridge, network_namespaces, nft_table) = network::planned_resources(project, lock);
+    let (bridge, network_namespaces, nft_table) =
+        network::planned_resources(project, lock, configuration.network_mode);
     let record = RecoveryRecord {
         schema_version: RECOVERY_SCHEMA_VERSION,
         project: project.to_owned(),
@@ -135,6 +148,8 @@ pub(super) fn write_recovery_record(
         bridge,
         network_namespaces,
         nft_table,
+        network_mode: configuration.network_mode,
+        cgroup_mode: configuration.cgroup_mode,
         writable_rootfs: Vec::new(),
     };
     let path = state.join("recovery.json");
@@ -185,16 +200,23 @@ pub(super) fn write_writable_rootfs(
 
 fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError> {
     validate_project(&record.project)?;
+    let valid_network_resources = if record.network_mode == NetworkMode::Loopback {
+        record.network_namespaces.is_empty()
+            && record.bridge.is_empty()
+            && record.nft_table.is_empty()
+    } else {
+        record.network_namespaces.len() == 1
+            && record.bridge == network::bridge_name(&record.project)
+            && ((record.schema_version >= 4
+                && record.nft_table == network::nft_table_name(&record.project))
+                || (record.schema_version < 4 && record.nft_table.is_empty()))
+    };
     if record.runtime_ids.is_empty()
         || record.runtime_ids.len() > 32
-        || record.network_namespaces.len() != 1
-        || record.bridge != network::bridge_name(&record.project)
+        || !valid_network_resources
         || !record.topology_digest.starts_with("sha256:")
         || record.topology_digest.len() != 71
         || (record.schema_version == 2 && !record.writable_rootfs.is_empty())
-        || (record.schema_version >= RECOVERY_SCHEMA_VERSION
-            && record.nft_table != network::nft_table_name(&record.project))
-        || (record.schema_version < RECOVERY_SCHEMA_VERSION && !record.nft_table.is_empty())
     {
         return Err(SandboxError::Runtime(
             "recovery record resource set is invalid".to_owned(),
@@ -219,11 +241,9 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError>
             ));
         }
     }
-    if !record.runtime_ids.contains(&record.sandbox_runtime_id)
-        || record.network_namespaces != vec![network::namespace_name(&record.project)]
-    {
+    if !record.runtime_ids.contains(&record.sandbox_runtime_id) {
         return Err(SandboxError::Runtime(
-            "recovery network identity does not match its project".to_owned(),
+            "recovery sandbox identity does not match its project".to_owned(),
         ));
     }
     let runtime_services = record
@@ -265,6 +285,8 @@ mod tests {
             bridge: network::bridge_name("tenant-a"),
             network_namespaces: vec![network::namespace_name("tenant-a")],
             nft_table: network::nft_table_name("tenant-a"),
+            network_mode: NetworkMode::Private,
+            cgroup_mode: CgroupMode::Managed,
             writable_rootfs: Vec::new(),
         }
     }
@@ -275,6 +297,20 @@ mod tests {
         let mut changed = recovery_record();
         changed.bridge = "eth0".to_owned();
         assert!(validate_recovery_record(&changed).is_err());
+    }
+
+    #[test]
+    fn loopback_external_mode_records_no_host_resources() {
+        let mut record = recovery_record();
+        record.network_mode = NetworkMode::Loopback;
+        record.cgroup_mode = CgroupMode::External;
+        record.bridge.clear();
+        record.network_namespaces.clear();
+        record.nft_table.clear();
+        assert!(validate_recovery_record(&record).is_ok());
+
+        record.bridge = network::bridge_name(&record.project);
+        assert!(validate_recovery_record(&record).is_err());
     }
 
     #[test]
