@@ -1276,6 +1276,8 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "axum",
  "clap",
+ "libc",
+ "nix",
  "runtrue-sandbox-core",
  "runtrue-sandbox-protocol",
  "serde",
@@ -1283,6 +1285,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "zeroize",
 ]
 
 [[package]]

@@ -640,8 +640,7 @@ impl PostgresPlacementStore {
                  WHERE sandboxd_placement.workers.state = 'clean'
                  AND sandboxd_placement.workers.topology = EXCLUDED.topology
                  AND sandboxd_placement.workers.resource_shape = EXCLUDED.resource_shape
-                 AND sandboxd_placement.workers.compatibility_cohort = EXCLUDED.compatibility_cohort
-                 AND sandboxd_placement.workers.broker_address = EXCLUDED.broker_address",
+                 AND sandboxd_placement.workers.compatibility_cohort = EXCLUDED.compatibility_cohort",
                 &[
                     &registration.worker_id.as_str(),
                     &registration.topology,

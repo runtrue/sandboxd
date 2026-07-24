@@ -189,7 +189,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<ServeOutcome, SandboxError> 
     }];
     if let (Some(path), Some(broker_uid)) = (&config.workload_socket, config.broker_uid) {
         endpoints.push(BoundEndpoint {
-            listener: socket::bind_workload(path, broker_uid)?,
+            listener: socket::bind_workload(path, broker_uid, config.broker_gid)?,
             path: path.clone(),
             endpoint: ConnectionEndpoint::Workload { broker_uid },
         });

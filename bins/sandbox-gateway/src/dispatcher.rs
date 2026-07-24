@@ -134,10 +134,6 @@ async fn exchange(
         .write_all(&body)
         .await
         .map_err(|error| format!("write broker body: {error}"))?;
-    stream
-        .shutdown()
-        .await
-        .map_err(|error| format!("finish broker request: {error}"))?;
     let mut encoded = Vec::new();
     stream
         .take((MAXIMUM_HEADER_BYTES + MAXIMUM_RESPONSE_BYTES + 1) as u64)
@@ -288,12 +284,29 @@ mod tests {
                 let server = tokio::spawn(async move {
                     let (mut stream, _) = listener.accept().await.expect("accept");
                     let mut encoded = Vec::new();
-                    stream.read_to_end(&mut encoded).await.expect("request");
-                    let body_start = encoded
-                        .windows(4)
-                        .position(|window| window == b"\r\n\r\n")
-                        .map(|position| position + 4)
-                        .expect("headers");
+                    let body_start = loop {
+                        let mut chunk = [0_u8; 1024];
+                        let read = stream.read(&mut chunk).await.expect("request");
+                        assert_ne!(read, 0, "request closed before its complete body");
+                        encoded.extend_from_slice(&chunk[..read]);
+                        if let Some(header_end) =
+                            encoded.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            let body_start = header_end + 4;
+                            let headers =
+                                std::str::from_utf8(&encoded[..body_start]).expect("UTF-8 headers");
+                            let content_length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.strip_prefix("Content-Length: ")
+                                        .and_then(|value| value.parse::<usize>().ok())
+                                })
+                                .expect("content length");
+                            if encoded.len() >= body_start + content_length {
+                                break body_start;
+                            }
+                        }
+                    };
                     let request: WorkloadRequest =
                         serde_json::from_slice(&encoded[body_start..]).expect("work order");
                     request.validate().expect("valid request");

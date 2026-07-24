@@ -19,6 +19,9 @@ RUN apt-get update \
 
 FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb AS runtime-libs
 
+FROM runtime-libs AS runtime-layout
+RUN install -d -m 0700 -o 0 -g 0 /image/run/secrets/work-order
+
 FROM scratch
 
 ARG SANDBOXD_BUILD_ID=local
@@ -30,6 +33,7 @@ COPY --from=runtime-libs /lib/x86_64-linux-gnu/libm.so.6 /lib/x86_64-linux-gnu/l
 COPY --from=runtime-libs /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
 COPY --from=runtime-libs /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
 COPY --from=runtime-libs /tmp /tmp
+COPY --from=runtime-layout /image/run /run
 COPY target/release/runtrue-sandboxd /usr/local/bin/runtrue-sandboxd
 COPY deploy/k3s/fixed-runtime.lock.json /opt/runtrue-sandboxd/fixed-runtime.lock.json
 COPY --from=nested-rootfs / /opt/runtrue-sandboxd/fixed-rootfs

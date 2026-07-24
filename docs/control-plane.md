@@ -43,15 +43,21 @@ sudo runtrue-sandboxd serve \
   --socket /run/runtrue-sandboxd/operator.sock \
   --workload-socket /run/runtrue-sandboxd/workload.sock \
   --broker-uid 991 \
+  --broker-gid 991 \
   --work-order-key /etc/runtrue-sandboxd/work-order.key \
   --guest-profile root-in-sandbox-v1 \
   --maximum-connections 64 \
   --io-timeout-seconds 5
 ```
 
-The operator socket is mode `0600` and accepts UID 0. The workload socket is
-mode `0600`, is owned by the configured non-root broker UID, and accepts that
-UID only.
+The operator socket is mode `0600` and accepts UID 0. By default the workload
+socket is mode `0600`, is owned by the configured non-root broker UID, and
+accepts that UID only. `--broker-gid` instead requires the socket directory to
+be pre-provisioned with that non-root GID, preserves it as a setgid directory,
+and creates the socket mode `0660` in that group. This avoids `CAP_CHOWN` in a
+Kubernetes user namespace. Unix peer credentials still require the exact
+configured broker UID, so group membership grants filesystem access but not
+workload authorization.
 
 The key file contains exactly 32 bytes encoded as 64 hexadecimal characters,
 with an optional trailing newline. It must be a root-owned regular file, must
@@ -80,6 +86,15 @@ service-account token, or require Linux capabilities. Its request body,
 response, concurrency, and I/O time are bounded. Kubernetes must additionally
 apply default-deny policy and allow the broker port only from the placement
 dispatcher identity.
+
+With `--registration-config`, `--gateway-address`, and `--advertise-ip`, the
+broker waits for the workload socket, registers one exact worker
+advertisement, and sends bounded heartbeats. The owner-only registration file
+contains a worker credential, identity, topology/shape/cohort, and resource
+ceilings; it contains no work-order signing key. Broker readiness stays false
+until both the Unix socket and registration are live. Kubernetes injects the
+Pod IP through `POD_IP` and the gateway host through
+`SANDBOX_GATEWAY_ADDRESS`.
 
 ## Protocol
 

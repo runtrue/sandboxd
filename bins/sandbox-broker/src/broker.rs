@@ -11,7 +11,10 @@ use serde::Serialize;
 use std::{
     os::unix::fs::FileTypeExt as _,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::{
@@ -28,6 +31,7 @@ const MAXIMUM_CONCURRENT_REQUESTS: usize = 32;
 pub(crate) struct BrokerState {
     socket: Arc<PathBuf>,
     io_timeout: Duration,
+    registration_ready: Option<Arc<AtomicBool>>,
 }
 
 impl BrokerState {
@@ -38,7 +42,13 @@ impl BrokerState {
         Ok(Self {
             socket: Arc::new(socket),
             io_timeout,
+            registration_ready: None,
         })
+    }
+
+    pub(crate) fn require_registration(mut self, ready: Arc<AtomicBool>) -> Self {
+        self.registration_ready = Some(ready);
+        self
     }
 }
 
@@ -57,6 +67,13 @@ async fn live() -> StatusCode {
 }
 
 async fn ready(State(state): State<BrokerState>) -> Result<StatusCode, BrokerError> {
+    if state
+        .registration_ready
+        .as_ref()
+        .is_some_and(|ready| !ready.load(Ordering::Acquire))
+    {
+        return Err(BrokerError::Unavailable);
+    }
     let metadata = tokio::fs::symlink_metadata(state.socket.as_ref())
         .await
         .map_err(|_| BrokerError::Unavailable)?;

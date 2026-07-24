@@ -7,15 +7,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use runtrue_sandbox_core::{QueuedWork, ResourceCeilings, SandboxId, WorkerId, WorkspaceId};
+use runtrue_sandbox_core::{QueuedWork, SandboxId, WorkerId, WorkspaceId};
 use runtrue_sandbox_placement::{
     EnqueueOutcome, PlacementRecord, PlacementState, PlacementStoreError, PlacementSubmission,
     PostgresPlacementStore, WorkerRegistration,
 };
-use runtrue_sandbox_protocol::{Operation, WorkloadResponse};
+use runtrue_sandbox_protocol::{Operation, WorkerAdvertisement, WorkloadResponse};
 use serde::{Deserialize, Serialize};
 use std::{
-    net::SocketAddr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -42,17 +41,6 @@ struct SubmitRequest {
     resource_shape: String,
     compatibility_cohort: String,
     operation: Operation,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RegisterWorkerRequest {
-    worker_id: WorkerId,
-    topology: String,
-    resource_shape: String,
-    compatibility_cohort: String,
-    broker_address: SocketAddr,
-    resource_ceilings: ResourceCeilings,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,7 +84,7 @@ pub(crate) fn router(state: AppState) -> Router {
 async fn register_worker(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<RegisterWorkerRequest>,
+    Json(request): Json<WorkerAdvertisement>,
 ) -> Result<StatusCode, ApiError> {
     let principal = state
         .worker_auth

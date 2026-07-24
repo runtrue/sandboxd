@@ -60,7 +60,7 @@ spec:
             - --worker-auth-policy
             - /run/secrets/auth/worker-policy.json
             - --work-order-key
-            - /run/secrets/auth/work-order.key
+            - /run/secrets/work-order/key
             - --listen
             - 0.0.0.0:8080
             - --allow-non-loopback-http
@@ -103,10 +103,32 @@ spec:
             periodSeconds: 10
           volumeMounts:
             - name: database-identity
-              mountPath: /run/secrets/database
+              mountPath: /run/secrets/database/url
+              subPath: url
+              readOnly: true
+            - name: database-identity
+              mountPath: /run/secrets/database/ca.crt
+              subPath: ca.crt
+              readOnly: true
+            - name: database-identity
+              mountPath: /run/secrets/database/tls.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: database-identity
+              mountPath: /run/secrets/database/tls.key
+              subPath: tls.key
               readOnly: true
             - name: auth-policy
-              mountPath: /run/secrets/auth
+              mountPath: /run/secrets/auth/policy.json
+              subPath: policy.json
+              readOnly: true
+            - name: auth-policy
+              mountPath: /run/secrets/auth/worker-policy.json
+              subPath: worker-policy.json
+              readOnly: true
+            - name: work-order-key
+              mountPath: /run/secrets/work-order/key
+              subPath: key
               readOnly: true
       volumes:
         - name: database-identity
@@ -116,6 +138,10 @@ spec:
         - name: auth-policy
           secret:
             secretName: sandbox-gateway-auth
+            defaultMode: 0440
+        - name: work-order-key
+          secret:
+            secretName: sandbox-work-order
             defaultMode: 0440
 ---
 apiVersion: policy/v1
@@ -188,7 +214,20 @@ spec:
               memory: 64Mi
           volumeMounts:
             - name: database-identity
-              mountPath: /run/secrets/database
+              mountPath: /run/secrets/database/url
+              subPath: url
+              readOnly: true
+            - name: database-identity
+              mountPath: /run/secrets/database/ca.crt
+              subPath: ca.crt
+              readOnly: true
+            - name: database-identity
+              mountPath: /run/secrets/database/tls.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: database-identity
+              mountPath: /run/secrets/database/tls.key
+              subPath: tls.key
               readOnly: true
       volumes:
         - name: database-identity

@@ -150,12 +150,22 @@ async fn exercise(url: &str) {
             .await
             .expect("clean worker registration");
     }
+    let mut rotated_worker_a = worker_a.clone();
+    rotated_worker_a.broker_address = "127.0.0.2:8081".parse().expect("rotated broker address");
+    replica_b
+        .register_worker(&rotated_worker_a, 111)
+        .await
+        .expect("clean worker address rotation");
     let source = replica_a
         .assign_next(&worker_a.worker_id, 120)
         .await
         .expect("source assignment")
         .expect("queued work");
     assert_eq!(source.identity.tenant_id, tenant_b);
+    assert!(matches!(
+        replica_b.register_worker(&worker_a, 121).await,
+        Err(PlacementStoreError::WorkerUnavailable)
+    ));
 
     drop(replica_a);
     let published = replica_b
