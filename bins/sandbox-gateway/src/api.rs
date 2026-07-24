@@ -76,6 +76,11 @@ pub(crate) fn router(state: AppState) -> Router {
             "/internal/v1/workers/{worker_id}/heartbeat",
             post(heartbeat_worker),
         )
+        .route("/internal/v1/workers/{worker_id}/drain", post(drain_worker))
+        .route(
+            "/internal/v1/workers/{worker_id}/quarantine",
+            post(quarantine_worker),
+        )
         .layer(DefaultBodyLimit::max(MAXIMUM_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(MAXIMUM_CONCURRENT_REQUESTS))
         .with_state(state)
@@ -130,6 +135,41 @@ async fn heartbeat_worker(
         .heartbeat_worker(&worker_id, now_unix_ms()?)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn drain_worker(
+    State(state): State<AppState>,
+    Path(worker_id): Path<WorkerId>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    authenticate_worker(&state, &headers, &worker_id)?;
+    state.store.drain_worker(&worker_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn quarantine_worker(
+    State(state): State<AppState>,
+    Path(worker_id): Path<WorkerId>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    authenticate_worker(&state, &headers, &worker_id)?;
+    state
+        .store
+        .quarantine_worker(&worker_id, now_unix_ms()?)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn authenticate_worker(
+    state: &AppState,
+    headers: &HeaderMap,
+    worker_id: &WorkerId,
+) -> Result<(), ApiError> {
+    state
+        .worker_auth
+        .authenticate(headers)
+        .and_then(|principal| principal.authorize_worker(worker_id))
+        .map_err(|()| ApiError::Unauthorized)
 }
 
 async fn live() -> StatusCode {
@@ -510,6 +550,70 @@ mod tests {
                         .expect("heartbeat")
                         .status(),
                     StatusCode::NO_CONTENT
+                );
+                let drain = Request::builder()
+                    .method("POST")
+                    .uri(format!("/internal/v1/workers/{worker_id}/drain"))
+                    .header(
+                        "authorization",
+                        "Worker worker-key-a.a-secure-worker-token-with-32-bytes",
+                    )
+                    .body(Body::empty())
+                    .expect("drain");
+                assert_eq!(
+                    app.clone().oneshot(drain).await.expect("drain").status(),
+                    StatusCode::NO_CONTENT
+                );
+                let draining_heartbeat = Request::builder()
+                    .method("POST")
+                    .uri(format!("/internal/v1/workers/{worker_id}/heartbeat"))
+                    .header(
+                        "authorization",
+                        "Worker worker-key-a.a-secure-worker-token-with-32-bytes",
+                    )
+                    .body(Body::empty())
+                    .expect("draining heartbeat");
+                assert_eq!(
+                    app.clone()
+                        .oneshot(draining_heartbeat)
+                        .await
+                        .expect("draining heartbeat")
+                        .status(),
+                    StatusCode::NO_CONTENT
+                );
+                let quarantine = Request::builder()
+                    .method("POST")
+                    .uri(format!("/internal/v1/workers/{worker_id}/quarantine"))
+                    .header(
+                        "authorization",
+                        "Worker worker-key-a.a-secure-worker-token-with-32-bytes",
+                    )
+                    .body(Body::empty())
+                    .expect("quarantine");
+                assert_eq!(
+                    app.clone()
+                        .oneshot(quarantine)
+                        .await
+                        .expect("quarantine")
+                        .status(),
+                    StatusCode::NO_CONTENT
+                );
+                let quarantined_heartbeat = Request::builder()
+                    .method("POST")
+                    .uri(format!("/internal/v1/workers/{worker_id}/heartbeat"))
+                    .header(
+                        "authorization",
+                        "Worker worker-key-a.a-secure-worker-token-with-32-bytes",
+                    )
+                    .body(Body::empty())
+                    .expect("quarantined heartbeat");
+                assert_eq!(
+                    app.clone()
+                        .oneshot(quarantined_heartbeat)
+                        .await
+                        .expect("quarantined heartbeat")
+                        .status(),
+                    StatusCode::SERVICE_UNAVAILABLE
                 );
                 let cancel = Request::builder()
                     .method("DELETE")
