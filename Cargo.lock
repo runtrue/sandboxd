@@ -1277,6 +1277,7 @@ dependencies = [
  "axum",
  "clap",
  "runtrue-sandbox-core",
+ "runtrue-sandbox-protocol",
  "serde",
  "serde_json",
  "tempfile",
@@ -1369,6 +1370,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtrue-sandbox-protocol"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "hex",
+ "runtrue-sandbox-core",
+ "runtrue-sandbox-oci",
+ "serde",
+ "serde_json",
+ "sha2 0.10.8",
+]
+
+[[package]]
 name = "runtrue-sandbox-runtime"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -1418,6 +1431,7 @@ dependencies = [
  "runtrue-sandbox-core",
  "runtrue-sandbox-gvisor",
  "runtrue-sandbox-oci",
+ "runtrue-sandbox-protocol",
  "runtrue-sandbox-volume",
  "serde",
  "serde_json",

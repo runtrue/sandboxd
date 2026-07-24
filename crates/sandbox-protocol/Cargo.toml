@@ -1,22 +1,18 @@
 [package]
-name = "runtrue-sandbox-broker"
+name = "runtrue-sandbox-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
-axum.workspace = true
-clap.workspace = true
+hex.workspace = true
 runtrue-sandbox-core.workspace = true
-runtrue-sandbox-protocol.workspace = true
+runtrue-sandbox-oci.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tower.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true
