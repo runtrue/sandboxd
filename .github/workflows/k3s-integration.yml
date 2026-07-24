@@ -144,8 +144,10 @@ jobs:
 
       - name: Validate local control-plane boundary
         run: |
-          sudo ss -lntp | grep -E '127\\.0\\.0\\.1:6443'
-          sudo ss -lntp | grep -E '127\\.0\\.0\\.1:10250'
+          sudo ss -H -lntp \
+            | awk '$4 == "127.0.0.1:6443" { found=1 } END { exit !found }'
+          sudo ss -H -lntp \
+            | awk '$4 == "127.0.0.1:10250" { found=1 } END { exit !found }'
           node=$(kubectl get node -o jsonpath='{.items[0].metadata.name}')
           kubectl label node "$node" runtrue.io/sandbox-node=true --overwrite
 
@@ -175,6 +177,8 @@ jobs:
             | tee k3s-diagnostics/k3s.log >/dev/null || true
           sudo iptables-save 2>&1 \
             | tee k3s-diagnostics/iptables.txt >/dev/null || true
+          sudo ss -lntp 2>&1 \
+            | tee k3s-diagnostics/listeners.txt >/dev/null || true
           docker image inspect sandboxd-fixed-runtime:local \
             >k3s-diagnostics/image.json 2>&1 || true
 
