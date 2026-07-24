@@ -32,6 +32,16 @@ replicas plus a one-shot schema migration Job. Build it with
 The checked-in Service is ClusterIP-only. Do not create a public LoadBalancer
 or permit cleartext ingress directly to the Pod listener.
 
+`Dockerfile.broker` packages the per-worker network broker as UID/GID 65533 in
+a scratch image. The broker runs with a read-only root filesystem, no
+capabilities, no privilege escalation, no service-account token, and only the
+shared workload-socket directory. It does not receive the work-order signing
+key or the operator socket. Non-loopback use requires authenticated mTLS
+termination plus NetworkPolicy restricting ingress to the placement
+dispatcher. The brokered worker manifest is intentionally introduced with the
+dispatcher so its network route cannot exist without the corresponding
+identity and policy.
+
 The fixed and dynamic profiles use a Kubernetes user namespace
 (`hostUsers: false`), disable service-account token mounting, expose no Service
 or Ingress, use no host namespace or `hostPath`, and apply a default-deny
