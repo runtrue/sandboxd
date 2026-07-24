@@ -2,6 +2,9 @@ mod api;
 mod auth;
 mod cli;
 mod config;
+mod dispatcher;
+mod signer;
+mod worker_auth;
 
 use clap::Parser as _;
 

@@ -57,6 +57,10 @@ spec:
             - /run/secrets/database/tls.key
             - --auth-policy
             - /run/secrets/auth/policy.json
+            - --worker-auth-policy
+            - /run/secrets/auth/worker-policy.json
+            - --work-order-key
+            - /run/secrets/auth/work-order.key
             - --listen
             - 0.0.0.0:8080
             - --allow-non-loopback-http
@@ -227,6 +231,13 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              runtrue.io/worker-registration-client: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -249,6 +260,13 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              runtrue.io/worker-broker: "true"
+      ports:
+        - protocol: TCP
+          port: 8081
     - to:
         - namespaceSelector:
             matchLabels:

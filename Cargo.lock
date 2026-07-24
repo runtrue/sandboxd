@@ -1303,17 +1303,21 @@ dependencies = [
  "axum",
  "clap",
  "hex",
+ "hmac 0.12.1",
  "libc",
  "nix",
  "runtrue-sandbox-core",
  "runtrue-sandbox-placement",
+ "runtrue-sandbox-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.8",
  "subtle",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "tower",
+ "zeroize",
 ]
 
 [[package]]
@@ -1357,12 +1361,15 @@ dependencies = [
 name = "runtrue-sandbox-placement"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "hex",
  "libc",
  "nix",
  "runtrue-sandbox-core",
+ "runtrue-sandbox-protocol",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.8",
  "thiserror",
  "tokio",
  "tokio-postgres",

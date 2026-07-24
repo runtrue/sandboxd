@@ -2,8 +2,8 @@
 
 `runtrue-sandbox-placement` is the shared correctness boundary for placement
 replicas. PostgreSQL, rather than process memory, owns accepted queue entries,
-idempotency, worker state, assignment epochs, leases, winning results, and the
-audit chain.
+idempotency, typed operations, worker state, assignment epochs, leases,
+terminal responses, and the audit chain.
 
 The repository enforces:
 
@@ -11,6 +11,8 @@ The repository enforces:
 - separate global and per-tenant concurrency limits;
 - durable weighted-fair ordering;
 - exact worker topology, resource-shape, and compatibility-cohort matching;
+- exact authenticated worker registration, broker address, and signed ceiling
+  advertisement;
 - one clean worker token per assignment;
 - monotonically increasing epochs after lease expiry;
 - idempotent request replay and result publication;
@@ -48,8 +50,11 @@ The repository is intentionally not a tenant-facing API.
 subject, workspace, deadline, topology, shape, and cohort authorization come
 from an owner-only hashed-token policy; tenant identity is never accepted from
 the request body. The gateway can submit, inspect, and cancel placement records
-only. It has no Kubernetes client, service-account token, worker address input,
-or sandboxd operator operation.
+only. It has no Kubernetes client, service-account token, tenant-selected
+worker address, or sandboxd operator operation. Every replica also runs the
+same bounded reconciliation loop: it claims durable work, signs the typed
+operation, delivers it to the assigned broker, and publishes a terminal
+response only while that lease epoch still wins.
 
 The deployment in `deploy/k3s/sandbox-gateway.yaml` runs as UID/GID 65532 with
 no Linux capabilities, no privilege escalation, a read-only root, RuntimeDefault
@@ -85,6 +90,39 @@ Clients send `Authorization: Bearer key-id.<high-entropy-secret>` and
 generated secret with at least 32 bytes of entropy. The migration Job and
 runtime Deployment use different Kubernetes Secrets and database roles.
 
-The remaining #50 work is the narrow worker broker, signed work-order dispatch,
-result streaming, worker registration endpoints, and fault-injected gateway
-rollout tests.
+The runtime `sandbox-gateway-auth` Secret also contains:
+
+- `worker-policy.json`, which maps each worker credential to one exact worker
+  ID, topology, resource shape, and compatibility cohort; and
+- `work-order.key`, the same 64-lowercase-hex HMAC key mounted read-only into
+  sandboxd, but never into the broker.
+
+`worker-policy.json` has this form:
+
+```json
+{
+  "schema_version": 1,
+  "credentials": {
+    "worker-key-a": {
+      "token_sha256": "64-lowercase-hex-characters",
+      "worker_id": "worker-a",
+      "topology": "topology-v1",
+      "resource_shape": "standard-v1",
+      "compatibility_cohort": "runsc-v1"
+    }
+  }
+}
+```
+
+A worker sends `Authorization: Worker key-id.<high-entropy-secret>` to
+`POST /internal/v1/workers/register` and its exact worker ID heartbeat path.
+The registration body contains its broker socket address and typed resource
+ceilings. A credential cannot register or heartbeat a different worker
+identity. NetworkPolicy admits these routes only from labeled worker
+registration clients.
+
+The dispatcher uses bounded worker scans and request timeouts. An ambiguous
+network failure leaves the assignment leased; lease reconciliation quarantines
+that worker before a higher epoch is requeued. PostgreSQL stores the complete
+typed operation and terminal response, while audit rows contain only identity,
+epoch, worker, event, and result digest.
