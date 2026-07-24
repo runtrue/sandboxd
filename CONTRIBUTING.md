@@ -11,6 +11,19 @@ Keep backend-neutral contracts in `sandbox-core` and `sandbox-runtime`. OCI
 topology and image handling belong in `sandbox-oci`. gVisor-specific execution,
 host resources, checkpoint state, and cleanup belong in `sandbox-gvisor`.
 
+Repository ownership:
+
+| Path | Responsibility |
+| --- | --- |
+| `bins/sandboxctl` | Restricted Compose and image tooling |
+| `bins/sandboxd` | Privileged worker and local client |
+| `crates/sandbox-core` | Identities, capabilities, lifecycle, and snapshot types |
+| `crates/sandbox-runtime` | Backend and live-instance interfaces |
+| `crates/sandbox-artifact` | Encrypted artifacts, providers, references, and GC |
+| `crates/sandbox-volume` | Local volumes, artifacts, secrets, and snapshots |
+| `crates/sandbox-oci` | Compose validation and OCI providers |
+| `crates/sandbox-gvisor` | gVisor execution, recovery, and cleanup |
+
 ## Local checks
 
 Run these commands before submitting a change:

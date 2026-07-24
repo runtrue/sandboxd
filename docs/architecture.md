@@ -1,5 +1,9 @@
 # Architecture
 
+This document describes the worker's security-relevant design. Operational
+instructions live in [install.md](install.md); the wire contract lives in
+[control-plane.md](control-plane.md).
+
 ## Trust boundary
 
 The supported deployment is one trusted Linux worker with a root-owned
@@ -42,30 +46,6 @@ sandbox
 Host paths, network interface names, process IDs, cgroup paths, and runtime
 handles are worker materializations. They do not enter topology locks or the
 backend-neutral snapshot data types.
-
-## Workspace ownership
-
-```text
-bins/
-  sandboxctl/               restricted Compose and image tooling
-  sandboxd/                 privileged worker daemon and local client
-
-crates/
-  sandbox-core/             identities, capabilities, lifecycle, snapshot types
-  sandbox-runtime/          backend and live-instance interfaces
-  sandbox-artifact/         encrypted artifacts, providers, references, GC
-  sandbox-oci/              Compose validation and OCI provider implementations
-  sandbox-gvisor/           gVisor execution, snapshots, recovery, cleanup
-
-examples/
-  containerd-compose/       minimal public-image provider and network fixture
-  python-compose/           local multi-container lifecycle and snapshot checks
-```
-
-The backend-neutral `BackendKind` has stable wire identities for `gvisor` and
-`marcovm`. A stable identity does not imply that an executor is installed. The
-daemon capability response contains gVisor only because this repository ships
-only the gVisor executor.
 
 ## Control plane
 
@@ -111,8 +91,8 @@ The exact request and signing contract is documented in
 
 ## Topology admission
 
-`sandboxctl` accepts a restricted Compose subset. Unknown fields
-are rejected. The compiler bounds service, network, argument, environment, and
+`sandboxctl` accepts a restricted Compose subset. Unknown fields are rejected.
+The compiler bounds service, network, argument, environment, and
 value counts; rejects privileged and ambient host features; requires internal
 networks; validates dependency order; resolves images to repository and image
 digests; and writes a canonical topology digest.
@@ -409,12 +389,10 @@ For each writable service, the manifest carries exactly one
 extra, corrupt, oversized, or topology-mismatched diffs, reconstructs the
 private overlay, and only then starts guest code. Failed reconstruction releases
 its mounts, loop device, and provider state. The manifest declares
-`cross_worker_same_backend`, but the daemon reports
-the lower portability of its configured artifact provider. The current local
-provider therefore reports `same_worker` and rejects cross-worker restore before
-runtime allocation. A remote provider must preserve the same conditional grant
-and claim semantics and pass the migration fault gates before that capability
-can be enabled.
+`cross_worker_same_backend`, but the daemon reports the lower portability of
+its configured artifact provider. The local provider reports `same_worker` and
+rejects cross-worker restore before runtime allocation. The S3-compatible
+provider reports `cross_worker_same_backend`.
 
 ## Backend-neutral snapshot types
 
