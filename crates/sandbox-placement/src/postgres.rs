@@ -4,7 +4,7 @@ use runtrue_sandbox_core::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
-    io::BufReader,
+    io::Read as _,
     net::IpAddr,
     os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     path::{Path, PathBuf},
@@ -23,6 +23,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 const MIGRATION_LOCK: i64 = 7_223_510_449_421;
 const QUEUE_LOCK: i64 = 7_223_510_449_422;
 const SCHEMA_VERSION: i32 = 1;
+const MAXIMUM_PEM_BYTES: u64 = 1024 * 1024;
 
 const MIGRATION: &str = r#"
 CREATE SCHEMA IF NOT EXISTS sandboxd_placement;
@@ -1150,13 +1151,15 @@ fn valid_digest(value: &str) -> bool {
 }
 
 fn rustls_connector(tls: &PlacementDatabaseTls) -> Result<MakeRustlsConnect, PlacementStoreError> {
+    use rustls::pki_types::{pem::PemObject as _, CertificateDer, PrivateKeyDer};
+
     if tls.client_certificate.is_some() != tls.client_private_key.is_some() {
         return Err(PlacementStoreError::Tls(
             "client certificate and private key must be configured together".to_owned(),
         ));
     }
-    let mut ca_reader = BufReader::new(open_regular_file(&tls.ca_certificate, false)?);
-    let certificates = rustls_pemfile::certs(&mut ca_reader)
+    let ca_pem = read_bounded_pem(&tls.ca_certificate, false)?;
+    let certificates = CertificateDer::pem_slice_iter(&ca_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| PlacementStoreError::Tls(format!("read CA certificate: {error}")))?;
     let mut roots = rustls::RootCertStore::empty();
@@ -1169,8 +1172,8 @@ fn rustls_connector(tls: &PlacementDatabaseTls) -> Result<MakeRustlsConnect, Pla
     let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
     let client = match (&tls.client_certificate, &tls.client_private_key) {
         (Some(certificate), Some(private_key)) => {
-            let mut certificate_reader = BufReader::new(open_regular_file(certificate, false)?);
-            let certificates = rustls_pemfile::certs(&mut certificate_reader)
+            let certificate_pem = read_bounded_pem(certificate, false)?;
+            let certificates = CertificateDer::pem_slice_iter(&certificate_pem)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| {
                     PlacementStoreError::Tls(format!("read client certificate: {error}"))
@@ -1180,14 +1183,10 @@ fn rustls_connector(tls: &PlacementDatabaseTls) -> Result<MakeRustlsConnect, Pla
                     "client certificate bundle is empty".to_owned(),
                 ));
             }
-            let mut key_reader = BufReader::new(open_regular_file(private_key, true)?);
-            let private_key = rustls_pemfile::private_key(&mut key_reader)
-                .map_err(|error| {
-                    PlacementStoreError::Tls(format!("read client private key: {error}"))
-                })?
-                .ok_or_else(|| {
-                    PlacementStoreError::Tls("client private key is empty".to_owned())
-                })?;
+            let key_pem = read_bounded_pem(private_key, true)?;
+            let private_key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|error| {
+                PlacementStoreError::Tls(format!("read client private key: {error}"))
+            })?;
             builder
                 .with_client_auth_cert(certificates, private_key)
                 .map_err(|error| {
@@ -1224,6 +1223,21 @@ fn open_regular_file(path: &Path, private: bool) -> Result<File, PlacementStoreE
         )));
     }
     Ok(file)
+}
+
+fn read_bounded_pem(path: &Path, private: bool) -> Result<Vec<u8>, PlacementStoreError> {
+    let mut bytes = Vec::new();
+    open_regular_file(path, private)?
+        .take(MAXIMUM_PEM_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| PlacementStoreError::Tls(format!("read `{}`: {error}", path.display())))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAXIMUM_PEM_BYTES {
+        return Err(PlacementStoreError::Tls(format!(
+            "`{}` is empty or exceeds the PEM size limit",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn loopback_address(host: &str) -> bool {

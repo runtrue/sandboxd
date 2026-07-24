@@ -10,7 +10,6 @@ runtrue-sandbox-core.workspace = true
 libc.workspace = true
 nix.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

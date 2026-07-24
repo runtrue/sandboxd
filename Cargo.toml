@@ -35,7 +35,6 @@ serde_json = "=1.0.150"
 serde_yaml = "=0.9.34"
 sha2 = "=0.10.8"
 rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "=2.2.0"
 s3-wire = "=0.1.0"
 tempfile = "=3.27.0"
 tar = "=0.4.46"
