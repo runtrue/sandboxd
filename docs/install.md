@@ -1,9 +1,10 @@
 # Installation and operation
 
-Install `sandboxd` on a dedicated Linux worker that matches the
-[validated platform](../README.md#requirements). Connect tenant-facing services
-through the signed broker interface described in
-[control-plane.md](control-plane.md).
+Install `sandboxd` in a dedicated Linux worker environment that matches the
+[validated platform](../README.md#requirements). The worker may be a host
+service or a capability-scoped Kubernetes pod, including a pod on a
+microVM-backed node. Connect tenant-facing services through the signed broker
+interface described in [control-plane.md](control-plane.md).
 
 ## Install a release
 
@@ -20,7 +21,7 @@ sudo install -m 0755 \
 
 Install compatible `runsc`, containerd, and host dependencies. The README lists
 the known-good versions used by project CI and integration testing; they are not
-global pins. Validate other versions with both privileged example suites before
+global pins. Validate other versions with both worker integration suites before
 operating them. Snapshot migration requires matching `runsc` versions and
 runtime configuration across the source and destination workers.
 
@@ -85,6 +86,61 @@ directives with the complete lifecycle and recovery suites.
 For the optional broker socket and signed work orders, see
 [control-plane.md](control-plane.md). Keep artifact keys, work-order keys, and
 S3 credentials out of the unit file.
+
+## Run in Kubernetes
+
+Run the container as UID 0 with `privileged: false`. The worker needs a bounded
+set of kernel capabilities because it creates mount and network namespaces,
+bridges, veth pairs, routes, nftables rules, and filesystem mounts. The
+following reduced set passes the lifecycle and writable-root snapshot suites:
+
+```yaml
+securityContext:
+  runAsUser: 0
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+    add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETUID
+      - SETPCAP
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_CHROOT
+      - SYS_ADMIN
+      - MKNOD
+```
+
+This is a validated deployment set, not a claim that every capability is
+required by every configuration. `SYS_ADMIN` is required for namespaces and
+mounts, `NET_ADMIN` for worker networking, and `NET_RAW` by the current runsc
+network setup. `MKNOD` is needed when writable-root snapshot restore recreates
+OCI whiteouts and may be omitted when that feature is disabled.
+
+The pod also needs narrowly scoped access to:
+
+- a writable cgroup v2 subtree with the `cpu`, `memory`, and `pids`
+  controllers delegated at `/sys/fs/cgroup/runtrue-sandboxd`;
+- containerd's Unix socket and the snapshotter paths returned by `ctr`, or a
+  containerd instance inside the same pod or microVM;
+- persistent worker state and image storage; and
+- loop-control and allocated loop devices when writable roots or local named
+  volumes are enabled.
+
+Allow the required namespace, mount, networking, and runsc syscalls in the
+pod's seccomp, AppArmor, or SELinux policy. Do not mount the complete host
+cgroup tree or all host devices when a delegated subtree and selected devices
+are sufficient.
+
+The worker uses runsc's systrap platform, so it does not need `/dev/kvm`.
+A microVM-backed Kubernetes runtime can provide the outer worker boundary while
+gVisor continues to isolate workloads inside that VM. Validate the final pod
+policy with both example suites because device and mandatory-access-control
+behavior varies by Kubernetes runtime.
 
 ## Configure S3-compatible artifact storage
 

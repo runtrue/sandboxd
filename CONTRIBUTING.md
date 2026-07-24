@@ -16,7 +16,7 @@ Repository ownership:
 | Path | Responsibility |
 | --- | --- |
 | `bins/sandboxctl` | Restricted Compose and image tooling |
-| `bins/sandboxd` | Privileged worker and local client |
+| `bins/sandboxd` | Execution worker and local client |
 | `crates/sandbox-core` | Identities, capabilities, lifecycle, and snapshot types |
 | `crates/sandbox-runtime` | Backend and live-instance interfaces |
 | `crates/sandbox-artifact` | Encrypted artifacts, providers, references, and GC |
@@ -41,13 +41,13 @@ go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 ```
 
 For lifecycle, networking, resource-limit, snapshot, recovery, or cleanup
-changes, also run both privileged example scripts on a clean worker.
+changes, also run both worker integration scripts on a clean worker.
 
 The `CI` workflow runs portable quality, dependency-policy, and same-run
 reproducibility checks on GitHub-hosted workers. The manually dispatched
 `gVisor integration` workflow uses a dedicated, ephemeral, root-owned worker
-labeled `sandboxd-gvisor`. The privileged workflow has no pull-request trigger;
-register its runner only for the duration of the integration run.
+labeled `sandboxd-gvisor`. The worker integration workflow has no pull-request
+trigger; register its runner only for the duration of the integration run.
 
 Releases follow the additional gates in [docs/releasing.md](docs/releasing.md).
 All project interactions must follow the [Code of Conduct](CODE_OF_CONDUCT.md).

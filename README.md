@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml/badge.svg)](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml)
 
-`sandboxd` is a privileged Linux worker for running restricted OCI workloads
-inside [gVisor](https://gvisor.dev/). A sandbox may contain multiple containers,
-but it has one lifecycle, network stack, resource boundary, and checkpoint.
+`sandboxd` is a Linux execution worker for running restricted OCI workloads
+inside [gVisor](https://gvisor.dev/). It can run directly on a worker host or in
+a capability-scoped Kubernetes pod, including on a microVM-backed node. A
+sandbox may contain multiple containers, but it has one lifecycle, network
+stack, resource boundary, and checkpoint.
 
 > [!IMPORTANT]
 > `sandboxd` is currently in alpha. Production deployments should integrate it
@@ -28,7 +30,7 @@ Tenant identity and policy integrate through the signed broker interface.
 
 ## Requirements
 
-The validated host is Linux x86-64 with:
+The validated worker environment is Linux x86-64 with:
 
 - cgroup v2 with the `cpu`, `memory`, and `pids` controllers;
 - Rust 1.97.1;
@@ -37,12 +39,15 @@ The validated host is Linux x86-64 with:
 - iproute2, nftables, util-linux, e2fsprogs, and available loop devices; and
 - outbound HTTPS access for OCI image preparation.
 
-The worker runs as root because it manages host isolation and runtime
-resources. Install the host dependencies separately from the release archive.
-The listed runtime versions are a known-good reference rather than global pins.
-Qualify other versions with the privileged lifecycle and snapshot suites on the
-target host. Snapshot restore requires source and destination workers to report
-the same `runsc` version and runtime configuration.
+The worker process runs as UID 0 because it manages isolation and runtime
+resources. A Kubernetes deployment does not require `privileged: true`; grant
+only the capabilities, devices, mounts, and cgroup delegation described in
+[Installation and operation](docs/install.md#run-in-kubernetes). Install the
+runtime dependencies separately from the release archive. The listed versions
+are a known-good reference rather than global pins. Qualify other versions with
+the lifecycle and snapshot integration suites in the target environment.
+Snapshot restore requires source and destination workers to report the same
+`runsc` version and runtime configuration.
 
 ## Get started
 
@@ -54,7 +59,8 @@ cd sandboxd
 cargo build --workspace --release --locked
 ```
 
-Run the privileged lifecycle and snapshot fixtures on a compatible test worker:
+Run the lifecycle and snapshot integration fixtures on a compatible test
+worker:
 
 ```bash
 sudo ./examples/python-compose/run-local.sh
@@ -70,7 +76,7 @@ see [Installation and operation](docs/install.md).
 | --- | --- |
 | [Architecture](docs/architecture.md) | Isolation, admission, networking, storage, lifecycle, and snapshots |
 | [Control plane](docs/control-plane.md) | Broker boundary, protocol, work orders, ownership, and recovery |
-| [Installation and operation](docs/install.md) | Binaries, host setup, systemd, S3, and maintenance |
+| [Installation and operation](docs/install.md) | Binaries, host or Kubernetes setup, S3, and maintenance |
 | [Performance](docs/performance.md) | Pull-request benchmarks and local measurements |
 | [Release process](docs/releasing.md) | Public release gates and signed tags |
 | [Security policy](SECURITY.md) | Supported boundary and vulnerability reporting |
