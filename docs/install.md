@@ -17,8 +17,11 @@ sudo install -m 0755 \
   /usr/local/bin/
 ```
 
-Install the exact `runsc`, containerd, and host dependencies listed in the
-README. They are not included in the release archive.
+Install compatible `runsc`, containerd, and host dependencies. The README lists
+the known-good versions used by project CI and integration testing; they are not
+global pins. Validate other versions with both privileged example suites before
+operating them. Snapshot migration requires matching `runsc` versions and
+runtime configuration across the source and destination workers.
 
 ## Build from source
 

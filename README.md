@@ -33,13 +33,17 @@ The validated host is Linux x86-64 with:
 
 - cgroup v2 with the `cpu`, `memory`, and `pids` controllers;
 - Rust 1.97.1;
-- gVisor `runsc` 20260714.0 using systrap;
-- containerd 2.2.2 with the overlayfs snapshotter and `ctr`;
+- gVisor `runsc` using systrap (tested with 20260714.0);
+- containerd 2.x with the overlayfs snapshotter and `ctr` (tested with 2.2.2);
 - iproute2, nftables, util-linux, e2fsprogs, and available loop devices; and
 - outbound HTTPS access for OCI image preparation.
 
 The worker runs as root because it manages host isolation and runtime
-resources. Release archives do not bundle these host dependencies.
+resources. Release archives do not bundle these host dependencies. The listed
+runtime versions are a known-good reference, not global pins. Other versions
+must pass the privileged lifecycle and snapshot suites on the target host.
+Snapshot restore additionally requires source and destination workers to report
+the same `runsc` version and runtime configuration.
 
 ## Get started
 
@@ -75,7 +79,8 @@ see [Installation and operation](docs/install.md).
 
 ## Current limitations
 
-- Only the pinned Linux x86-64 and gVisor cohort is regularly tested.
+- Only Linux x86-64 is regularly tested. Runtime versions outside the reference
+  cohort require operator validation.
 - Containers in a sandbox share one network and port namespace.
 - Host CPU and memory accounting applies to the complete sandbox, not
   independently to each guest container.
