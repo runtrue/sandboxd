@@ -1,12 +1,97 @@
-# Security policy
+# Security
 
-## Status
+`sandboxd` is designed as a hardened execution worker for untrusted OCI
+workloads. It combines gVisor isolation with host namespaces, cgroup v2,
+default-deny networking, signed workload authorization, and encrypted snapshot
+storage.
 
-`sandboxd` is experimental security software. There are no supported stable
-releases, and `main` is the only maintained source state.
+The current release channel is alpha. Security fixes are maintained on `main`.
 
-Do not expose the daemon sockets to tenant clients or describe the project as a
-complete multi-tenant security boundary before an independent review.
+## Deployment model
+
+Run `sandboxd` on a dedicated Linux worker behind a trusted control plane.
+Tenant clients authenticate to the surrounding identity and policy service,
+which issues narrowly scoped work orders through a local broker.
+
+The operator socket accepts UID 0 only. The optional workload socket accepts one
+configured non-root broker UID and requires a short-lived signed work order for
+every request.
+
+The trusted computing base includes:
+
+- the worker operator and host kernel;
+- `sandboxd`, its configuration, signer, and local broker;
+- containerd, runsc, and the required host isolation tools;
+- the worker state and artifact stores; and
+- work-order and artifact master keys.
+
+Topology documents, OCI images, guest arguments and environment, workload
+requests, guest network traffic, filesystem activity, and checkpoint-time
+process state are treated as untrusted.
+
+## Enforced controls
+
+The worker enforces:
+
+- one gVisor isolation boundary per sandbox;
+- host namespace and cgroup v2 containment;
+- digest-pinned image admission with bounded archive extraction;
+- read-only image roots unless a quota-backed writable root is authorized;
+- typed volumes without tenant-supplied host paths;
+- default-deny networking with signed DNS, egress, and ingress policy;
+- tenant and workspace scoping before state lookup;
+- signed resource ceilings and operation digests;
+- durable replay protection and assignment fencing;
+- bounded subprocess, transport, output, and cleanup operations; and
+- encrypted, authenticated snapshots with conditional publication and
+  restore-time compatibility checks.
+
+Unsupported topology and runtime input is rejected rather than silently
+downgraded.
+
+See [docs/architecture.md](docs/architecture.md) for the detailed isolation
+design and [docs/control-plane.md](docs/control-plane.md) for the authorization
+contract.
+
+## Operational requirements
+
+- Protect the operator socket, signer, broker, work-order key, and artifact key.
+- Restrict OCI registry credentials and S3 principals to the required tenant,
+  bucket, and prefix scope.
+- Keep the kernel, runsc, containerd, and host tools patched and validate runtime
+  updates with the privileged integration suites.
+- Retain and rotate `audit.jsonl` according to the deployment's audit policy.
+- Keep ingress credentials and credential files out of logs and tenant-visible
+  state.
+- Issue `restricted_tcp` policy only after an independent authorization
+  decision.
+
+The local artifact provider supports same-worker restore. Cross-worker restore
+uses the S3-compatible provider with shared backend configuration, compatible
+workers, and matching runsc versions and runtime configuration.
+
+Tenant-facing identity, placement, and policy remain responsibilities of the
+surrounding control plane. Raw bind mounts, arbitrary CSI plugins, privileged
+containers, tenant-selected capabilities, host namespaces, cross-backend
+restore, and artifact-key rotation are not enabled by this release.
+
+## Security validation
+
+Every pull request runs Rust tests, dependency policy checks, CodeQL analysis,
+and a reproducible release build. The release process adds S3 conformance and a
+privileged gVisor lifecycle and snapshot run on the validated worker cohort.
+
+Run the local security checks with:
+
+```bash
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo audit --deny warnings
+cargo deny check advisories licenses bans sources
+./tools/test-s3-artifacts.sh
+sudo ./examples/python-compose/run-local.sh
+sudo ./examples/python-compose/run-snapshot-local.sh
+```
 
 ## Report a vulnerability
 
@@ -22,65 +107,3 @@ Include:
 - the boundary that was crossed;
 - remaining host resources after cleanup; and
 - whether the issue reproduces after a clean worker restart.
-
-## Supported boundary
-
-The trusted boundary includes the worker operator, root-owned daemon,
-configuration and signing services, local broker, containerd, runsc, host
-isolation tools, state and artifact stores, and artifact master key.
-
-Untrusted input includes topology documents, OCI images, guest arguments and
-environment, workload requests, network traffic, filesystem activity, and
-checkpoint-time guest state.
-
-The operator socket accepts UID 0 only. The optional workload socket accepts one
-configured non-root broker UID and requires a short-lived signed work order.
-Tenant clients authenticate to an external identity and policy service; they do
-not connect directly to the worker.
-
-The worker enforces:
-
-- gVisor isolation plus host namespaces and cgroup v2 containment;
-- digest-pinned image admission and bounded archive extraction;
-- default-deny networking with signed sandbox-wide policy;
-- tenant and workspace scoping before state lookup;
-- signed resource ceilings, durable replay protection, and assignment fencing;
-- quota-backed writable roots and named volumes without tenant-supplied host
-  paths; and
-- encrypted, authenticated snapshot objects with conditional publication and
-  restore-time compatibility checks.
-
-See [docs/architecture.md](docs/architecture.md) for the detailed design and
-[docs/control-plane.md](docs/control-plane.md) for the authorization contract.
-
-## Operator responsibilities
-
-- Protect the operator socket, signer, broker, work-order key, and artifact key.
-- Restrict OCI registry credentials and S3 principals to their required scope.
-- Keep the validated kernel, runsc, containerd, and host-tool cohort patched.
-- Retain and rotate `audit.jsonl`; the daemon bounds records but does not manage
-  long-term retention.
-- Treat ingress credentials and credential files as secrets.
-- Review `restricted_tcp` policy independently of tenant input.
-
-The local artifact provider supports same-worker restore only. Cross-worker
-restore requires the S3-compatible provider, shared backend configuration, and
-compatible workers. Neither provider replaces distributed placement or
-ownership policy.
-
-Unsupported input fails closed. Raw bind mounts, arbitrary CSI plugins,
-privileged containers, tenant-selected capabilities, host namespaces,
-cross-backend restore, and artifact-key rotation are outside the supported
-boundary.
-
-## Security checks
-
-```bash
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo audit --deny warnings
-cargo deny check advisories licenses bans sources
-./tools/test-s3-artifacts.sh
-sudo ./examples/python-compose/run-local.sh
-sudo ./examples/python-compose/run-snapshot-local.sh
-```
