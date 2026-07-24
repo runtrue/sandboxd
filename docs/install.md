@@ -1,14 +1,15 @@
 # Installation and operation
 
-Install `sandboxd` in a dedicated Linux worker environment that matches the
-[validated platform](../README.md#requirements). The worker may be a host
-service or a capability-scoped Kubernetes pod, including a pod on a
-microVM-backed node. Connect tenant-facing services through the signed broker
-interface described in [control-plane.md](control-plane.md).
+Run `sandboxd` in a dedicated worker container that matches the
+[validated platform](../README.md#requirements). It runs in a standard Linux
+pod; runtimes that place the pod inside a VM are also compatible. Connect
+tenant-facing services through the signed broker interface described in
+[control-plane.md](control-plane.md).
 
 ## Install a release
 
-Download the archive and `SHA256SUMS` from the matching GitHub release:
+Download the archive and `SHA256SUMS` from the matching GitHub release when
+assembling the worker image:
 
 ```bash
 sha256sum --check --ignore-missing SHA256SUMS
@@ -19,11 +20,14 @@ sudo install -m 0755 \
   /usr/local/bin/
 ```
 
-Install compatible `runsc`, containerd, and host dependencies. The README lists
-the known-good versions used by project CI and integration testing; they are not
-global pins. Validate other versions with both worker integration suites before
-operating them. Snapshot migration requires matching `runsc` versions and
-runtime configuration across the source and destination workers.
+Install compatible `runsc`, containerd, and system dependencies in the worker
+image. Run containerd privately in the same container and mount namespace as
+`sandboxd`; do not mount the Kubernetes node's containerd socket or snapshotter
+storage. The README lists the known-good versions used by project CI and
+integration testing; they are not global pins. Validate other versions with
+both worker integration suites before operating them. Snapshot migration
+requires matching `runsc` versions and runtime configuration across the source
+and destination workers.
 
 ## Build from source
 
@@ -40,54 +44,7 @@ sudo install -m 0755 \
 Run the checks in [CONTRIBUTING.md](../CONTRIBUTING.md) before operating a local
 build.
 
-## Run with systemd
-
-This minimal unit enables only the root-owned operator socket:
-
-```ini
-[Unit]
-Description=Runtrue OCI sandbox worker
-Documentation=https://github.com/runtrue/sandboxd
-After=containerd.service network-online.target
-Requires=containerd.service
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/runtrue-sandboxd serve
-ExecStop=/usr/local/bin/runtrue-sandboxd shutdown
-Restart=on-failure
-RestartSec=5s
-RuntimeDirectory=runtrue-sandboxd
-RuntimeDirectoryMode=0700
-StateDirectory=runtrue-sandboxd
-StateDirectoryMode=0700
-UMask=0077
-LimitNOFILE=1048576
-TimeoutStopSec=30s
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Save the unit as `/etc/systemd/system/runtrue-sandboxd.service`, then verify and
-start it:
-
-```bash
-sudo systemd-analyze verify /etc/systemd/system/runtrue-sandboxd.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now runtrue-sandboxd.service
-sudo runtrue-sandboxd ping
-```
-
-The worker runs as root to manage cgroups, namespaces, nftables, loop devices,
-ext4 mounts, containerd, and gVisor. Validate any additional systemd sandboxing
-directives with the complete lifecycle and recovery suites.
-
-For the optional broker socket and signed work orders, see
-[control-plane.md](control-plane.md). Keep artifact keys, work-order keys, and
-S3 credentials out of the unit file.
-
-## Run in Kubernetes
+## Run the worker container
 
 Run the container as UID 0 with `privileged: false`. The worker needs a bounded
 set of kernel capabilities because it creates mount and network namespaces,
@@ -121,26 +78,33 @@ mounts, `NET_ADMIN` for worker networking, and `NET_RAW` by the current runsc
 network setup. `MKNOD` is needed when writable-root snapshot restore recreates
 OCI whiteouts and may be omitted when that feature is disabled.
 
-The pod also needs narrowly scoped access to:
+The container also needs:
 
-- a writable cgroup v2 subtree with the `cpu`, `memory`, and `pids`
-  controllers delegated at `/sys/fs/cgroup/runtrue-sandboxd`;
-- containerd's Unix socket and the snapshotter paths returned by `ctr`, or a
-  containerd instance inside the same pod or microVM;
-- persistent worker state and image storage; and
+- a private containerd daemon in the same mount namespace, with its Unix socket
+  at the configured `--containerd-address`;
+- a writable cgroup v2 subtree with the `cpu`, `memory`, and `pids` controllers
+  delegated by the container runtime at
+  `/sys/fs/cgroup/runtrue-sandboxd`;
+- pod volumes for persistent worker state and image storage; and
 - loop-control and allocated loop devices when writable roots or local named
   volumes are enabled.
 
-Allow the required namespace, mount, networking, and runsc syscalls in the
-pod's seccomp, AppArmor, or SELinux policy. Do not mount the complete host
-cgroup tree or all host devices when a delegated subtree and selected devices
-are sufficient.
+Do not mount the Kubernetes node's containerd socket, snapshotter storage,
+cgroup tree, or other system paths. The container runtime must supply the
+delegated cgroup namespace and any selected devices directly. Allow the
+required namespace, mount, networking, and runsc syscalls in the pod's seccomp,
+AppArmor, or SELinux policy.
 
 The worker uses runsc's systrap platform, so it does not need `/dev/kvm`.
-A microVM-backed Kubernetes runtime can provide the outer worker boundary while
-gVisor continues to isolate workloads inside that VM. Validate the final pod
-policy with both example suites because device and mandatory-access-control
-behavior varies by Kubernetes runtime.
+The worker does not require a VM-backed runtime. A deployment may choose one as
+an additional outer boundary without changing the worker image; gVisor remains
+the workload isolation layer inside the worker. Validate the final pod policy
+with both example suites because cgroup delegation, device assignment, and
+mandatory-access-control behavior vary by Kubernetes runtime.
+
+For the optional broker socket and signed work orders, see
+[control-plane.md](control-plane.md). Keep artifact keys, work-order keys, and
+S3 credentials in Kubernetes Secrets or the deployment's secret manager.
 
 ## Configure S3-compatible artifact storage
 

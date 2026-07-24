@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml/badge.svg)](https://github.com/runtrue/sandboxd/actions/workflows/ci.yml)
 
-`sandboxd` is a Linux execution worker for running restricted OCI workloads
-inside [gVisor](https://gvisor.dev/). It can run directly on a worker host or in
-a capability-scoped Kubernetes pod, including on a microVM-backed node. A
-sandbox may contain multiple containers, but it has one lifecycle, network
-stack, resource boundary, and checkpoint.
+`sandboxd` is a containerized Linux execution worker for running restricted OCI
+workloads inside [gVisor](https://gvisor.dev/). The worker runs in a standard
+Kubernetes pod with a scoped security context. A sandbox may contain multiple
+containers, but it has one lifecycle, network stack, resource boundary, and
+checkpoint.
 
 > [!IMPORTANT]
 > `sandboxd` is currently in alpha. Production deployments should integrate it
@@ -30,24 +30,28 @@ Tenant identity and policy integrate through the signed broker interface.
 
 ## Requirements
 
-The validated worker environment is Linux x86-64 with:
+The worker container targets Linux x86-64. Its runtime environment provides
+cgroup v2 with the `cpu`, `memory`, and `pids` controllers, plus outbound HTTPS
+access for OCI image preparation. The worker image contains:
 
-- cgroup v2 with the `cpu`, `memory`, and `pids` controllers;
-- Rust 1.97.1;
 - gVisor `runsc` using systrap (tested with 20260714.0);
 - containerd 2.x with the overlayfs snapshotter and `ctr` (tested with 2.2.2);
-- iproute2, nftables, util-linux, e2fsprogs, and available loop devices; and
-- outbound HTTPS access for OCI image preparation.
+  and
+- iproute2, nftables, util-linux, and e2fsprogs.
 
-The worker process runs as UID 0 because it manages isolation and runtime
-resources. A Kubernetes deployment does not require `privileged: true`; grant
-only the capabilities, devices, mounts, and cgroup delegation described in
-[Installation and operation](docs/install.md#run-in-kubernetes). Install the
-runtime dependencies separately from the release archive. The listed versions
-are a known-good reference rather than global pins. Qualify other versions with
-the lifecycle and snapshot integration suites in the target environment.
-Snapshot restore requires source and destination workers to report the same
-`runsc` version and runtime configuration.
+Building from source uses Rust 1.97.1. Writable roots and local named volumes
+also require assigned loop devices.
+
+The worker process and its private containerd run in the same container and
+mount namespace. They do not use the Kubernetes node's containerd socket,
+snapshotter storage, or other runtime paths. The container runs as UID 0 with a
+bounded capability set; it does not require `privileged: true`. See
+[Installation and operation](docs/install.md#run-the-worker-container).
+
+The listed runtime versions are a known-good reference rather than global pins.
+Qualify other versions with the lifecycle and snapshot integration suites in
+the target environment. Snapshot restore requires source and destination
+workers to report the same `runsc` version and runtime configuration.
 
 ## Get started
 
@@ -67,7 +71,7 @@ sudo ./examples/python-compose/run-local.sh
 sudo ./examples/python-compose/run-snapshot-local.sh
 ```
 
-For installation, systemd configuration, S3 storage, and artifact maintenance,
+For container configuration, S3 storage, and artifact maintenance,
 see [Installation and operation](docs/install.md).
 
 ## Documentation
@@ -76,7 +80,7 @@ see [Installation and operation](docs/install.md).
 | --- | --- |
 | [Architecture](docs/architecture.md) | Isolation, admission, networking, storage, lifecycle, and snapshots |
 | [Control plane](docs/control-plane.md) | Broker boundary, protocol, work orders, ownership, and recovery |
-| [Installation and operation](docs/install.md) | Binaries, host or Kubernetes setup, S3, and maintenance |
+| [Installation and operation](docs/install.md) | Worker container, Kubernetes, S3, and maintenance |
 | [Performance](docs/performance.md) | Pull-request benchmarks and local measurements |
 | [Release process](docs/releasing.md) | Public release gates and signed tags |
 | [Security policy](SECURITY.md) | Supported boundary and vulnerability reporting |
@@ -86,6 +90,8 @@ see [Installation and operation](docs/install.md).
 
 - The validated platform is Linux x86-64. Additional runtime versions can be
   qualified with the integration suites.
+- The worker is self-contained and does not mount the Kubernetes node's
+  containerd socket or snapshotter storage.
 - A sandbox uses one shared network and port namespace.
 - Host CPU and memory limits apply to the complete sandbox.
 - Local artifact storage supports same-worker restore; S3-compatible storage

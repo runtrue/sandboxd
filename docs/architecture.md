@@ -6,13 +6,14 @@ instructions live in [install.md](install.md); the wire contract lives in
 
 ## Trust boundary
 
-`sandboxd` runs as a root-owned process in a trusted Linux worker environment:
-either directly on a host or in a capability-scoped Kubernetes pod. A
-microVM-backed pod may provide an additional outer isolation boundary. The
-operator Unix socket accepts UID 0 only. An optional workload socket accepts
-one configured local broker UID and requires a short-lived signed work order
-for each request. Tenant traffic reaches the worker through the surrounding
-control plane and broker.
+`sandboxd` runs as a root-owned process in a dedicated worker container. The
+worker runs in a standard Linux pod; a runtime-provided VM boundary is optional.
+Its private containerd daemon shares the worker's mount namespace; Kubernetes
+node runtime sockets and storage are not part of the worker. The operator Unix
+socket accepts UID 0 only. An optional workload socket accepts one configured
+local broker UID and requires a short-lived signed work order for each request.
+Tenant traffic reaches the worker through the surrounding control plane and
+broker.
 
 Topology documents, guest arguments, environment values, OCI image contents,
 workload requests, and guest execution are treated as untrusted. The worker

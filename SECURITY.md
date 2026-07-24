@@ -9,11 +9,13 @@ The current release channel is alpha. Security fixes are maintained on `main`.
 
 ## Deployment model
 
-Run `sandboxd` in a dedicated Linux worker environment behind a trusted control
-plane. The worker may run as a host service or a capability-scoped Kubernetes
-pod, including on a microVM-backed node. Tenant clients authenticate to the
-surrounding identity and policy service, which issues narrowly scoped work
-orders through a local broker.
+Run `sandboxd` in a dedicated worker container behind a trusted control plane.
+The container runs in a standard Linux pod and remains compatible with runtimes
+that add a VM boundary. It uses a private containerd daemon in its own mount
+namespace and does not mount the Kubernetes node's containerd socket or
+snapshotter storage. Tenant clients authenticate to the surrounding identity
+and policy service, which issues narrowly scoped work orders through a local
+broker.
 
 The operator socket accepts UID 0 only. The optional workload socket accepts one
 configured non-root broker UID and requires a short-lived signed work order for
@@ -63,8 +65,8 @@ contract.
 - Keep the kernel, runsc, containerd, and worker tools patched and validate
   runtime updates with the worker integration suites.
 - For Kubernetes, keep `privileged: false` and grant only the capabilities,
-  delegated cgroup subtree, runtime paths, and optional devices required by the
-  enabled features.
+  delegated cgroup namespace, pod volumes, and optional devices required by the
+  enabled features. Do not expose Kubernetes node runtime paths.
 - Retain and rotate `audit.jsonl` according to the deployment's audit policy.
 - Keep ingress credentials and credential files out of logs and tenant-visible
   state.
