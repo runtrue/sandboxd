@@ -1,8 +1,8 @@
 # Changelog
 
 All notable changes to sandboxd will be recorded here. The project uses
-[Semantic Versioning](https://semver.org/) for release identifiers while it is
-experimental; compatibility may change between `0.x` releases.
+[Semantic Versioning](https://semver.org/) for release identifiers. During
+alpha, interfaces may evolve between `0.x` releases.
 
 ## Unreleased
 
@@ -24,6 +24,5 @@ Initial public alpha of the local OCI sandbox worker:
 - portable live-copy and stop-and-move snapshot workflows for compatible
   workers.
 
-This release remains experimental security software. It has not completed an
-independent adversarial review and must not be treated as a complete
-multi-tenant control plane.
+This release is intended for deployment as a worker behind a trusted identity,
+policy, and placement control plane.
