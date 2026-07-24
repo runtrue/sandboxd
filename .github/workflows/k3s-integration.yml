@@ -120,14 +120,20 @@ jobs:
             --property=Type=exec \
             --collect \
             /usr/local/bin/k3s server --config /etc/rancher/k3s/config.yaml
+          node=""
           for _ in $(seq 1 180); do
-            if sudo /usr/local/bin/k3s kubectl get node >/dev/null 2>&1; then
+            node=$(
+              sudo /usr/local/bin/k3s kubectl get node \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+            )
+            if [[ -n "$node" ]]; then
               break
             fi
             sleep 1
           done
+          test -n "$node"
           sudo /usr/local/bin/k3s kubectl wait \
-            --for=condition=Ready node --all --timeout=180s
+            --for=condition=Ready "node/${node}" --timeout=180s
           sudo install \
             -m 0600 \
             -o "$(id -u)" \
