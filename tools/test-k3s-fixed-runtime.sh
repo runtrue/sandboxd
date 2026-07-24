@@ -35,6 +35,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if ! kubectl get namespace "$namespace" >/dev/null 2>&1; then
+  kubectl create namespace "$namespace"
+fi
+
 for manifest in \
   deploy/k3s/sandboxd-fixed-runtime.yaml \
   deploy/k3s/sandboxd-dynamic-runtime.yaml \

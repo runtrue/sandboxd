@@ -99,7 +99,7 @@ jobs:
         run: |
           node_ip=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
           test -n "$node_ip"
-          sudo install -d -m 0700 /etc/rancher/k3s
+          sudo install -d -m 0755 /etc/rancher/k3s
           sudo tee /etc/rancher/k3s/config.yaml >/dev/null <<EOF
           bind-address: 127.0.0.1
           advertise-address: 127.0.0.1
@@ -115,6 +115,7 @@ jobs:
             - local-storage
           disable-network-policy: false
           EOF
+          sudo chmod 0600 /etc/rancher/k3s/config.yaml
           sudo systemd-run \
             --unit=sandboxd-ci-k3s \
             --property=Type=exec \
