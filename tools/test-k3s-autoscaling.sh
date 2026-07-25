@@ -53,6 +53,31 @@ chmod 0600 "$temporary/database-url"
 kubectl apply -f deploy/k3s/sandboxd-worker-pools.yaml
 test "$(kubectl get statefulset -n "$namespace" sandboxd-reviewed-cold \
   -o jsonpath='{.spec.replicas}')" = 0
+node_ip=$(kubectl get nodes -o json | jq -r '
+  .items[0].status.addresses[]
+  | select(.type == "InternalIP")
+  | .address
+')
+test -n "$node_ip"
+kubectl apply -f - >/dev/null <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandboxd-host-autoscaler-probe
+  namespace: ${namespace}
+spec:
+  podSelector:
+    matchLabels:
+      runtrue.io/autoscaled-worker: "true"
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: ${node_ip}/32
+      ports:
+        - protocol: TCP
+          port: 8081
+EOF
 
 kubectl port-forward -n "$namespace" deployment/sandbox-gateway \
   "${database_port}:5432" >"$temporary/database-forward.log" 2>&1 &
