@@ -55,7 +55,8 @@ checkpoint and publication latency, source cleanup, materialization, cohort
 validation, transfer claims, and runtime restore. Writable-root snapshots also
 report diff-export latency.
 
-Runtime restore ends when runsc reports the selected services restored.
+Runtime restore ends when runsc reports the complete checkpoint container set
+restored.
 Guest-level startup measurements can be added with an instrumented workload.
 
 Measure the stripped worker binary with:

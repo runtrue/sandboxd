@@ -203,6 +203,7 @@ impl ArtifactRepository {
                     .insert(
                         volume.volume_id.clone(),
                         VolumeSnapshotDescriptor {
+                            schema_version: volume.schema_version,
                             provider_id: volume.provider_id.clone(),
                             persistence_class: volume.persistence_class,
                             portability: volume.portability,
@@ -1043,6 +1044,7 @@ mod tests {
             path: volume_path,
             media_type: "application/vnd.runtrue.volume.ext4.v1".to_owned(),
             volume: Some(StagedVolumeMetadata {
+                schema_version: 1,
                 volume_id: VolumeId::parse("database").expect("volume"),
                 provider_id: "local-loopback-v1".to_owned(),
                 persistence_class: VolumePersistenceClass::Persistent,

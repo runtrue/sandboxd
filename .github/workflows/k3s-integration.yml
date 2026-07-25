@@ -11,9 +11,11 @@ on:
       - "crates/**"
       - "deploy/k3s/**"
       - "tools/test-k3s-fixed-runtime.sh"
+      - "tools/test-k3s-directory-volumes.sh"
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
       - "tools/test-k3s-autoscaling.sh"
+      - "tools/test-k3s-multinode-recovery.sh"
       - "tools/test-k3s-image-preparation.sh"
       - "tools/test-k3s-userspace-egress.sh"
   push:
@@ -27,9 +29,11 @@ on:
       - "crates/**"
       - "deploy/k3s/**"
       - "tools/test-k3s-fixed-runtime.sh"
+      - "tools/test-k3s-directory-volumes.sh"
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
       - "tools/test-k3s-autoscaling.sh"
+      - "tools/test-k3s-multinode-recovery.sh"
       - "tools/test-k3s-image-preparation.sh"
       - "tools/test-k3s-userspace-egress.sh"
   schedule:
@@ -53,7 +57,7 @@ jobs:
   fixed-runtime:
     name: Fixed runtime in local-only k3s
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -245,6 +249,13 @@ jobs:
         run: |
           bash tools/test-k3s-autoscaling.sh \
             | tee k3s-diagnostics/autoscaling.log
+
+      - name: Run multi-node durable recovery conformance
+        env:
+          MULTINODE_DIAGNOSTICS_DIR: k3s-diagnostics
+        run: |
+          bash tools/test-k3s-multinode-recovery.sh \
+            | tee k3s-diagnostics/multinode-recovery.log
 
       - name: Collect diagnostics
         if: always()

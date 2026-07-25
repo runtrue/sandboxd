@@ -503,20 +503,31 @@ impl VolumeProvider for DirectoryVolumeProvider {
                 .auxiliary
                 .restore(scope, specification, snapshot, source);
         }
-        if !self.gofer_access
-            || !self.ownership_restore
-            || snapshot.schema_version != SNAPSHOT_VERSION
-            || snapshot.provider_id != DIRECTORY_VOLUME_PROVIDER_ID
-            || snapshot.volume_id != specification.volume_id
-            || snapshot.persistence_class != specification.persistence_class
-            || snapshot.quota_bytes != specification.quota_bytes
-            || snapshot.format != SNAPSHOT_FORMAT
-            || !snapshot.portability.permits_cross_worker()
-        {
-            return Err(VolumeError::Unsupported(
-                "directory volume snapshot is incompatible or ownership restore is unavailable"
-                    .to_owned(),
-            ));
+        let incompatibility = if !self.gofer_access {
+            Some("DAC_OVERRIDE is unavailable")
+        } else if !self.ownership_restore {
+            Some("CHOWN or idmapped ownership restore is unavailable")
+        } else if snapshot.schema_version != SNAPSHOT_VERSION {
+            Some("snapshot schema version does not match")
+        } else if snapshot.provider_id != DIRECTORY_VOLUME_PROVIDER_ID {
+            Some("snapshot provider does not match")
+        } else if snapshot.volume_id != specification.volume_id {
+            Some("snapshot volume identity does not match")
+        } else if snapshot.persistence_class != specification.persistence_class {
+            Some("snapshot persistence class does not match")
+        } else if snapshot.quota_bytes != specification.quota_bytes {
+            Some("snapshot quota does not match")
+        } else if snapshot.format != SNAPSHOT_FORMAT {
+            Some("snapshot format does not match")
+        } else if !snapshot.portability.permits_cross_worker() {
+            Some("snapshot is not portable across workers")
+        } else {
+            None
+        };
+        if let Some(reason) = incompatibility {
+            return Err(VolumeError::Unsupported(format!(
+                "directory volume restore is unavailable: {reason}"
+            )));
         }
         let (digest, size) = digest_file(source)?;
         if digest != snapshot.digest

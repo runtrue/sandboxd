@@ -68,16 +68,28 @@ pub(super) fn write_bundle(
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<_>>();
     let mut annotations = match role {
-        ContainerRole::Sandbox => BTreeMap::from([
-            (
-                "io.kubernetes.cri.container-type".to_owned(),
-                "sandbox".to_owned(),
-            ),
-            (
-                "io.kubernetes.cri.container-name".to_owned(),
-                service_name.to_owned(),
-            ),
-        ]),
+        ContainerRole::Sandbox => {
+            let checkpoint_path = bundle
+                .parent()
+                .expect("bundle has a state directory")
+                .join("application-checkpoint");
+            fs::create_dir(&checkpoint_path)
+                .map_err(|source| io_error(&checkpoint_path, source))?;
+            BTreeMap::from([
+                (
+                    "io.kubernetes.cri.container-type".to_owned(),
+                    "sandbox".to_owned(),
+                ),
+                (
+                    "io.kubernetes.cri.container-name".to_owned(),
+                    service_name.to_owned(),
+                ),
+                (
+                    "dev.gvisor.internal.checkpoint.path".to_owned(),
+                    checkpoint_path.display().to_string(),
+                ),
+            ])
+        }
         ContainerRole::Container { sandbox_id } => BTreeMap::from([
             (
                 "io.kubernetes.cri.container-type".to_owned(),
@@ -405,6 +417,13 @@ mod tests {
             assert_eq!(config["linux"]["namespaces"].as_array().unwrap().len(), 5);
             assert!(config["linux"]["maskedPaths"].as_array().unwrap().len() >= 9);
             assert!(config["linux"]["readonlyPaths"].as_array().unwrap().len() >= 5);
+            assert!(config["annotations"]["dev.gvisor.internal.checkpoint.path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("/application-checkpoint")));
+            assert!(
+                config["annotations"]["dev.gvisor.internal.checkpoint.enable"].is_null(),
+                "guest checkpoint triggering must remain disabled"
+            );
         }
     }
 

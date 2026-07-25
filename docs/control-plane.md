@@ -315,10 +315,24 @@ Metrics publish `recovery_rpo/<resource-shape>` and
 `recovery_rto/<resource-shape>` P50/P95/P99 series.
 
 Recovery preserves checkpointed process, memory, tmpfs, internal sockets,
-supported writable roots, and portable provider volumes. It does not make
-external effects exactly once. Work after the recovery point can repeat;
-clients need idempotency keys or transactional sinks at external side-effect
-boundaries.
+supported writable roots, and portable provider volumes. The checked-in
+multi-node k3s conformance proves this path for forced worker-Pod deletion and
+complete source-agent loss. It requires the declared 120-second RPO ceiling,
+a 10-second per-recovery RTO ceiling, a newer epoch, confirmed source fencing,
+and the complete audit chain. The reference Level B run resumed process
+memory, a pre-opened internal TCP socket, tmpfs, and the writable OCI root with
+four capabilities and no privileged worker Pod or host integration.
+
+Directory provider archives preserve numeric ownership. A named directory
+volume is portable only when the destination storage provider supplies the
+same ownership mapping, such as a qualified idmapped or CSI implementation.
+Independent Kubernetes Pod user namespaces do not guarantee that mapping.
+
+The guest may observe the read-only gVisor restore notification at
+`/proc/gvisor/checkpoint`; the worker does not enable the guest checkpoint
+trigger. Recovery does not make external effects exactly once. Work after the
+recovery point can repeat; clients need idempotency keys or transactional
+sinks at external side-effect boundaries.
 
 ## Compatibility
 

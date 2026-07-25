@@ -1,5 +1,10 @@
 use super::NetworkMode;
 use crate::{error::io_error, SandboxError};
+use nix::{
+    errno::Errno,
+    sys::wait::{waitpid, WaitPidFlag, WaitStatus},
+    unistd::Pid,
+};
 use sha2::{Digest as _, Sha256};
 use std::{
     io::{Read, Write as _},
@@ -348,6 +353,21 @@ impl Runsc {
         }
     }
 
+    pub(super) fn wait_restore_complete(
+        &self,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<(), SandboxError> {
+        let mut arguments = self.common_arguments();
+        arguments.extend(["wait".to_owned(), "--restore".to_owned(), id.to_owned()]);
+        checked_timeout(
+            &self.program,
+            &arguments,
+            deadline.saturating_duration_since(Instant::now()),
+        )
+        .map(|_| ())
+    }
+
     pub(super) fn wait_created(
         &self,
         process: &mut ServiceProcess,
@@ -404,12 +424,19 @@ impl Runsc {
             .filter(|id| id.as_str() != sandbox_id)
             .cloned()
             .collect::<Vec<_>>();
+        let orphan_gofers = children
+            .iter()
+            .filter_map(|id| self.gofer_pid(id, sandbox_id))
+            .collect::<Vec<_>>();
         for id in &children {
             self.kill(id);
         }
         if ids.iter().any(|id| id == sandbox_id) {
             self.kill(sandbox_id);
             let _ = self.delete_all(&[sandbox_id.to_owned()]);
+        }
+        for pid in orphan_gofers {
+            reap_adopted_child(pid);
         }
         let remaining = ids
             .iter()
@@ -424,6 +451,15 @@ impl Runsc {
                 "runsc state is not empty after sandbox teardown".to_owned(),
             ))
         }
+    }
+
+    fn gofer_pid(&self, id: &str, sandbox_id: &str) -> Option<libc::pid_t> {
+        let path = self.root.join(format!("{id}_sandbox:{sandbox_id}.state"));
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        value["goferPid"]
+            .as_i64()
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
     }
 
     fn kill(&self, id: &str) {
@@ -539,6 +575,27 @@ impl Runsc {
             "; runsc diagnostic: {}",
             String::from_utf8_lossy(&bytes).trim()
         )
+    }
+}
+
+fn reap_adopted_child(pid: libc::pid_t) {
+    let deadline = Instant::now() + DELETE_TIMEOUT;
+    let pid = Pid::from_raw(pid);
+    loop {
+        // sandboxd is PID 1 in the worker container. A stopped restored
+        // subcontainer can leave its gofer adopted by sandboxd after the
+        // original runsc process exits, so only sandboxd can reap this exact
+        // recorded PID.
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => {}
+            Ok(_) | Err(Errno::ECHILD) => return,
+            Err(Errno::EINTR) => continue,
+            Err(_) => return,
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 

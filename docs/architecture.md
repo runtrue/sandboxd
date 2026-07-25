@@ -341,9 +341,11 @@ layer. Each upper layer is exported with runsc's rootfs-upper interface,
 canonicalized to normalized relative paths, and then passed through the same
 bounded special-file, sparse-file, xattr, traversal, duplicate, entry-count,
 logical-size, archive-size, and deadline checks used for untrusted OCI diffs.
-Restore uses the reviewed gVisor rootfs-upper annotation only after that
-validation. A live snapshot resumes the source before artifact publication;
-failure also attempts to resume it.
+Restore validates and materializes the provider-backed writable root, then
+lets runsc restore its checkpointed overlay against the unchanged OCI spec.
+Injecting the exported diff through the rootfs-upper annotation would change
+that spec and is rejected by runsc checkpoint restore. A live snapshot resumes
+the source before artifact publication; failure also attempts to resume it.
 The artifact layer hashes each file while streaming, encrypts it with a random
 data key, wraps that key with a tenant/workspace-derived key, and publishes the
 object by content digest. A versioned encrypted manifest records tenant,
@@ -401,9 +403,10 @@ recovery fence, provider
 portability, topology, runsc state format and version, runtime configuration,
 CPU features, architecture, and operating system. These checks finish before
 destination cgroups, namespaces, or runsc state are allocated. The root restore
-starts first; active child containers then restore against the same checkpoint.
-A child that had already exited is represented as stopped and is not passed to
-runsc restore.
+starts first; every child container then supplies its replacement OCI spec and
+filesystem handles before runsc completes the restore. This includes children
+whose init process had already exited because they remain part of the gVisor
+checkpoint's container set; their stopped state remains stopped afterward.
 
 The checkpoint contains process state, memory, sockets, and writable tmpfs
 contents. Immutable OCI roots are re-admitted from the destination image store.

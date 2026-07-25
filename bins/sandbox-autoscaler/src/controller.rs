@@ -498,14 +498,24 @@ async fn broker_ready(address: SocketAddr) -> bool {
             .take((MAXIMUM_BROKER_PROBE_BYTES + 1) as u64)
             .read_to_end(&mut response)
             .await?;
-        Ok::<bool, std::io::Error>(
-            response.len() <= MAXIMUM_BROKER_PROBE_BYTES
-                && (response.starts_with(b"HTTP/1.1 200 ")
-                    || response.starts_with(b"HTTP/1.0 200 ")),
-        )
+        Ok::<bool, std::io::Error>(broker_response_is_ready(&response))
     })
     .await
     .is_ok_and(|result| result.unwrap_or(false))
+}
+
+fn broker_response_is_ready(response: &[u8]) -> bool {
+    if response.len() > MAXIMUM_BROKER_PROBE_BYTES
+        || !(response.starts_with(b"HTTP/1.1 ") || response.starts_with(b"HTTP/1.0 "))
+        || response.get(12) != Some(&b' ')
+    {
+        return false;
+    }
+    response
+        .get(9..12)
+        .and_then(|status| std::str::from_utf8(status).ok())
+        .and_then(|status| status.parse::<u16>().ok())
+        .is_some_and(|status| (200..300).contains(&status))
 }
 
 fn pod_worker_id(pod: &Pod) -> Result<WorkerId, String> {
@@ -562,7 +572,7 @@ mod tests {
             let mut request = [0_u8; 256];
             let _ = stream.read(&mut request).await.expect("request");
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
                 .await
                 .expect("response");
         });
@@ -582,6 +592,25 @@ mod tests {
         });
         assert!(!broker_ready(address).await);
         server.await.expect("server");
+    }
+
+    #[test]
+    fn readiness_accepts_only_well_formed_success_statuses() {
+        assert!(broker_response_is_ready(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+        ));
+        assert!(broker_response_is_ready(
+            b"HTTP/1.0 299 Success\r\nContent-Length: 0\r\n\r\n"
+        ));
+        assert!(!broker_response_is_ready(
+            b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n"
+        ));
+        assert!(!broker_response_is_ready(
+            b"HTTP/1.1 2xx Nope\r\nContent-Length: 0\r\n\r\n"
+        ));
+        assert!(!broker_response_is_ready(
+            b"not-http 204 No Content\r\nContent-Length: 0\r\n\r\n"
+        ));
     }
 
     #[test]

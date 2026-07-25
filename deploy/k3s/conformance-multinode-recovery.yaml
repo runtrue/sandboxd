@@ -1,0 +1,105 @@
+name: multinode-recovery-conformance
+
+networks:
+  application: {}
+
+services:
+  server:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import json
+        import os
+        import socket
+        import threading
+        import time
+        from pathlib import Path
+
+        boot_unix_ns = time.time_ns()
+        memory_token = os.urandom(24).hex()
+        counter = 0
+        counter_lock = threading.Lock()
+
+        Path("/tmp/recovery-tmpfs.txt").write_text("tmpfs-preserved\n")
+        Path("/var/tmp/recovery-root.txt").write_text("writable-root-preserved\n")
+
+        def count():
+            global counter
+            while True:
+                with counter_lock:
+                    counter += 1
+                time.sleep(0.05)
+
+        def handle(connection):
+            try:
+                request = connection.makefile("rb").readline()
+                if request != b"ARMED\n":
+                    return
+                connection.sendall(b"ARMED\n")
+                if connection.makefile("rb").readline() != b"CHECK\n":
+                    return
+                with counter_lock:
+                    observed_counter = counter
+                payload = {
+                    "boot_unix_ns": boot_unix_ns,
+                    "counter": observed_counter,
+                    "memory_token": memory_token,
+                    "observed_unix_ns": time.time_ns(),
+                    "tmpfs": Path("/tmp/recovery-tmpfs.txt").read_text(),
+                    "writable_root": Path("/var/tmp/recovery-root.txt").read_text(),
+                }
+                connection.sendall(
+                    json.dumps(payload, sort_keys=True).encode() + b"\n"
+                )
+            finally:
+                connection.close()
+
+        threading.Thread(target=count, daemon=True).start()
+        listener = socket.create_server(("0.0.0.0", 8080))
+        while True:
+            connection, _ = listener.accept()
+            threading.Thread(
+                target=handle, args=(connection,), daemon=True
+            ).start()
+    healthcheck:
+      test: [CMD, /usr/local/bin/python3, -c, 'import socket; socket.create_connection(("127.0.0.1", 8080), timeout=0.5).close()']
+      interval_ms: 50
+      timeout_ms: 500
+      retries: 80
+    networks: [application]
+    read_only: false
+
+  observer:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import json
+        import socket
+        import time
+
+        connection = socket.create_connection(("server", 8080), timeout=2)
+        connection.sendall(b"ARMED\n")
+        assert connection.makefile("rb").readline() == b"ARMED\n"
+        # A live checkpoint reports "resume"; a checkpoint materialized into a
+        # replacement sandbox reports "restore". The file is read-only, so the
+        # workload can observe lifecycle without being allowed to trigger it.
+        while True:
+            with open("/proc/gvisor/checkpoint") as checkpoint:
+                event = checkpoint.read().strip()
+            if event == "restore":
+                break
+            assert event == "resume"
+        connection.sendall(b"CHECK\n")
+        payload = json.loads(connection.makefile("rb").readline())
+        assert payload["counter"] > 0
+        assert len(payload["memory_token"]) == 48
+        assert payload["tmpfs"] == "tmpfs-preserved\n"
+        assert payload["writable_root"] == "writable-root-preserved\n"
+        print(json.dumps(payload, sort_keys=True), flush=True)
+    depends_on:
+      server:
+        condition: service_healthy
+    networks: [application]
+    read_only: true

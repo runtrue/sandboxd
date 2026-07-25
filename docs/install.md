@@ -181,10 +181,32 @@ Automatic worker-loss recovery additionally requires:
 - outer network policy allowing only required artifact and control-plane
   endpoints.
 
+The minimum validated recovery worker remains the four-capability fixed
+profile: `SETGID`, `SETUID`, `SYS_CHROOT`, and `SYS_ADMIN` in a
+Kubernetes-created Pod user namespace. Recovery adds no capability, device,
+host path, host namespace, host runtime socket, or service-account token.
+Directory-backed writable OCI roots are portable through the artifact backend.
+Named directory volumes additionally require a storage provider with a
+portable UID/GID mapping across the source and destination Pod user namespaces;
+`CHOWN` and `DAC_OVERRIDE` alone do not provide that translation.
+
 Do not use node-local object storage for this feature. Configure replication,
 encryption, retention, and availability for the declared RPO. The controller
 never falls back to a stale checkpoint or an empty create when recovery was
 requested.
+
+Operator CLI calls default to tenant `local`, workspace `local`, and subject
+`local-root`. To inspect, read logs from, or stop a sandbox assigned through a
+different durable scope, set these variables in the operator environment:
+
+```bash
+export RUNTRUE_SANDBOXD_OPERATOR_TENANT_ID=tenant-a
+export RUNTRUE_SANDBOXD_OPERATOR_WORKSPACE_ID=workspace-a
+export RUNTRUE_SANDBOXD_OPERATOR_SUBJECT_ID=operator-a
+```
+
+They change only the root-only operator request scope; they do not grant
+tenant access or weaken ownership checks.
 
 The provider uses HTTPS by default. Set `--artifact-s3-endpoint` for a compatible
 service. `--artifact-s3-allow-http-for-local-testing` is only for a trusted
