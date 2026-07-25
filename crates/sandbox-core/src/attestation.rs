@@ -4,8 +4,8 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const IMAGE_ATTESTATION_VERSION: u32 = 1;
-const SIGNING_DOMAIN: &[u8] = b"runtrue-sandboxd/image-attestation/v1\0";
+pub const IMAGE_ATTESTATION_VERSION: u32 = 2;
+const SIGNING_DOMAIN: &[u8] = b"runtrue-sandboxd/image-attestation/v2\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +29,9 @@ pub struct ImagePreparationAttestation {
     pub expanded_root_bytes: u64,
     pub preparation_policy: String,
     pub toolchain_digest: String,
+    pub sbom_digest: String,
+    pub provenance_digest: String,
+    pub vulnerability_policy: String,
     pub worker_artifact_digest: String,
     pub prepared_unix_ms: u64,
 }
@@ -47,6 +50,9 @@ impl ImagePreparationAttestation {
             || self.expanded_root_bytes == 0
             || !bounded_name(&self.preparation_policy, 128)
             || !valid_digest(&self.toolchain_digest)
+            || !valid_digest(&self.sbom_digest)
+            || !valid_digest(&self.provenance_digest)
+            || !bounded_name(&self.vulnerability_policy, 128)
             || !valid_digest(&self.worker_artifact_digest)
             || self.prepared_unix_ms == 0
         {
@@ -72,8 +78,7 @@ impl ImagePreparationAttestation {
             }
             previous = Some(descriptor);
         }
-        if !roles.contains("index")
-            || !roles.contains("manifest")
+        if !roles.contains("manifest")
             || !roles.contains("config")
             || !roles.iter().any(|role| role.starts_with("layer-"))
         {
@@ -111,6 +116,7 @@ pub struct AttestationTrustPolicy {
     pub trusted_public_keys: BTreeMap<String, String>,
     pub allowed_preparation_policies: BTreeSet<String>,
     pub allowed_toolchain_digests: BTreeSet<String>,
+    pub allowed_vulnerability_policies: BTreeSet<String>,
     pub revoked_worker_artifact_digests: BTreeSet<String>,
     pub revoked_expanded_root_digests: BTreeSet<String>,
     pub maximum_attestation_age_ms: u64,
@@ -124,6 +130,8 @@ impl AttestationTrustPolicy {
             || self.allowed_preparation_policies.len() > 64
             || self.allowed_toolchain_digests.is_empty()
             || self.allowed_toolchain_digests.len() > 256
+            || self.allowed_vulnerability_policies.is_empty()
+            || self.allowed_vulnerability_policies.len() > 64
             || self.revoked_worker_artifact_digests.len() > 65_536
             || self.revoked_expanded_root_digests.len() > 65_536
             || self.maximum_attestation_age_ms == 0
@@ -139,6 +147,10 @@ impl AttestationTrustPolicy {
                 .allowed_toolchain_digests
                 .iter()
                 .any(|digest| !valid_digest(digest))
+            || self
+                .allowed_vulnerability_policies
+                .iter()
+                .any(|policy| !bounded_name(policy, 128))
             || self
                 .revoked_worker_artifact_digests
                 .iter()
@@ -217,6 +229,9 @@ pub fn verify_trusted_image_attestation(
         || !policy
             .allowed_toolchain_digests
             .contains(&attestation.toolchain_digest)
+        || !policy
+            .allowed_vulnerability_policies
+            .contains(&attestation.vulnerability_policy)
         || policy
             .revoked_worker_artifact_digests
             .contains(&attestation.worker_artifact_digest)
@@ -368,6 +383,9 @@ mod tests {
             expanded_root_bytes: 1_000,
             preparation_policy: "strict-v1".to_owned(),
             toolchain_digest: digest('2'),
+            sbom_digest: digest('7'),
+            provenance_digest: digest('8'),
+            vulnerability_policy: "release-v1".to_owned(),
             worker_artifact_digest: digest('3'),
             prepared_unix_ms: 1,
         }
@@ -391,6 +409,15 @@ mod tests {
         assert!(verify_image_attestation(&public_key, &tampered).is_err());
         let mut tampered = signed.clone();
         tampered.attestation.preparation_policy = "strict-v2".to_owned();
+        assert!(verify_image_attestation(&public_key, &tampered).is_err());
+        let mut tampered = signed.clone();
+        tampered.attestation.sbom_digest = digest('9');
+        assert!(verify_image_attestation(&public_key, &tampered).is_err());
+        let mut tampered = signed.clone();
+        tampered.attestation.provenance_digest = digest('9');
+        assert!(verify_image_attestation(&public_key, &tampered).is_err());
+        let mut tampered = signed.clone();
+        tampered.attestation.vulnerability_policy = "release-v2".to_owned();
         assert!(verify_image_attestation(&public_key, &tampered).is_err());
         let mut tampered = signed.clone();
         tampered.attestation.worker_artifact_digest = digest('6');
@@ -429,6 +456,7 @@ mod tests {
             )]),
             allowed_preparation_policies: BTreeSet::from(["strict-v1".to_owned()]),
             allowed_toolchain_digests: BTreeSet::from([digest('2')]),
+            allowed_vulnerability_policies: BTreeSet::from(["release-v1".to_owned()]),
             revoked_worker_artifact_digests: BTreeSet::new(),
             revoked_expanded_root_digests: BTreeSet::new(),
             maximum_attestation_age_ms: 100,
@@ -455,6 +483,7 @@ mod tests {
             )]),
             allowed_preparation_policies: BTreeSet::from(["strict-v1".to_owned()]),
             allowed_toolchain_digests: BTreeSet::from([digest('2')]),
+            allowed_vulnerability_policies: BTreeSet::from(["release-v1".to_owned()]),
             revoked_worker_artifact_digests: BTreeSet::new(),
             revoked_expanded_root_digests: BTreeSet::new(),
             maximum_attestation_age_ms: 1_000,

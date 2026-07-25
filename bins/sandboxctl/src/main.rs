@@ -1,6 +1,7 @@
 mod cli;
 mod command;
 mod launcher;
+mod publication;
 
 use clap::Parser as _;
 

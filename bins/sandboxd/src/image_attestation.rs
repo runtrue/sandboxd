@@ -106,12 +106,18 @@ fn descriptor(
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, SandboxError> {
+    // Kubernetes projects ConfigMap and Secret keys through a read-only
+    // symlink. Resolve that atomic-writer indirection once, then preserve
+    // O_NOFOLLOW on the regular file that is opened.
+    let resolved = std::fs::canonicalize(path).map_err(|source| io_error(path, source))?;
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|source| io_error(path, source))?;
-    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+        .open(&resolved)
+        .map_err(|source| io_error(&resolved, source))?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| io_error(&resolved, source))?;
     if !metadata.file_type().is_file()
         || metadata.len() == 0
         || metadata.len() > MAXIMUM_POLICY_BYTES
@@ -200,6 +206,9 @@ mod tests {
                 expanded_root_bytes: 118_293_769,
                 preparation_policy: "strict-v1".to_owned(),
                 toolchain_digest: digest('a'),
+                sbom_digest: digest('d'),
+                provenance_digest: digest('e'),
+                vulnerability_policy: "release-v1".to_owned(),
                 worker_artifact_digest: digest('b'),
                 prepared_unix_ms,
             },
@@ -216,6 +225,7 @@ mod tests {
             )]),
             allowed_preparation_policies: BTreeSet::from(["strict-v1".to_owned()]),
             allowed_toolchain_digests: BTreeSet::from([digest('a')]),
+            allowed_vulnerability_policies: BTreeSet::from(["release-v1".to_owned()]),
             revoked_worker_artifact_digests: BTreeSet::new(),
             revoked_expanded_root_digests: BTreeSet::new(),
             maximum_attestation_age_ms: 60_000,

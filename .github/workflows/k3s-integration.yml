@@ -14,6 +14,7 @@ on:
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
       - "tools/test-k3s-autoscaling.sh"
+      - "tools/test-k3s-image-preparation.sh"
       - "tools/test-k3s-userspace-egress.sh"
   push:
     branches: [main]
@@ -29,6 +30,7 @@ on:
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
       - "tools/test-k3s-autoscaling.sh"
+      - "tools/test-k3s-image-preparation.sh"
       - "tools/test-k3s-userspace-egress.sh"
   schedule:
     - cron: "41 3 * * 2"
@@ -87,6 +89,15 @@ jobs:
             --build-arg "SANDBOXD_BUILD_ID=$build_id" \
             --tag sandboxd-fixed-runtime:local \
             --file deploy/k3s/Dockerfile.fixed-runtime \
+            .
+
+      - name: Build isolated image-preparer image
+        run: |
+          build_id=$(sha256sum target/release/runtrue-sandboxctl | cut -d' ' -f1)
+          docker build \
+            --build-arg "SANDBOXD_BUILD_ID=$build_id" \
+            --tag sandbox-image-preparer:local \
+            --file deploy/k3s/Dockerfile.preparer \
             .
 
       - name: Build control-plane images
@@ -190,6 +201,7 @@ jobs:
         run: |
           docker save \
             sandboxd-fixed-runtime:local \
+            sandbox-image-preparer:local \
             sandbox-gateway:local \
             sandbox-broker:local \
             sandbox-autoscaler:local \
@@ -201,6 +213,11 @@ jobs:
           mkdir -p k3s-diagnostics
           bash tools/test-k3s-fixed-runtime.sh \
             | tee k3s-diagnostics/conformance.log
+
+      - name: Run attested image-preparation conformance
+        run: |
+          bash tools/test-k3s-image-preparation.sh \
+            | tee k3s-diagnostics/image-preparation.log
 
       - name: Run capability-free userspace egress conformance
         run: |
@@ -248,6 +265,10 @@ jobs:
             -l app.kubernetes.io/name=sandboxd-fixed-runtime-brokered \
             --all-containers \
             --prefix >k3s-diagnostics/brokered-worker.log 2>&1 || true
+          kubectl logs -n sandboxd-system \
+            -l app.kubernetes.io/name=sandbox-image-preparer \
+            --all-containers \
+            --prefix >k3s-diagnostics/image-preparer.log 2>&1 || true
           kubectl logs -n sandboxd-system \
             -l app.kubernetes.io/name=sandbox-gateway \
             --all-containers \
