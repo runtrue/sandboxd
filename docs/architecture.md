@@ -28,6 +28,13 @@ broker and signer are part of the trusted control-plane boundary.
 
 ## Sandbox ownership
 
+The durable placement state distinguishes batch completion from a live
+service. Successful create and restore responses enter `serving`; the worker
+remains leased and its authenticated heartbeats extend only the current,
+unexpired assignment epoch. Batch runs and failed starts enter terminal
+`completed`. Cancellation, quarantine, lease expiry, and reassignment fence a
+serving route before another epoch may own the sandbox.
+
 A sandbox—not an individual container—is the unit of create, placement, pause,
 resume, snapshot, restore, recovery, and destruction. It owns:
 

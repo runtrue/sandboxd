@@ -6,7 +6,7 @@ use runtrue_sandbox_placement::{
     Assignment, CompletionOutcome, EnqueueOutcome, PlacementStoreConfig, PlacementStoreError,
     PlacementSubmission, PostgresPlacementStore, WorkerRegistration,
 };
-use runtrue_sandbox_protocol::Operation;
+use runtrue_sandbox_protocol::{Operation, WorkloadResponse, PROTOCOL_VERSION};
 use std::{env, time::Duration};
 
 const TEST_DATABASE_MARKER: &str = "sandboxd_placement_test";
@@ -270,6 +270,97 @@ async fn exercise(url: &str) {
         replica_b.heartbeat_worker(&worker_d.worker_id, 202).await,
         Err(PlacementStoreError::WorkerUnavailable)
     ));
+
+    let mut service = submission(
+        "tenant-service",
+        "service-create",
+        "sandbox-service",
+        10_000,
+    );
+    service.operation = Operation::Create {
+        topology: serde_json::from_str(include_str!("../../../deploy/k3s/fixed-runtime.lock.json"))
+            .expect("topology"),
+        sandbox: service.work.sandbox_id.to_string(),
+        timeout_ms: 1_000,
+    };
+    service.topology = "service-topology".to_owned();
+    replica_b
+        .enqueue(&service, 400)
+        .await
+        .expect("enqueue service");
+    let mut service_worker = worker("worker-service");
+    service_worker.topology = service.topology.clone();
+    replica_b
+        .register_worker(&service_worker, 400)
+        .await
+        .expect("register service worker");
+    let service_assignment = replica_b
+        .assign_next(&service_worker.worker_id, 401)
+        .await
+        .expect("assign service")
+        .expect("service assignment");
+    replica_b
+        .complete_response(
+            &service_assignment,
+            &WorkloadResponse {
+                schema_version: PROTOCOL_VERSION,
+                request_id: service_assignment.request_id.clone(),
+                ok: true,
+                result: Some(serde_json::json!({"state": "running"})),
+                error: None,
+            },
+            402,
+        )
+        .await
+        .expect("publish serving state");
+    let serving = replica_b
+        .get_by_idempotency(
+            &service.work.tenant_id,
+            &service.subject_id,
+            &service.work.idempotency_key,
+        )
+        .await
+        .expect("serving lookup")
+        .expect("serving placement");
+    assert_eq!(
+        serving.state,
+        runtrue_sandbox_placement::PlacementState::Serving
+    );
+    replica_b
+        .heartbeat_worker(&service_worker.worker_id, 440)
+        .await
+        .expect("renew serving lease");
+    assert!(replica_b
+        .active_assignment_by_idempotency(
+            &service.work.tenant_id,
+            &service.subject_id,
+            &service.work.idempotency_key,
+            452,
+        )
+        .await
+        .expect("renewed route lookup")
+        .is_some());
+    let fenced = replica_b
+        .fence_expired(452)
+        .await
+        .expect("fence unrelated leases");
+    assert!(fenced
+        .iter()
+        .all(|record| record.request_id != service_assignment.request_id));
+    let cancelled = replica_b
+        .cancel(
+            &service.work.tenant_id,
+            &service.subject_id,
+            &service.work.idempotency_key,
+            453,
+        )
+        .await
+        .expect("cancel service")
+        .expect("cancelled service");
+    assert_eq!(
+        cancelled.state,
+        runtrue_sandbox_placement::PlacementState::Cancelled
+    );
 
     let expiring = submission(
         "tenant-expiry",

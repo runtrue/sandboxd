@@ -390,7 +390,9 @@ mod tests {
     use runtrue_sandbox_placement::{
         PlacementStoreConfig, PlacementSubmission, PostgresPlacementStore, WorkerRegistration,
     };
-    use runtrue_sandbox_protocol::{WorkloadAuthorization, WorkloadRequest};
+    use runtrue_sandbox_protocol::{
+        WorkloadAuthorization, WorkloadRequest, WorkloadResponse, PROTOCOL_VERSION,
+    };
     use sha2::Sha256;
     use std::{env, sync::Arc, time::SystemTime};
     use tokio::net::TcpListener;
@@ -466,8 +468,13 @@ mod tests {
                             topology: "topology-v1".to_owned(),
                             resource_shape: "standard-v1".to_owned(),
                             compatibility_cohort: "runsc-v1".to_owned(),
-                            operation: Operation::Inspect {
+                            operation: Operation::Create {
+                                topology: serde_json::from_str(include_str!(
+                                    "../../../deploy/k3s/fixed-runtime.lock.json"
+                                ))
+                                .expect("topology"),
                                 sandbox: sandbox.to_string(),
+                                timeout_ms: 1_000,
                             },
                         },
                         now,
@@ -489,11 +496,25 @@ mod tests {
                     )
                     .await
                     .expect("register");
-                store
+                let assignment = store
                     .assign_next(&worker, now)
                     .await
                     .expect("assign")
                     .expect("assignment");
+                store
+                    .complete_response(
+                        &assignment,
+                        &WorkloadResponse {
+                            schema_version: PROTOCOL_VERSION,
+                            request_id: assignment.request_id.clone(),
+                            ok: true,
+                            result: Some(serde_json::json!({"state": "running"})),
+                            error: None,
+                        },
+                        now + 1,
+                    )
+                    .await
+                    .expect("publish serving assignment");
 
                 let key = [0x33_u8; 32];
                 let server = tokio::spawn(async move {

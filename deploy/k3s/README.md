@@ -174,15 +174,15 @@ Python protocol fixture so the fixed upstream rootfs measurement remains
 independently reproducible; the Rust agent has unit-level end-to-end tests for
 both transport directions and is included in release reproducibility checks.
 
-The gateway exposes assigned routes at
+The gateway exposes active routes at
 `/v1/placements/{idempotency_key}/ingress/{service}/{container_port}`. Every
 request revalidates the durable lease and carries a fresh signed inspect order
 to the selected worker broker. The broker resolves only sandboxd's current
 loopback endpoint and injects its bearer locally; the tenant cannot choose a
 worker address or host port. The adapter is bounded to 16 KiB headers and
-1 MiB request/response bodies. It intentionally returns unavailable after the
-placement leaves `assigned`; durable post-completion services require a
-persistent service-assignment lifecycle.
+1 MiB request/response bodies. Successful create/restore placements enter
+`serving`; authenticated worker heartbeats renew only their current unexpired
+lease. Cancel, quarantine, lease expiry, and reassignment withdraw the route.
 
 [`tools/test-k3s-resource-limits.sh`](../../tools/test-k3s-resource-limits.sh)
 separately drives CPU saturation, fork exhaustion, bounded temporary-storage

@@ -127,10 +127,13 @@ lookup. Gateway and broker each cap headers at 16 KiB and request/response
 bodies at 1 MiB; their existing concurrency and I/O deadlines also apply.
 Chunked and connection-close responses are decoded within that bound.
 
-The public route currently exists only while the placement row is actively
-assigned. A completed `create` placement is not a durable service lease, so
-long-lived service exposure still requires the persistent assignment lifecycle
-described in the deployment security profile.
+A successful `create` or `restore` response transitions the placement to
+`serving` rather than terminal `completed`. Authenticated worker heartbeats
+renew only a still-live serving lease; they cannot revive an expired lease.
+The route remains available while that worker and epoch own the serving
+record. Cancel, quarantine, missed heartbeat/lease expiry, and reassignment
+remove it immediately. Batch `run` and failed create/restore operations still
+become terminal `completed`.
 
 ## Protocol
 
