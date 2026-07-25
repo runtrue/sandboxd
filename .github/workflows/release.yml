@@ -17,11 +17,37 @@ jobs:
     name: Validate release source
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Require a GitHub-verified signed annotated tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          tag_ref="$(
+            gh api \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}"
+          )"
+          test "$(jq -r '.object.type' <<<"$tag_ref")" = tag
+          tag_object_id="$(jq -r '.object.sha' <<<"$tag_ref")"
+          tag_object="$(
+            gh api \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_id}"
+          )"
+          test "$(jq -r '.tag' <<<"$tag_object")" = "$RELEASE_TAG"
+          test "$(jq -r '.object.type' <<<"$tag_object")" = commit
+          test "$(jq -r '.object.sha' <<<"$tag_object")" = "$(git rev-parse HEAD)"
+          if ! jq -e '.verification.verified == true' <<<"$tag_object" >/dev/null; then
+            printf 'GitHub rejected the release-tag signature: %s\n' \
+              "$(jq -r '.verification.reason' <<<"$tag_object")" >&2
+            exit 1
+          fi
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt --no-self-update
