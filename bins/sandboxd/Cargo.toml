@@ -26,5 +26,9 @@ runtrue-sandbox-oci.workspace = true
 runtrue-sandbox-protocol.workspace = true
 runtrue-sandbox-volume.workspace = true
 
+[dev-dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+
 [lints]
 workspace = true

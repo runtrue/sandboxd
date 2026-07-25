@@ -85,8 +85,15 @@ containerd 2.2 materializes image mounts in its own mount namespace. A
 separate Kubernetes sidecar would require bidirectional mount propagation,
 which Kubernetes permits only for privileged containers. The non-privileged
 profile therefore keeps both processes in one container and sandboxd inherits
-all seven capabilities. Splitting image preparation safely requires a
-different provider/broker contract, not a sidecar-only manifest change.
+all seven capabilities.
+
+Reduced fixed-root workers can instead require a signed preparation record at
+startup. The daemon verifies the operator key, preparation policy, toolchain,
+age and revocation policy, then binds the complete locked OCI descriptor graph,
+platform, expanded-root digest/count/bytes, and deployment-selected worker
+artifact digest before it marks the worker ready. The remaining preparation
+pipeline must publish that worker artifact and attestation atomically; it
+cannot be implemented as a mount-propagating sidecar.
 
 ### Kernel networking
 

@@ -4,6 +4,7 @@ mod authorization;
 mod cli;
 mod client;
 mod command;
+mod image_attestation;
 mod journal;
 mod launcher;
 mod protocol;

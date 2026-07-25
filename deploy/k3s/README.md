@@ -284,6 +284,12 @@ Production behavior is selected by typed command-line options:
   containerd.
 - `--fixed-rootfs-digest`, `--fixed-rootfs-entries`, and
   `--fixed-rootfs-bytes` install build-time measurements as one atomic set.
+- `--image-attestation`, `--image-attestation-trust-policy`, and
+  `--worker-artifact-digest` make a fixed-root worker fail before readiness
+  unless an Ed25519-signed preparation record exactly matches the locked OCI
+  descriptor graph, platform, expanded-root measurement, and deployment-
+  selected worker artifact. The trust policy bounds signer keys, preparation
+  policy, toolchain, age, and revoked root/worker digests.
 - `--network-mode loopback` creates no bridge, veth, network namespace, or
   nftables state and rejects any topology requesting egress or ingress.
 - `--network-mode userspace` accepts HTTP CONNECT egress and declared reverse

@@ -16,9 +16,10 @@ mod worker;
 
 pub use assignment::AssignmentEpoch;
 pub use attestation::{
-    sign_image_attestation, verify_image_attestation, verify_trusted_image_attestation,
-    AttestationTrustPolicy, AttestedDescriptor, ImagePreparationAttestation,
-    SignedImageAttestation, IMAGE_ATTESTATION_VERSION,
+    sign_image_attestation, verify_bound_image_attestation, verify_image_attestation,
+    verify_trusted_image_attestation, AttestationTrustPolicy, AttestedDescriptor,
+    ImageAttestationExpectation, ImagePreparationAttestation, SignedImageAttestation,
+    IMAGE_ATTESTATION_VERSION,
 };
 pub use autoscale::{
     reconcile as reconcile_worker_pool, AutoscaleDecision, NetworkFeatureTier, PoolObservation,

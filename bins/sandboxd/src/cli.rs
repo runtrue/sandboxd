@@ -237,6 +237,22 @@ pub(crate) struct ServeArgs {
         requires_all = ["fixed_rootfs", "fixed_rootfs_digest", "fixed_rootfs_entries"]
     )]
     pub(crate) fixed_rootfs_bytes: Option<u64>,
+    /// Signed preparation record for the fixed root and worker artifact.
+    #[arg(
+        long,
+        requires_all = [
+            "fixed_rootfs",
+            "image_attestation_trust_policy",
+            "worker_artifact_digest"
+        ]
+    )]
+    pub(crate) image_attestation: Option<PathBuf>,
+    /// Operator trust, toolchain, age, and revocation policy for the preparation record.
+    #[arg(long, requires = "image_attestation")]
+    pub(crate) image_attestation_trust_policy: Option<PathBuf>,
+    /// Digest-pinned worker artifact selected by the deployment admission policy.
+    #[arg(long, requires = "image_attestation")]
+    pub(crate) worker_artifact_digest: Option<String>,
     /// Guest network implementation.
     #[arg(long, value_enum, default_value_t = NetworkMode::Private)]
     pub(crate) network_mode: NetworkMode,
