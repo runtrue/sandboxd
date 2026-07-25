@@ -794,8 +794,10 @@ mod tests {
                 .strip_prefix("sha256:")
                 .expect("digest"),
         );
-        fs::write(destination.join("sbom.json"), b"{\"tampered\":true}")
-            .expect("tamper retained evidence");
+        let cached_sbom = destination.join("sbom.json");
+        fs::set_permissions(&cached_sbom, fs::Permissions::from_mode(0o644))
+            .expect("simulate cache-writer authority");
+        fs::write(cached_sbom, b"{\"tampered\":true}").expect("tamper retained evidence");
         assert!(publish_fixture(&fixture).is_err());
     }
 
