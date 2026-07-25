@@ -31,6 +31,9 @@ pub(crate) struct ServerConfig {
     pub(crate) snapshotter: String,
     pub(crate) image_platform: String,
     pub(crate) fixed_rootfs: Option<FixedRootfsConfig>,
+    pub(crate) image_attestation: Option<PathBuf>,
+    pub(crate) image_attestation_trust_policy: Option<PathBuf>,
+    pub(crate) worker_artifact_digest: Option<String>,
     pub(crate) executor: ExecutorConfiguration,
     pub(crate) runsc: PathBuf,
     pub(crate) ip: PathBuf,
@@ -81,6 +84,19 @@ impl ServerConfig {
         if self.io_timeout.is_zero() || self.io_timeout > Duration::from_secs(60) {
             return Err(SandboxError::Runtime(
                 "I/O timeout must be between 1 and 60 seconds".to_owned(),
+            ));
+        }
+        let attestation_values = [
+            self.image_attestation.is_some(),
+            self.image_attestation_trust_policy.is_some(),
+            self.worker_artifact_digest.is_some(),
+        ];
+        if attestation_values.iter().any(|value| *value)
+            && (!attestation_values.iter().all(|value| *value) || self.fixed_rootfs.is_none())
+        {
+            return Err(SandboxError::Runtime(
+                "image attestation, trust policy, worker artifact digest, and fixed rootfs must be configured together"
+                    .to_owned(),
             ));
         }
         if self.artifact_s3_bucket.is_some() && self.artifact_master_key.is_none() {
@@ -164,6 +180,9 @@ mod tests {
             snapshotter: "overlayfs".to_owned(),
             image_platform: "linux/amd64".to_owned(),
             fixed_rootfs: None,
+            image_attestation: None,
+            image_attestation_trust_policy: None,
+            worker_artifact_digest: None,
             executor: ExecutorConfiguration::default(),
             runsc: PathBuf::from("/usr/local/bin/runsc"),
             ip: PathBuf::from("/usr/sbin/ip"),
@@ -206,6 +225,13 @@ mod tests {
         let mut stray_endpoint = config();
         stray_endpoint.artifact_s3_endpoint = Some("https://s3.example.com".to_owned());
         assert!(stray_endpoint.validate().is_err());
+    }
+
+    #[test]
+    fn attestation_configuration_is_atomic_and_fixed_root_only() {
+        let mut incomplete = config();
+        incomplete.image_attestation = Some(PathBuf::from("/etc/sandboxd/attestation.json"));
+        assert!(incomplete.validate().is_err());
     }
 
     #[test]

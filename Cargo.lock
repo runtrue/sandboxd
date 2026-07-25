@@ -1919,7 +1919,9 @@ dependencies = [
 name = "runtrue-sandboxd"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "base64 0.23.0",
  "clap",
+ "ed25519-dalek",
  "hex",
  "hmac 0.12.1",
  "nix",

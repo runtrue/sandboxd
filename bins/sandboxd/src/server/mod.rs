@@ -143,6 +143,12 @@ pub(crate) fn serve(config: ServerConfig) -> Result<ServeOutcome, SandboxError> 
         .map(|path| WorkOrderVerifier::from_key_file(path, &control_root))
         .transpose()?;
     let fixed_rootfs = config.fixed_rootfs.clone();
+    crate::image_attestation::verify_configured(
+        config.image_attestation.as_deref(),
+        config.image_attestation_trust_policy.as_deref(),
+        config.worker_artifact_digest.as_deref(),
+        fixed_rootfs.as_ref(),
+    )?;
     let image_provider: Arc<dyn runtrue_sandbox_oci::provider::ImageProvider> =
         Arc::new(ContainerdImageProvider::new(ContainerdProviderConfig {
             ctr_program: config.ctr,

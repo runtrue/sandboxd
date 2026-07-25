@@ -93,6 +93,18 @@ pub struct SignedImageAttestation {
     pub signature: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ImageAttestationExpectation<'a> {
+    pub exact_reference: &'a str,
+    pub image_id: &'a str,
+    pub platform: &'a str,
+    pub descriptors: &'a [AttestedDescriptor],
+    pub expanded_root_digest: &'a str,
+    pub expanded_root_entries: u64,
+    pub expanded_root_bytes: u64,
+    pub worker_artifact_digest: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttestationTrustPolicy {
@@ -214,6 +226,30 @@ pub fn verify_trusted_image_attestation(
     {
         return Err(CoreError::InvalidSpecification(
             "image attestation is expired, revoked, or outside operator policy".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn verify_bound_image_attestation(
+    policy: &AttestationTrustPolicy,
+    signed: &SignedImageAttestation,
+    expected: ImageAttestationExpectation<'_>,
+    now_unix_ms: u64,
+) -> Result<(), CoreError> {
+    verify_trusted_image_attestation(policy, signed, now_unix_ms)?;
+    let attestation = &signed.attestation;
+    if attestation.exact_reference != expected.exact_reference
+        || attestation.image_id != expected.image_id
+        || attestation.platform != expected.platform
+        || attestation.descriptors != expected.descriptors
+        || attestation.expanded_root_digest != expected.expanded_root_digest
+        || attestation.expanded_root_entries != expected.expanded_root_entries
+        || attestation.expanded_root_bytes != expected.expanded_root_bytes
+        || attestation.worker_artifact_digest != expected.worker_artifact_digest
+    {
+        return Err(CoreError::InvalidSpecification(
+            "image attestation does not match the admitted worker artifact".to_owned(),
         ));
     }
     Ok(())
@@ -402,5 +438,49 @@ mod tests {
         policy.maximum_attestation_age_ms = 1_000;
         policy.revoked_worker_artifact_digests.insert(digest('3'));
         assert!(verify_trusted_image_attestation(&policy, &signed, 101).is_err());
+    }
+
+    #[test]
+    fn admitted_worker_binding_rejects_each_mismatched_identity() {
+        let private_key = [7_u8; 32];
+        let public_key = SigningKey::from_bytes(&private_key)
+            .verifying_key()
+            .to_bytes();
+        let signed = sign_image_attestation("preparer-2026", &private_key, attestation())
+            .expect("signed attestation");
+        let policy = AttestationTrustPolicy {
+            trusted_public_keys: BTreeMap::from([(
+                "preparer-2026".to_owned(),
+                STANDARD_NO_PAD.encode(public_key),
+            )]),
+            allowed_preparation_policies: BTreeSet::from(["strict-v1".to_owned()]),
+            allowed_toolchain_digests: BTreeSet::from([digest('2')]),
+            revoked_worker_artifact_digests: BTreeSet::new(),
+            revoked_expanded_root_digests: BTreeSet::new(),
+            maximum_attestation_age_ms: 1_000,
+        };
+        let expected = ImageAttestationExpectation {
+            exact_reference: &signed.attestation.exact_reference,
+            image_id: &signed.attestation.image_id,
+            platform: &signed.attestation.platform,
+            descriptors: &signed.attestation.descriptors,
+            expanded_root_digest: &signed.attestation.expanded_root_digest,
+            expanded_root_entries: signed.attestation.expanded_root_entries,
+            expanded_root_bytes: signed.attestation.expanded_root_bytes,
+            worker_artifact_digest: &signed.attestation.worker_artifact_digest,
+        };
+        verify_bound_image_attestation(&policy, &signed, expected, 101).expect("bound");
+
+        let mut wrong = expected;
+        wrong.worker_artifact_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(verify_bound_image_attestation(&policy, &signed, wrong, 101).is_err());
+        let mut wrong = expected;
+        wrong.expanded_root_bytes += 1;
+        assert!(verify_bound_image_attestation(&policy, &signed, wrong, 101).is_err());
+        let mut wrong = expected;
+        wrong.exact_reference =
+            "registry.example/other@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(verify_bound_image_attestation(&policy, &signed, wrong, 101).is_err());
     }
 }
