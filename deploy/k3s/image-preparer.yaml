@@ -72,6 +72,10 @@ spec:
               value: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             - name: RUNTRUE_VULNERABILITY_POLICY
               value: release-v1
+            - name: RUNTRUE_MAXIMUM_CACHE_ARTIFACTS
+              value: "1024"
+            - name: RUNTRUE_MAXIMUM_CACHE_BYTES
+              value: "68719476736"
           securityContext:
             privileged: false
             allowPrivilegeEscalation: false

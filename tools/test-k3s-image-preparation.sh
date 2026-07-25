@@ -6,7 +6,7 @@ preparer_job=sandbox-image-preparer
 artifact_pvc=sandbox-preparation-cache
 storage_class=sandboxd-attestation-test
 persistent_volume=sandboxd-attestation-test
-cache_root=/tmp/runtrue-sandboxd-attestation-cache
+cache_root=$(mktemp -d /tmp/runtrue-sandboxd-attestation-cache.XXXXXXXX)
 temporary=$(mktemp -d /tmp/runtrue-sandboxd-attestation.XXXXXXXX)
 positive_pod=sandboxd-attested-runtime
 revoked_pod=sandboxd-attested-revoked
@@ -37,8 +37,10 @@ cleanup() {
     "$temporary/private-key" \
     "$temporary/public-key" \
     "$temporary/trust.json" \
-    "$temporary/revoked.json"
+    "$temporary/revoked.json" \
+    "$temporary/prepared-roots.json"
   rmdir -- "$temporary" >/dev/null 2>&1 || true
+  sudo rm -rf -- "$cache_root"
 }
 trap cleanup EXIT INT TERM
 
@@ -174,6 +176,89 @@ jq -n \
     revoked_expanded_root_digests: [],
     maximum_attestation_age_ms: 31536000000
   }' >"$temporary/trust.json"
+jq -n \
+  --arg artifact_digest "$artifact_digest" \
+  --arg root_digest "$root_digest" \
+  '{
+    schema_version: 1,
+    cohorts: [{
+      name: "fixed-rootset-20260724",
+      artifacts: [{
+        worker_artifact_digest: $artifact_digest,
+        expanded_root_digest: $root_digest
+      }]
+    }]
+  }' >"$temporary/prepared-roots.json"
+
+echo "== Audit retained root and cache pressure =="
+trusted_audit=$(
+  target/release/runtrue-sandboxctl audit-attested-cache \
+    --cache "$cache_root" \
+    --trust-policy "$temporary/trust.json" \
+    --prepared-root-catalog "$temporary/prepared-roots.json" \
+    --worker-pool-catalog deploy/k3s/worker-pools.json \
+    --maximum-cache-artifacts 1 \
+    --maximum-cache-bytes 536870912 \
+    --require-healthy
+)
+jq -e --arg artifact_digest "$artifact_digest" '
+  .healthy == true
+  and .pressure.artifacts == 1
+  and .pressure.logical_bytes > 0
+  and .pressure.maximum_artifacts == 1
+  and .affected_pools == []
+  and (.artifacts | length) == 1
+  and .artifacts[0].worker_artifact_digest == $artifact_digest
+  and .artifacts[0].status == "trusted"
+' >/dev/null <<<"$trusted_audit"
+
+echo "== Garbage-collect only unreferenced cache content =="
+orphan_key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+orphan_directory="$cache_root/$orphan_key"
+install -d -m 0700 "$orphan_directory/rootfs"
+cp -- "$artifact_directory/attestation.json" "$orphan_directory/attestation.json"
+cp -- "$artifact_directory/sbom.json" "$orphan_directory/sbom.json"
+cp -- "$artifact_directory/provenance.json" "$orphan_directory/provenance.json"
+gc_plan=$(
+  target/release/runtrue-sandboxctl garbage-collect-attested-cache \
+    --cache "$cache_root" \
+    --prepared-root-catalog "$temporary/prepared-roots.json" \
+    --maximum-cache-artifacts 1 \
+    --maximum-cache-bytes 536870912 \
+    --minimum-age-seconds 0
+)
+jq -e --arg orphan "sha256:$orphan_key" '
+  .mode == "dry_run"
+  and .before.artifacts == 2
+  and .after.artifacts == 1
+  and .protected_artifacts == 1
+  and .limit_satisfied == true
+  and .candidates == [{
+    worker_artifact_digest: $orphan,
+    logical_bytes: .candidates[0].logical_bytes,
+    modified_unix_ms: .candidates[0].modified_unix_ms,
+    result: "planned"
+  }]
+' >/dev/null <<<"$gc_plan"
+gc_result=$(
+  target/release/runtrue-sandboxctl garbage-collect-attested-cache \
+    --cache "$cache_root" \
+    --prepared-root-catalog "$temporary/prepared-roots.json" \
+    --maximum-cache-artifacts 1 \
+    --maximum-cache-bytes 536870912 \
+    --minimum-age-seconds 0 \
+    --delete
+)
+jq -e '
+  .mode == "delete"
+  and .after.artifacts == 1
+  and .protected_artifacts == 1
+  and .limit_satisfied == true
+  and .candidates[0].result == "deleted"
+' >/dev/null <<<"$gc_result"
+test ! -e "$orphan_directory"
+test -d "$artifact_directory/rootfs"
+
 kubectl -n "$namespace" create secret generic sandbox-image-attestation-trust \
   --from-file=policy.json="$temporary/trust.json"
 kubectl -n "$namespace" create configmap sandbox-attested-runtime-topology \
@@ -321,6 +406,26 @@ echo "== Reject revoked and mismatched assignments before readiness =="
 jq --arg artifact_digest "$artifact_digest" \
   '.revoked_worker_artifact_digests = [$artifact_digest]' \
   "$temporary/trust.json" >"$temporary/revoked.json"
+revoked_audit=$(
+  target/release/runtrue-sandboxctl audit-attested-cache \
+    --cache "$cache_root" \
+    --trust-policy "$temporary/revoked.json" \
+    --prepared-root-catalog "$temporary/prepared-roots.json" \
+    --worker-pool-catalog deploy/k3s/worker-pools.json \
+    --maximum-cache-artifacts 1 \
+    --maximum-cache-bytes 536870912
+)
+jq -e --arg artifact_digest "$artifact_digest" '
+  .healthy == false
+  and .artifacts[0].worker_artifact_digest == $artifact_digest
+  and .artifacts[0].status == "revoked"
+  and (.artifacts[0].affected_pools | length) == 3
+  and (.affected_pools | map(.kubernetes_stateful_set) | sort) == [
+    "sandboxd-fixed-standard-warm",
+    "sandboxd-reviewed-cold",
+    "sandboxd-userspace-ingress"
+  ]
+' >/dev/null <<<"$revoked_audit"
 kubectl -n "$namespace" create secret generic sandbox-image-attestation-revoked \
   --from-file=policy.json="$temporary/revoked.json"
 
@@ -382,6 +487,9 @@ jq -n \
   --argjson cold "$cold" \
   --argjson cached "$cached" \
   --argjson execution "$execution" \
+  --argjson audit "$trusted_audit" \
+  --argjson gc "$gc_result" \
+  --argjson revoked_inventory "$revoked_audit" \
   '{
     cold_preparation: $cold,
     cached_preparation: $cached,
@@ -391,6 +499,9 @@ jq -n \
       total_ms: $execution.result.total_ms
     },
     revocation_rejected: true,
+    cache_audit: $audit,
+    garbage_collection: $gc,
+    revoked_pool_inventory: $revoked_inventory,
     worker_identity_mismatch_rejected: true,
     private_key_absent: true
   }'

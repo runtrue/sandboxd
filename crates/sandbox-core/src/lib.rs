@@ -8,6 +8,7 @@ mod guest_profile;
 mod identity;
 mod lifecycle;
 mod placement;
+mod preparation;
 mod snapshot;
 mod specification;
 mod volume;
@@ -41,6 +42,10 @@ pub use lifecycle::{Lifecycle, LifecycleState};
 pub use placement::{
     BoundedFairQueue, LeaseBook, LeaseRejection, LeaseState, PlacementIdentity, PlacementLease,
     QueueLimits, QueueRejection, QueuedWork,
+};
+pub use preparation::{
+    PreparedRootArtifact, PreparedRootCatalog, PreparedRootCohort, MAXIMUM_ARTIFACTS_PER_COHORT,
+    MAXIMUM_PREPARED_ROOT_COHORTS, PREPARED_ROOT_CATALOG_VERSION,
 };
 pub use snapshot::{
     ArtifactDescriptor, ArtifactRole, RestoreRequirements, RestoreTarget, SnapshotManifest,

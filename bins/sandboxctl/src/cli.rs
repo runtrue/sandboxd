@@ -74,6 +74,46 @@ pub(crate) enum Command {
         vulnerability_policy: String,
         #[arg(long)]
         registry_credential: Option<PathBuf>,
+        /// Hard limit on immutable artifact directories in the cache.
+        #[arg(long, default_value_t = 1024)]
+        maximum_cache_artifacts: usize,
+        /// Hard limit on logical root and evidence bytes in the cache.
+        #[arg(long, default_value_t = 68_719_476_736_u64)]
+        maximum_cache_bytes: u64,
+    },
+    /// Verify every retained root and report cache, revocation, and pool impact.
+    AuditAttestedCache {
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        trust_policy: PathBuf,
+        #[arg(long)]
+        prepared_root_catalog: PathBuf,
+        #[arg(long)]
+        worker_pool_catalog: PathBuf,
+        #[arg(long, default_value_t = 1024)]
+        maximum_cache_artifacts: usize,
+        #[arg(long, default_value_t = 68_719_476_736_u64)]
+        maximum_cache_bytes: u64,
+        /// Return nonzero after emitting JSON when a reviewed root is unhealthy.
+        #[arg(long)]
+        require_healthy: bool,
+    },
+    /// Plan or execute deletion of old roots not referenced by any reviewed cohort.
+    GarbageCollectAttestedCache {
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        prepared_root_catalog: PathBuf,
+        #[arg(long, default_value_t = 1024)]
+        maximum_cache_artifacts: usize,
+        #[arg(long, default_value_t = 68_719_476_736_u64)]
+        maximum_cache_bytes: u64,
+        #[arg(long, default_value_t = 86_400)]
+        minimum_age_seconds: u64,
+        /// Execute the reported plan. Omit for a read-only dry run.
+        #[arg(long)]
+        delete: bool,
     },
     /// Diagnostic-only Docker export; not accepted by the production runtime.
     PrepareDockerImage {

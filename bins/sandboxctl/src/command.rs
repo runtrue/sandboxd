@@ -66,6 +66,8 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
             provenance,
             vulnerability_policy,
             registry_credential,
+            maximum_cache_artifacts,
+            maximum_cache_bytes,
         } => {
             let provider = provider(&provider_options, image_store)?;
             let private_key = read_exact_key(&private_key, true)?;
@@ -85,8 +87,42 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 &sbom,
                 &provenance,
                 &vulnerability_policy,
+                maximum_cache_artifacts,
+                maximum_cache_bytes,
             )
         }
+        Command::AuditAttestedCache {
+            cache,
+            trust_policy,
+            prepared_root_catalog,
+            worker_pool_catalog,
+            maximum_cache_artifacts,
+            maximum_cache_bytes,
+            require_healthy,
+        } => crate::cache::audit(
+            &cache,
+            &trust_policy,
+            &prepared_root_catalog,
+            &worker_pool_catalog,
+            maximum_cache_artifacts,
+            maximum_cache_bytes,
+            require_healthy,
+        ),
+        Command::GarbageCollectAttestedCache {
+            cache,
+            prepared_root_catalog,
+            maximum_cache_artifacts,
+            maximum_cache_bytes,
+            minimum_age_seconds,
+            delete,
+        } => crate::cache::garbage_collect(
+            &cache,
+            &prepared_root_catalog,
+            maximum_cache_artifacts,
+            maximum_cache_bytes,
+            minimum_age_seconds,
+            delete,
+        ),
         Command::PrepareDockerImage {
             docker,
             reference,
