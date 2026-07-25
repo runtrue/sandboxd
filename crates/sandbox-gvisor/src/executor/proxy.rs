@@ -375,7 +375,7 @@ fn handle_ingress(
     let _guard = ConnectionGuard(&shared.active_connections);
     client.set_read_timeout(Some(IO_TIMEOUT))?;
     client.set_write_timeout(Some(IO_TIMEOUT))?;
-    let header = read_header(client)?;
+    let header = read_header(client, IO_TIMEOUT)?;
     if !authorized_ingress(&header, &endpoint.bearer_token) {
         client.write_all(
             b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nConnection: close\r\n\r\n",
@@ -488,9 +488,11 @@ fn random_token() -> Result<String, SandboxError> {
 
 fn handle_proxy(mut client: TcpStream, shared: &Shared) -> io::Result<()> {
     let _guard = ConnectionGuard(&shared.active_connections);
-    client.set_read_timeout(Some(IO_TIMEOUT))?;
-    client.set_write_timeout(Some(IO_TIMEOUT))?;
-    let request = read_header(&mut client)?;
+    let connect_timeout = Duration::from_millis(shared.policy.limits.connect_timeout_ms);
+    let poll_timeout = proxy_poll_timeout(shared);
+    client.set_read_timeout(Some(connect_timeout.min(IO_TIMEOUT)))?;
+    client.set_write_timeout(Some(connect_timeout.min(IO_TIMEOUT)))?;
+    let request = read_header(&mut client, connect_timeout)?;
     let parsed =
         parse_request(&request).ok_or_else(|| io::Error::other("invalid proxy request"))?;
     if !shared
@@ -501,16 +503,25 @@ fn handle_proxy(mut client: TcpStream, shared: &Shared) -> io::Result<()> {
         return Ok(());
     }
     let destination = resolve_public(&parsed.domain, parsed.port)?;
-    let mut upstream = TcpStream::connect_timeout(&destination, IO_TIMEOUT)?;
-    upstream.set_read_timeout(Some(IO_TIMEOUT))?;
-    upstream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let mut upstream = TcpStream::connect_timeout(&destination, connect_timeout)?;
+    upstream.set_read_timeout(Some(poll_timeout))?;
+    upstream.set_write_timeout(Some(poll_timeout))?;
+    client.set_read_timeout(Some(poll_timeout))?;
+    client.set_write_timeout(Some(poll_timeout))?;
+    let mut initial_request_bytes = 0;
     if parsed.connect {
         client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
     } else {
+        initial_request_bytes = parsed.forward_header.len() as u64;
+        enforce_direction_limit(
+            initial_request_bytes,
+            shared.policy.limits.maximum_request_bytes,
+            "request",
+        )?;
         reserve_bytes(
             &shared.transferred_bytes,
             shared.policy.limits.maximum_bytes,
-            parsed.forward_header.len() as u64,
+            initial_request_bytes,
         )?;
         throttle(
             &shared.bandwidth,
@@ -519,14 +530,16 @@ fn handle_proxy(mut client: TcpStream, shared: &Shared) -> io::Result<()> {
         );
         upstream.write_all(&parsed.forward_header)?;
     }
-    relay(client, upstream, shared)
+    relay(client, upstream, shared, initial_request_bytes)
 }
 
 fn handle_unix_proxy(mut client: UnixStream, shared: &Shared) -> io::Result<()> {
     let _guard = ConnectionGuard(&shared.active_connections);
-    client.set_read_timeout(Some(IO_TIMEOUT))?;
-    client.set_write_timeout(Some(IO_TIMEOUT))?;
-    let request = read_header(&mut client)?;
+    let connect_timeout = Duration::from_millis(shared.policy.limits.connect_timeout_ms);
+    let poll_timeout = proxy_poll_timeout(shared);
+    client.set_read_timeout(Some(connect_timeout.min(IO_TIMEOUT)))?;
+    client.set_write_timeout(Some(connect_timeout.min(IO_TIMEOUT)))?;
+    let request = read_header(&mut client, connect_timeout)?;
     let parsed =
         parse_request(&request).ok_or_else(|| io::Error::other("invalid proxy request"))?;
     if !shared
@@ -537,16 +550,25 @@ fn handle_unix_proxy(mut client: UnixStream, shared: &Shared) -> io::Result<()> 
         return Ok(());
     }
     let destination = resolve_public(&parsed.domain, parsed.port)?;
-    let mut upstream = TcpStream::connect_timeout(&destination, IO_TIMEOUT)?;
-    upstream.set_read_timeout(Some(IO_TIMEOUT))?;
-    upstream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let mut upstream = TcpStream::connect_timeout(&destination, connect_timeout)?;
+    upstream.set_read_timeout(Some(poll_timeout))?;
+    upstream.set_write_timeout(Some(poll_timeout))?;
+    client.set_read_timeout(Some(poll_timeout))?;
+    client.set_write_timeout(Some(poll_timeout))?;
+    let mut initial_request_bytes = 0;
     if parsed.connect {
         client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
     } else {
+        initial_request_bytes = parsed.forward_header.len() as u64;
+        enforce_direction_limit(
+            initial_request_bytes,
+            shared.policy.limits.maximum_request_bytes,
+            "request",
+        )?;
         reserve_bytes(
             &shared.transferred_bytes,
             shared.policy.limits.maximum_bytes,
-            parsed.forward_header.len() as u64,
+            initial_request_bytes,
         )?;
         throttle(
             &shared.bandwidth,
@@ -555,7 +577,11 @@ fn handle_unix_proxy(mut client: UnixStream, shared: &Shared) -> io::Result<()> 
         );
         upstream.write_all(&parsed.forward_header)?;
     }
-    relay_unix(client, upstream, shared)
+    relay_unix(client, upstream, shared, initial_request_bytes)
+}
+
+fn proxy_poll_timeout(shared: &Shared) -> Duration {
+    Duration::from_millis(shared.policy.limits.idle_timeout_ms).min(IO_TIMEOUT)
 }
 
 fn try_acquire_connection(shared: &Shared) -> bool {
@@ -581,11 +607,28 @@ struct ParsedRequest {
     forward_header: Vec<u8>,
 }
 
-fn read_header(stream: &mut impl Read) -> io::Result<Vec<u8>> {
+fn read_header(stream: &mut impl Read, timeout: Duration) -> io::Result<Vec<u8>> {
+    let started = Instant::now();
     let mut result = Vec::new();
     let mut buffer = [0_u8; 1024];
     while result.len() < MAXIMUM_HEADER_BYTES {
-        let read = stream.read(&mut buffer)?;
+        if started.elapsed() >= timeout {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "proxy header deadline exceeded",
+            ));
+        }
+        let read = match stream.read(&mut buffer) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            result => result?,
+        };
         if read == 0 {
             break;
         }
@@ -681,13 +724,21 @@ fn resolve_public(domain: &str, port: u16) -> io::Result<SocketAddr> {
         .ok_or_else(|| io::Error::other("destination resolved only to protected addresses"))
 }
 
-fn relay(client: TcpStream, upstream: TcpStream, shared: &Shared) -> io::Result<()> {
+fn relay(
+    client: TcpStream,
+    upstream: TcpStream,
+    shared: &Shared,
+    initial_request_bytes: u64,
+) -> io::Result<()> {
     let mut client_reader = client.try_clone()?;
     let mut upstream_writer = upstream.try_clone()?;
     let stop = Arc::clone(&shared.stop);
     let bytes = &shared.transferred_bytes;
     let maximum = shared.policy.limits.maximum_bytes;
     let rate = shared.policy.limits.bandwidth_bytes_per_second;
+    let request_maximum = shared.policy.limits.maximum_request_bytes;
+    let response_maximum = shared.policy.limits.maximum_response_bytes;
+    let idle_timeout = Duration::from_millis(shared.policy.limits.idle_timeout_ms);
     thread::scope(|scope| {
         let first = scope.spawn(|| {
             copy_limited(
@@ -696,7 +747,10 @@ fn relay(client: TcpStream, upstream: TcpStream, shared: &Shared) -> io::Result<
                 &stop,
                 bytes,
                 maximum,
+                request_maximum,
+                initial_request_bytes,
                 rate,
+                idle_timeout,
                 &shared.bandwidth,
             )
         });
@@ -706,7 +760,10 @@ fn relay(client: TcpStream, upstream: TcpStream, shared: &Shared) -> io::Result<
             &shared.stop,
             bytes,
             maximum,
+            response_maximum,
+            0,
             rate,
+            idle_timeout,
             &shared.bandwidth,
         );
         let first = first
@@ -718,13 +775,21 @@ fn relay(client: TcpStream, upstream: TcpStream, shared: &Shared) -> io::Result<
     })
 }
 
-fn relay_unix(client: UnixStream, upstream: TcpStream, shared: &Shared) -> io::Result<()> {
+fn relay_unix(
+    client: UnixStream,
+    upstream: TcpStream,
+    shared: &Shared,
+    initial_request_bytes: u64,
+) -> io::Result<()> {
     let mut client_reader = client.try_clone()?;
     let mut upstream_writer = upstream.try_clone()?;
     let stop = Arc::clone(&shared.stop);
     let bytes = &shared.transferred_bytes;
     let maximum = shared.policy.limits.maximum_bytes;
     let rate = shared.policy.limits.bandwidth_bytes_per_second;
+    let request_maximum = shared.policy.limits.maximum_request_bytes;
+    let response_maximum = shared.policy.limits.maximum_response_bytes;
+    let idle_timeout = Duration::from_millis(shared.policy.limits.idle_timeout_ms);
     thread::scope(|scope| {
         let first = scope.spawn(|| {
             copy_limited(
@@ -733,7 +798,10 @@ fn relay_unix(client: UnixStream, upstream: TcpStream, shared: &Shared) -> io::R
                 &stop,
                 bytes,
                 maximum,
+                request_maximum,
+                initial_request_bytes,
                 rate,
+                idle_timeout,
                 &shared.bandwidth,
             )
         });
@@ -743,7 +811,10 @@ fn relay_unix(client: UnixStream, upstream: TcpStream, shared: &Shared) -> io::R
             &shared.stop,
             bytes,
             maximum,
+            response_maximum,
+            0,
             rate,
+            idle_timeout,
             &shared.bandwidth,
         );
         let first = first
@@ -762,10 +833,14 @@ fn copy_limited(
     stop: &AtomicBool,
     bytes: &AtomicU64,
     maximum: u64,
+    direction_maximum: u64,
+    initial_direction_bytes: u64,
     rate: u64,
+    idle_timeout: Duration,
     bandwidth: &Mutex<Bandwidth>,
 ) -> io::Result<u64> {
-    let mut total = 0;
+    let mut total = initial_direction_bytes;
+    let mut last_progress = Instant::now();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
         if stop.load(Ordering::Acquire) {
@@ -780,15 +855,77 @@ fn copy_limited(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
+                if last_progress.elapsed() >= idle_timeout {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "sandbox egress idle deadline exceeded",
+                    ));
+                }
                 continue;
             }
             Err(error) => return Err(error),
         };
+        let next_total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| io::Error::other("sandbox egress direction byte limit exceeded"))?;
+        enforce_direction_limit(next_total, direction_maximum, "direction")?;
         reserve_bytes(bytes, maximum, read as u64)?;
         throttle(bandwidth, rate, read as u64);
-        writer.write_all(&buffer[..read])?;
-        total += read as u64;
+        write_all_with_idle(writer, &buffer[..read], stop, idle_timeout)?;
+        total = next_total;
+        last_progress = Instant::now();
     }
+}
+
+fn write_all_with_idle(
+    writer: &mut impl Write,
+    buffer: &[u8],
+    stop: &AtomicBool,
+    idle_timeout: Duration,
+) -> io::Result<()> {
+    let mut offset = 0;
+    let mut last_progress = Instant::now();
+    while offset < buffer.len() {
+        if stop.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "sandbox egress relay cancelled",
+            ));
+        }
+        match writer.write(&buffer[offset..]) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(written) => {
+                offset += written;
+                last_progress = Instant::now();
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) =>
+            {
+                if last_progress.elapsed() >= idle_timeout {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "sandbox egress write idle deadline exceeded",
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn enforce_direction_limit(observed: u64, maximum: u64, direction: &str) -> io::Result<()> {
+    if observed > maximum {
+        return Err(io::Error::other(format!(
+            "sandbox egress {direction} byte limit exceeded"
+        )));
+    }
+    Ok(())
 }
 
 fn reserve_bytes(counter: &AtomicU64, maximum: u64, amount: u64) -> io::Result<()> {
@@ -969,6 +1106,14 @@ mod tests {
     use super::*;
     use runtrue_sandbox_oci::{HttpEgressRule, NetworkPolicy};
 
+    struct TimedOutReader;
+
+    impl Read for TimedOutReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::TimedOut))
+        }
+    }
+
     #[test]
     fn parses_connect_and_absolute_form_without_ip_literals() {
         let connect =
@@ -1070,5 +1215,66 @@ mod tests {
             );
         });
         assert_eq!(counter.load(Ordering::Acquire), 32);
+    }
+
+    #[test]
+    fn directional_idle_and_cancellation_limits_fail_closed() {
+        let stop = AtomicBool::new(false);
+        let bytes = AtomicU64::new(0);
+        let bandwidth = Mutex::new(Bandwidth {
+            available: Instant::now(),
+        });
+        let mut reader = io::Cursor::new(vec![1_u8; 8]);
+        let mut writer = Vec::new();
+        let error = copy_limited(
+            &mut reader,
+            &mut writer,
+            &stop,
+            &bytes,
+            64,
+            4,
+            0,
+            u64::MAX,
+            Duration::from_secs(1),
+            &bandwidth,
+        )
+        .expect_err("direction limit");
+        assert!(error.to_string().contains("direction byte limit"));
+        assert!(writer.is_empty());
+        assert_eq!(bytes.load(Ordering::Acquire), 0);
+
+        let mut reader = TimedOutReader;
+        let error = copy_limited(
+            &mut reader,
+            &mut writer,
+            &stop,
+            &bytes,
+            64,
+            64,
+            0,
+            u64::MAX,
+            Duration::from_millis(1),
+            &bandwidth,
+        )
+        .expect_err("idle deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        stop.store(true, Ordering::Release);
+        assert_eq!(
+            copy_limited(
+                &mut io::empty(),
+                &mut io::sink(),
+                &stop,
+                &bytes,
+                64,
+                64,
+                0,
+                u64::MAX,
+                Duration::from_secs(1),
+                &bandwidth,
+            )
+            .expect("cancelled relay"),
+            0
+        );
     }
 }

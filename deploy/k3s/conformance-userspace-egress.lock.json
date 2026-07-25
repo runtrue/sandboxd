@@ -1,6 +1,6 @@
 {
   "schema_version": 6,
-  "topology_digest": "sha256:934178cc2e94b6931c2c6eff71889656896bb37a01d7ac6af96d5b427afbe4bd",
+  "topology_digest": "sha256:38002adde4b36b550e1e00be3acfb8cc3dc13194378ed8ea67c7cbec4b31dde3",
   "name": "userspace-egress-conformance",
   "services": {
     "client": {
@@ -188,7 +188,10 @@
       "limits": {
         "maximum_connections": 2,
         "maximum_bytes": 1048576,
-        "bandwidth_bytes_per_second": 1048576
+        "bandwidth_bytes_per_second": 1048576,
+        "maximum_request_bytes": 262144,
+        "maximum_response_bytes": 262144,
+        "idle_timeout_ms": 5000
       },
       "ingress": []
     }

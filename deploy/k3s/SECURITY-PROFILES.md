@@ -110,6 +110,12 @@ checks the signed domain, scheme, and port policy before host resolution and
 rejects any resolved loopback, link-local, private, multicast, unspecified, or
 otherwise protected address. The guest cannot request an IP literal.
 
+The signed limits independently bound concurrent connections, sandbox-wide
+bytes, per-connection guest-to-upstream bytes, per-connection
+upstream-to-guest bytes, bandwidth, connect/header time, and idle time. Because
+HTTPS payloads are opaque after CONNECT, the directional limits bound encrypted
+tunnel bytes; they are not semantic HTTP body-size enforcement.
+
 `--host-uds=open` is broader than one socket at the runsc flag level. The
 boundary therefore also depends on rootfs and volume admission rejecting Unix
 sockets and other special files, and on mounting no host directory except the

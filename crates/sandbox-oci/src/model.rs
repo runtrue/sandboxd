@@ -321,6 +321,26 @@ pub struct EgressLimits {
     pub maximum_connections: u32,
     pub maximum_bytes: u64,
     pub bandwidth_bytes_per_second: u64,
+    #[serde(
+        default = "default_maximum_request_bytes",
+        skip_serializing_if = "is_default_maximum_request_bytes"
+    )]
+    pub maximum_request_bytes: u64,
+    #[serde(
+        default = "default_maximum_response_bytes",
+        skip_serializing_if = "is_default_maximum_response_bytes"
+    )]
+    pub maximum_response_bytes: u64,
+    #[serde(
+        default = "default_connect_timeout_ms",
+        skip_serializing_if = "is_default_connect_timeout_ms"
+    )]
+    pub connect_timeout_ms: u64,
+    #[serde(
+        default = "default_idle_timeout_ms",
+        skip_serializing_if = "is_default_idle_timeout_ms"
+    )]
+    pub idle_timeout_ms: u64,
 }
 
 impl Default for EgressLimits {
@@ -329,8 +349,44 @@ impl Default for EgressLimits {
             maximum_connections: 32,
             maximum_bytes: 64 * 1024 * 1024,
             bandwidth_bytes_per_second: 8 * 1024 * 1024,
+            maximum_request_bytes: default_maximum_request_bytes(),
+            maximum_response_bytes: default_maximum_response_bytes(),
+            connect_timeout_ms: default_connect_timeout_ms(),
+            idle_timeout_ms: default_idle_timeout_ms(),
         }
     }
+}
+
+const fn default_maximum_request_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+
+fn is_default_maximum_request_bytes(value: &u64) -> bool {
+    *value == default_maximum_request_bytes()
+}
+
+const fn default_maximum_response_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+
+fn is_default_maximum_response_bytes(value: &u64) -> bool {
+    *value == default_maximum_response_bytes()
+}
+
+const fn default_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+fn is_default_connect_timeout_ms(value: &u64) -> bool {
+    *value == default_connect_timeout_ms()
+}
+
+const fn default_idle_timeout_ms() -> u64 {
+    30_000
+}
+
+fn is_default_idle_timeout_ms(value: &u64) -> bool {
+    *value == default_idle_timeout_ms()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +480,12 @@ impl NetworkPolicy {
             || self.limits.maximum_bytes > 1024 * 1024 * 1024 * 1024
             || self.limits.bandwidth_bytes_per_second == 0
             || self.limits.bandwidth_bytes_per_second > 10 * 1024 * 1024 * 1024
+            || self.limits.maximum_request_bytes == 0
+            || self.limits.maximum_request_bytes > self.limits.maximum_bytes
+            || self.limits.maximum_response_bytes == 0
+            || self.limits.maximum_response_bytes > self.limits.maximum_bytes
+            || !(100..=120_000).contains(&self.limits.connect_timeout_ms)
+            || !(100..=300_000).contains(&self.limits.idle_timeout_ms)
         {
             return Err("network limits are outside their accepted bounds".to_owned());
         }
@@ -628,6 +690,34 @@ mod tests {
         assert!(!policy.permits_http("evilservices.example", HttpScheme::Https, 443));
         assert!(!policy.permits_http("api.example.com", HttpScheme::Http, 443));
         assert!(!policy.permits_http("127.0.0.1", HttpScheme::Https, 443));
+    }
+
+    #[test]
+    fn default_direction_and_deadline_limits_preserve_existing_lock_encoding() {
+        let encoded = serde_json::to_value(EgressLimits::default()).expect("encode limits");
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "maximum_connections": 32,
+                "maximum_bytes": 67_108_864,
+                "bandwidth_bytes_per_second": 8_388_608
+            })
+        );
+        let decoded: EgressLimits = serde_json::from_value(encoded).expect("decode old limits");
+        assert_eq!(decoded, EgressLimits::default());
+    }
+
+    #[test]
+    fn direction_and_deadline_limits_are_bounded() {
+        let mut policy = http_policy();
+        policy.limits.maximum_response_bytes = policy.limits.maximum_bytes + 1;
+        assert!(policy.validate(&BTreeMap::new()).is_err());
+        policy.limits.maximum_response_bytes = 1;
+        policy.limits.connect_timeout_ms = 99;
+        assert!(policy.validate(&BTreeMap::new()).is_err());
+        policy.limits.connect_timeout_ms = 100;
+        policy.limits.idle_timeout_ms = 300_001;
+        assert!(policy.validate(&BTreeMap::new()).is_err());
     }
 
     #[test]
