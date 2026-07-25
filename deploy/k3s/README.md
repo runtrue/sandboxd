@@ -160,12 +160,13 @@ worker image, validates all manifests, and runs
 [`tools/test-k3s-fixed-runtime.sh`](../../tools/test-k3s-fixed-runtime.sh).
 
 The harness verifies the successful nested server/client path, one-assignment
-admission, fresh-Pod replacement after success and injected failures, the
+admission, fresh-Pod replacement after success and injected failures, a strict
+guest write through a bounded directory-backed root plus live snapshot, the
 actual Pod-cgroup PID ceiling, the exact host-side capability mask,
 user-namespace mapping, read-only worker root, default-deny NetworkPolicy, and
-absence of host integration. It also verifies rejection of external
-networking, writable roots, and a mismatched OCI image. Pod, k3s, firewall, and
-image diagnostics are retained for every workflow run.
+absence of host integration. It also verifies rejection of external networking
+and a mismatched OCI image. Pod, k3s, firewall, and image diagnostics are
+retained for every workflow run.
 
 [`tools/test-k3s-userspace-egress.sh`](../../tools/test-k3s-userspace-egress.sh)
 proves the reduced network profile in the same real cluster. It requires

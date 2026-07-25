@@ -1,24 +1,258 @@
-use super::{WritableRootfs, WritableRootfsExport};
+#[cfg(test)]
+use super::WritableRootfs;
+use super::WritableRootfsExport;
 use crate::{io_error, provider::layer::validate_writable_diff, SandboxError};
+#[cfg(test)]
 use nix::sys::stat::{makedev, mknod, Mode, SFlag};
+#[cfg(test)]
+use std::ffi::OsString;
+#[cfg(test)]
+use std::os::unix::ffi::OsStringExt as _;
+#[cfg(test)]
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::{
     collections::BTreeSet,
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    os::unix::{
-        ffi::{OsStrExt as _, OsStringExt as _},
-        fs::{FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _},
-    },
-    path::{Path, PathBuf},
-    time::Duration,
+    os::unix::{ffi::OsStrExt as _, fs::OpenOptionsExt as _},
+    path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
 };
-use tar::{Builder, EntryType, Header};
+#[cfg(test)]
+use tar::Header;
+use tar::{Builder, EntryType};
 
 const MAXIMUM_DIFF_ENTRIES: usize = 100_000;
 const MAXIMUM_PATH_BYTES: usize = 4_096;
+#[cfg(test)]
 const OVERLAY_OPAQUE_XATTR: &str = "trusted.overlay.opaque";
 
+pub(super) fn validate_archive(
+    source: &Path,
+    quota_bytes: u64,
+    timeout: Duration,
+) -> Result<(), SandboxError> {
+    validate_writable_diff(
+        source,
+        quota_bytes.saturating_mul(2),
+        MAXIMUM_DIFF_ENTRIES,
+        MAXIMUM_PATH_BYTES,
+        timeout,
+    )?;
+    validate_whiteout_conflicts(source)
+}
+
+pub(super) fn measure_archive(
+    source: &Path,
+    quota_bytes: u64,
+    timeout: Duration,
+) -> Result<WritableRootfsExport, SandboxError> {
+    validate_archive(source, quota_bytes, timeout)?;
+    let archive_bytes = fs::metadata(source)
+        .map_err(|source_error| io_error(source, source_error))?
+        .len();
+    let file = File::open(source).map_err(|source_error| io_error(source, source_error))?;
+    let mut archive = tar::Archive::new(file);
+    let mut entries = 0_usize;
+    let mut logical_bytes = 0_u64;
+    for entry in archive
+        .entries()
+        .map_err(|error| archive_error("read writable rootfs diff", error))?
+    {
+        let entry = entry.map_err(|error| archive_error("read writable rootfs diff", error))?;
+        entries = entries.checked_add(1).ok_or_else(|| {
+            SandboxError::ImageProvider("writable rootfs entry count overflow".to_owned())
+        })?;
+        logical_bytes = logical_bytes
+            .checked_add(
+                entry
+                    .header()
+                    .size()
+                    .map_err(|error| archive_error("read writable rootfs entry size", error))?,
+            )
+            .ok_or_else(|| {
+                SandboxError::ImageProvider("writable rootfs logical size overflow".to_owned())
+            })?;
+        if entries > MAXIMUM_DIFF_ENTRIES || logical_bytes > quota_bytes {
+            return Err(SandboxError::ImageProvider(
+                "writable rootfs export exceeds its quota".to_owned(),
+            ));
+        }
+    }
+    Ok(WritableRootfsExport {
+        entries,
+        logical_bytes,
+        archive_bytes,
+    })
+}
+
+pub(super) fn canonicalize_runtime_archive(
+    source: &Path,
+    quota_bytes: u64,
+    timeout: Duration,
+) -> Result<(), SandboxError> {
+    let started = Instant::now();
+    let maximum_archive_bytes = quota_bytes.saturating_mul(2);
+    let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum_archive_bytes {
+        return Err(SandboxError::ImageProvider(
+            "runtime writable-root export is not a bounded regular file".to_owned(),
+        ));
+    }
+    let temporary = source.with_extension("tar.canonicalizing");
+    let result =
+        (|| {
+            let input = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(source)
+                .map_err(|error| io_error(source, error))?;
+            let output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|error| io_error(&temporary, error))?;
+            let mut source_archive = tar::Archive::new(input);
+            let writer = BoundedWriter::new(output, maximum_archive_bytes);
+            let mut destination_archive = Builder::new(writer);
+            destination_archive.follow_symlinks(false);
+            let mut seen = BTreeSet::new();
+            let mut entries = 0_usize;
+            let mut logical_bytes = 0_u64;
+            for entry in source_archive
+                .entries()
+                .map_err(|error| archive_error("read runtime writable-root export", error))?
+            {
+                if started.elapsed() > timeout {
+                    return Err(SandboxError::Timeout(
+                        "runtime writable-root canonicalization timed out".to_owned(),
+                    ));
+                }
+                let mut entry = entry
+                    .map_err(|error| archive_error("read runtime writable-root entry", error))?;
+                entries = entries.checked_add(1).ok_or_else(|| {
+                    SandboxError::ImageProvider("writable rootfs entry count overflow".to_owned())
+                })?;
+                if entries > MAXIMUM_DIFF_ENTRIES {
+                    return Err(SandboxError::ImageProvider(
+                        "runtime writable-root export has too many entries".to_owned(),
+                    ));
+                }
+                let entry_type = entry.header().entry_type();
+                let Some(path) =
+                    canonical_runtime_path(&entry.path().map_err(|error| {
+                        archive_error("read runtime writable-root path", error)
+                    })?)?
+                else {
+                    if entry_type == EntryType::Directory {
+                        continue;
+                    }
+                    return Err(SandboxError::ImageProvider(
+                        "runtime writable-root path is invalid".to_owned(),
+                    ));
+                };
+                if !seen.insert(path.clone()) {
+                    return Err(SandboxError::ImageProvider(
+                        "runtime writable-root export contains duplicate paths".to_owned(),
+                    ));
+                }
+                if !matches!(
+                    entry_type,
+                    EntryType::Regular | EntryType::Directory | EntryType::Symlink
+                ) {
+                    return Err(SandboxError::ImageProvider(
+                        "runtime writable-root export contains an unsupported entry".to_owned(),
+                    ));
+                }
+                let size = entry.header().size().map_err(|error| {
+                    archive_error("read runtime writable-root entry size", error)
+                })?;
+                logical_bytes = logical_bytes.checked_add(size).ok_or_else(|| {
+                    SandboxError::ImageProvider("writable rootfs logical size overflow".to_owned())
+                })?;
+                if logical_bytes > quota_bytes {
+                    return Err(SandboxError::ImageProvider(
+                        "runtime writable-root export exceeds its quota".to_owned(),
+                    ));
+                }
+                if entry_type == EntryType::Symlink {
+                    let target = entry
+                        .link_name()
+                        .map_err(|error| {
+                            archive_error("read runtime writable-root link target", error)
+                        })?
+                        .ok_or_else(|| {
+                            SandboxError::ImageProvider(
+                                "runtime writable-root symlink has no target".to_owned(),
+                            )
+                        })?;
+                    if target.as_os_str().as_bytes().is_empty()
+                        || target.as_os_str().as_bytes().len() > MAXIMUM_PATH_BYTES
+                    {
+                        return Err(SandboxError::ImageProvider(
+                            "runtime writable-root symlink target is invalid".to_owned(),
+                        ));
+                    }
+                }
+                let mut header = entry.header().clone();
+                header
+                    .set_path(&path)
+                    .map_err(|error| archive_error("canonicalize writable-root path", error))?;
+                header.set_cksum();
+                destination_archive
+                    .append(&header, &mut entry)
+                    .map_err(|error| archive_error("write canonical writable-root entry", error))?;
+            }
+            destination_archive
+                .finish()
+                .map_err(|error| archive_error("finish canonical writable-root archive", error))?;
+            let writer = destination_archive
+                .into_inner()
+                .map_err(|error| archive_error("finish canonical writable-root archive", error))?;
+            writer
+                .inner
+                .sync_all()
+                .map_err(|error| io_error(&temporary, error))?;
+            fs::rename(&temporary, source).map_err(|error| io_error(source, error))?;
+            File::open(source.parent().expect("archive has parent"))
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| io_error(source, error))
+        })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+    validate_archive(source, quota_bytes, timeout)
+}
+
+fn canonical_runtime_path(path: &Path) -> Result<Option<PathBuf>, SandboxError> {
+    let mut components = path.components().peekable();
+    if matches!(components.peek(), Some(Component::CurDir)) {
+        components.next();
+    }
+    let mut canonical = PathBuf::new();
+    for component in components {
+        let Component::Normal(component) = component else {
+            return Err(SandboxError::ImageProvider(
+                "runtime writable-root path escapes its archive".to_owned(),
+            ));
+        };
+        canonical.push(component);
+    }
+    if canonical.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if canonical.as_os_str().as_bytes().len() > MAXIMUM_PATH_BYTES {
+        return Err(SandboxError::ImageProvider(
+            "runtime writable-root path is invalid".to_owned(),
+        ));
+    }
+    Ok(Some(canonical))
+}
+
+#[cfg(test)]
 pub(super) fn export(
     root: &Path,
     rootfs: &WritableRootfs,
@@ -108,6 +342,7 @@ pub(super) fn export(
     })
 }
 
+#[cfg(test)]
 pub(super) fn import(
     root: &Path,
     rootfs: &WritableRootfs,
@@ -147,6 +382,7 @@ pub(super) fn import(
         .map_err(|source| io_error(&upper, source))
 }
 
+#[cfg(test)]
 fn collect_paths(
     root: &Path,
     directory: &Path,
@@ -182,6 +418,7 @@ fn collect_paths(
     Ok(())
 }
 
+#[cfg(test)]
 fn header(
     metadata: &fs::Metadata,
     entry_type: EntryType,
@@ -201,6 +438,7 @@ fn header(
     Ok(header)
 }
 
+#[cfg(test)]
 fn append_directory<W: Write>(
     archive: &mut Builder<W>,
     relative: &Path,
@@ -215,6 +453,7 @@ fn append_directory<W: Write>(
         .map_err(|error| archive_error("append writable rootfs directory", error))
 }
 
+#[cfg(test)]
 fn append_file<W: Write>(
     archive: &mut Builder<W>,
     relative: &Path,
@@ -231,6 +470,7 @@ fn append_file<W: Write>(
         .map_err(|error| archive_error("append writable rootfs file", error))
 }
 
+#[cfg(test)]
 fn append_symlink<W: Write>(
     archive: &mut Builder<W>,
     relative: &Path,
@@ -254,6 +494,7 @@ fn append_symlink<W: Write>(
         .map_err(|error| archive_error("append writable rootfs symlink", error))
 }
 
+#[cfg(test)]
 fn append_whiteout<W: Write>(
     archive: &mut Builder<W>,
     relative: &Path,
@@ -277,6 +518,7 @@ fn append_whiteout<W: Write>(
         .map_err(|error| archive_error("append writable rootfs whiteout", error))
 }
 
+#[cfg(test)]
 fn append_opaque_whiteout<W: Write>(
     archive: &mut Builder<W>,
     relative: &Path,
@@ -291,6 +533,7 @@ fn append_opaque_whiteout<W: Write>(
         .map_err(|error| archive_error("append writable rootfs opaque marker", error))
 }
 
+#[cfg(test)]
 fn validate_xattrs(path: &Path, metadata: &fs::Metadata) -> Result<(), SandboxError> {
     for name in xattr::list(path).map_err(|source| io_error(path, source))? {
         if metadata.file_type().is_dir() && name == OsStr::new(OVERLAY_OPAQUE_XATTR) {
@@ -307,6 +550,7 @@ fn validate_xattrs(path: &Path, metadata: &fs::Metadata) -> Result<(), SandboxEr
     Ok(())
 }
 
+#[cfg(test)]
 fn is_opaque(path: &Path) -> Result<bool, SandboxError> {
     Ok(xattr::get(path, OVERLAY_OPAQUE_XATTR)
         .map_err(|source| io_error(path, source))?
@@ -349,6 +593,7 @@ fn validate_whiteout_conflicts(source: &Path) -> Result<(), SandboxError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn convert_whiteouts(root: &Path) -> Result<(), SandboxError> {
     let mut paths = Vec::new();
     collect_paths(root, root, &mut paths)?;
@@ -462,6 +707,17 @@ mod tests {
         let mut writer = BoundedWriter::new(Vec::new(), 4);
         assert_eq!(writer.write(b"test").unwrap(), 4);
         assert!(writer.write(b"x").is_err());
+    }
+
+    #[test]
+    fn gvisor_root_prefix_is_canonicalized_without_relaxing_traversal() {
+        assert_eq!(canonical_runtime_path(Path::new("./")).unwrap(), None);
+        assert_eq!(
+            canonical_runtime_path(Path::new("./var/tmp/value")).unwrap(),
+            Some(PathBuf::from("var/tmp/value"))
+        );
+        assert!(canonical_runtime_path(Path::new("./var/../etc/passwd")).is_err());
+        assert!(canonical_runtime_path(Path::new("/etc/passwd")).is_err());
     }
 
     #[test]

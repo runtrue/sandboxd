@@ -3,7 +3,9 @@ use super::{
     ExecutorConfiguration, NetworkMode,
 };
 use crate::{error::io_error, model::TopologyLock, SandboxError};
-use runtrue_sandbox_oci::provider::LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID;
+use runtrue_sandbox_oci::provider::{
+    GVISOR_WRITABLE_ROOTFS_PROVIDER_ID, LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
@@ -96,7 +98,18 @@ pub fn recover(
         validate_recovery_record(&record)?;
         let runsc_root = state.join("runsc");
         if runsc_root.exists() {
-            let runsc = Runsc::new(runsc_program, &runsc_root, record.network_mode)?;
+            let overlay = record
+                .writable_rootfs
+                .first()
+                .map(|rootfs| (state.join("rootfs-overlay"), rootfs.quota_bytes));
+            let runsc = Runsc::new(
+                runsc_program,
+                &runsc_root,
+                record.network_mode,
+                overlay
+                    .as_ref()
+                    .map(|(directory, maximum_bytes)| (directory.as_path(), *maximum_bytes)),
+            )?;
             let mut active_ids = Vec::new();
             for id in &record.runtime_ids {
                 if runsc.state(id).is_ok() {
@@ -255,7 +268,10 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError>
     for rootfs in &record.writable_rootfs {
         if !runtime_services.contains(rootfs.service.as_str())
             || !writable_services.insert(rootfs.service.as_str())
-            || rootfs.provider != LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID
+            || !matches!(
+                rootfs.provider.as_str(),
+                GVISOR_WRITABLE_ROOTFS_PROVIDER_ID | LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID
+            )
             || rootfs.key.len() != 64
             || !rootfs
                 .key

@@ -142,8 +142,20 @@ jq -e '
   and (.spec.containers[0].args | index("external")) != null
 ' >/dev/null <<<"$pod_json"
 
-test "$(kubectl get service -n "$namespace" -o name | wc -l)" -eq 0
-test "$(kubectl get ingress -n "$namespace" -o name | wc -l)" -eq 0
+kubectl get service -n "$namespace" -o json |
+  jq -e '
+    [.items[]
+      | select(.spec.selector["app.kubernetes.io/name"]
+          == "sandboxd-fixed-runtime")]
+    | length == 0
+  ' >/dev/null
+kubectl get ingress -n "$namespace" -o json |
+  jq -e '
+    [.items[]
+      | select(.metadata.labels["app.kubernetes.io/name"]
+          == "sandboxd-fixed-runtime")]
+    | length == 0
+  ' >/dev/null
 kubectl get networkpolicy -n "$namespace" sandboxd-default-deny >/dev/null
 
 admit=$(kubectl exec -i -n "$namespace" "$pod" -- \
@@ -246,13 +258,108 @@ wait_for_clean_worker "$previous_uid"
 kubectl exec -i -n "$namespace" "$pod" -- \
   runtrue-sandboxd admit --socket "$socket" --lock /dev/stdin \
   <"$writable_lock" >/dev/null
-expect_stdin_failure "$writable_lock" \
-  "fixed-rootfs image provider supports read-only roots only" \
+writable_sandbox="ci-writable-${suffix}"
+writable_create_started_ns=$(date +%s%N)
+writable_create=$(kubectl exec -i -n "$namespace" "$pod" -- \
   runtrue-sandboxd create \
   --socket "$socket" \
   --lock /dev/stdin \
-  --sandbox "ci-denied-writable-${suffix}" \
-  --timeout-seconds 30
+  --sandbox "$writable_sandbox" \
+  --timeout-seconds 30 <"$writable_lock")
+active_sandbox=true
+sandbox=$writable_sandbox
+jq -e '
+  .ok == true
+  and .result.state == "running"
+  and .result.running_services == 1
+' >/dev/null <<<"$writable_create"
+writable_create_ready_ns=$(date +%s%N)
+
+writable_runtime=$(jq -r '.result.runtime_project' <<<"$writable_create")
+writable_marker=
+for _ in $(seq 1 80); do
+  if writable_marker=$(kubectl exec -n "$namespace" "$pod" -- \
+    /usr/local/bin/runsc \
+    --root="/var/lib/runtrue-sandboxd/state/sandboxes/$writable_runtime/runsc" \
+    --network=none \
+    --ignore-cgroups=true \
+    --platform=systrap \
+    --overlay2="root:dir=/var/lib/runtrue-sandboxd/state/sandboxes/$writable_runtime/rootfs-overlay,size=67108864" \
+    --file-access=exclusive \
+    --file-access-mounts=exclusive \
+    --directfs=false \
+    --host-uds=none \
+    --host-fifo=none \
+    --net-raw=false \
+    --allow-rootfs-tar-annotation=true \
+    exec --user=65534:65534 \
+    "rts-$writable_runtime-writer" \
+    /bin/cat /var/tmp/result.txt 2>/dev/null)
+  then
+    break
+  fi
+  sleep 0.25
+done
+test "$writable_marker" = "writable-root-passed"
+
+writable_quota=$(kubectl exec -n "$namespace" "$pod" -- \
+  /usr/local/bin/runsc \
+  --root="/var/lib/runtrue-sandboxd/state/sandboxes/$writable_runtime/runsc" \
+  --network=none \
+  --ignore-cgroups=true \
+  --platform=systrap \
+  --overlay2="root:dir=/var/lib/runtrue-sandboxd/state/sandboxes/$writable_runtime/rootfs-overlay,size=67108864" \
+  --file-access=exclusive \
+  --file-access-mounts=exclusive \
+  --directfs=false \
+  --host-uds=none \
+  --host-fifo=none \
+  --net-raw=false \
+  --allow-rootfs-tar-annotation=true \
+  exec --user=65534:65534 \
+  "rts-$writable_runtime-writer" \
+  /usr/local/bin/python3 -c \
+  'import errno,json,os
+p="/var/tmp/quota.bin"
+written=0
+result="no_enospc"
+output=open(p,"wb",buffering=0)
+try:
+    for _ in range(80):
+        output.write(b"x"*(1024*1024))
+        written += 1024*1024
+except OSError as error:
+    result = "enospc" if error.errno == errno.ENOSPC else f"errno-{error.errno}"
+finally:
+    output.close()
+    os.unlink(p)
+print(json.dumps({"result":result,"written":written}))')
+jq -e '
+  .result == "enospc"
+  and .written == 67108864
+' >/dev/null <<<"$writable_quota"
+
+writable_snapshot=$(kubectl exec -n "$namespace" "$pod" -- \
+  runtrue-sandboxd snapshot \
+  --socket "$socket" \
+  --sandbox "$writable_sandbox" \
+  --snapshot "ci-writable-live-${suffix}")
+jq -e '
+  .ok == true
+  and .result.mode == "live"
+  and .result.files >= 5
+  and .result.size_bytes > 0
+  and .result.writable_export_millis >= 0
+' >/dev/null <<<"$writable_snapshot"
+kubectl exec -n "$namespace" "$pod" -- \
+  runtrue-sandboxd inspect \
+  --socket "$socket" \
+  --sandbox "$writable_sandbox" >/dev/null
+kubectl exec -n "$namespace" "$pod" -- \
+  runtrue-sandboxd stop \
+  --socket "$socket" \
+  --sandbox "$writable_sandbox" >/dev/null
+active_sandbox=false
 
 previous_uid=$pod_uid
 pod=
@@ -292,6 +399,11 @@ for _ in $(seq 1 30); do
     printf '{"resource_shape":"standard-v1","create_to_first_output_ms":%d,"terminal_to_clean_replacement_ms":%d}\n' \
       "$(((first_output_ns - activation_started_ns) / 1000000))" \
       "$(((replacement_ready_ns - replacement_started_ns) / 1000000))"
+    printf '{"writable_create_ms":%d,"writable_checkpoint_ms":%d,"writable_export_ms":%d,"writable_snapshot_bytes":%d}\n' \
+      "$(((writable_create_ready_ns - writable_create_started_ns) / 1000000))" \
+      "$(jq -r '.result.checkpoint_millis' <<<"$writable_snapshot")" \
+      "$(jq -r '.result.writable_export_millis' <<<"$writable_snapshot")" \
+      "$(jq -r '.result.size_bytes' <<<"$writable_snapshot")"
     exit 0
   fi
   sleep 1

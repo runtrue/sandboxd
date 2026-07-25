@@ -1,6 +1,6 @@
 {
   "schema_version": 6,
-  "topology_digest": "sha256:0a6a79e90b1bbbe01384a6de285f98704f8b440002066e4a1ab23ef5e1c44c3f",
+  "topology_digest": "sha256:c2add407763eb8bbe87082eb251c18a893ad8e00afa7a7a9fa20c6ddd4c3a400",
   "name": "writable-root-conformance",
   "services": {
     "writer": {
@@ -50,7 +50,7 @@
         "variant": null
       },
       "command": [
-        "from pathlib import Path\nPath(\"/work/result.txt\").write_text(\"writable-root-passed\\n\")\nprint(Path(\"/work/result.txt\").read_text(), end=\"\")\n"
+        "from pathlib import Path\nimport time\nPath(\"/var/tmp/result.txt\").write_text(\"writable-root-passed\\n\")\nprint(Path(\"/var/tmp/result.txt\").read_text(), end=\"\", flush=True)\ntime.sleep(300)\n"
       ],
       "entrypoint": [
         "/usr/local/bin/python3",

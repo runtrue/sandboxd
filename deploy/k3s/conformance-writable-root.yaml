@@ -7,6 +7,8 @@ services:
     command:
       - |
         from pathlib import Path
-        Path("/work/result.txt").write_text("writable-root-passed\n")
-        print(Path("/work/result.txt").read_text(), end="")
+        import time
+        Path("/var/tmp/result.txt").write_text("writable-root-passed\n")
+        print(Path("/var/tmp/result.txt").read_text(), end="", flush=True)
+        time.sleep(300)
     read_only: false

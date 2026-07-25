@@ -156,6 +156,15 @@ pub fn restore_admitted(
         runsc_program,
         &preflight.path().join("runsc"),
         configuration.network_mode,
+        (!expected_writable_services.is_empty())
+            .then(|| {
+                (
+                    preflight.path().join("rootfs-overlay"),
+                    lock.policy.writable_root_bytes_per_service,
+                )
+            })
+            .as_ref()
+            .map(|(directory, maximum_bytes)| (directory.as_path(), *maximum_bytes)),
     )?;
     if preflight_runsc.version()? != metadata.runsc_version
         || preflight_runsc.configuration_digest() != metadata.runtime_configuration_digest
@@ -357,6 +366,13 @@ pub(super) fn snapshot(
                 service,
                 resources.rootfs_provider.as_ref(),
                 writable,
+                |destination| {
+                    resources.runsc.export_rootfs_upper(
+                        &resources.processes[service].id,
+                        destination,
+                        Duration::from_secs(60),
+                    )
+                },
             )?;
             writable_services.insert(service.clone(), writable.quota_bytes());
             writable_objects.push(object);
@@ -484,6 +500,15 @@ fn restore_services(
             &bundle_path,
             &resources.service_rootfs[service_name].path,
             resources.service_rootfs[service_name].read_only,
+            resources.service_rootfs[service_name]
+                .restore_diff
+                .as_deref()
+                .zip(
+                    resources.service_rootfs[service_name]
+                        .writable
+                        .as_ref()
+                        .map(|rootfs| rootfs.quota_bytes().saturating_mul(2)),
+                ),
             service_name,
             service,
             &guest_profile,

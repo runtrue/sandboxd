@@ -24,6 +24,13 @@ pub(super) struct Runsc {
     program: PathBuf,
     root: PathBuf,
     network_mode: NetworkMode,
+    root_overlay: Option<RootOverlay>,
+}
+
+#[derive(Debug, Clone)]
+struct RootOverlay {
+    directory: PathBuf,
+    maximum_bytes: u64,
 }
 
 pub(super) struct ServiceProcess {
@@ -48,6 +55,7 @@ impl Runsc {
         program: &Path,
         root: &Path,
         network_mode: NetworkMode,
+        root_overlay: Option<(&Path, u64)>,
     ) -> Result<Self, SandboxError> {
         if !program.is_absolute()
             || program.file_name().and_then(|name| name.to_str()) != Some("runsc")
@@ -68,10 +76,27 @@ impl Runsc {
         }
         let diagnostics = root.join(DIAGNOSTIC_DIRECTORY);
         std::fs::create_dir_all(&diagnostics).map_err(|source| io_error(&diagnostics, source))?;
+        let root_overlay = root_overlay
+            .map(|(directory, maximum_bytes)| {
+                if !directory.is_absolute() || maximum_bytes == 0 {
+                    return Err(SandboxError::Runtime(
+                        "gVisor root overlay configuration is invalid".to_owned(),
+                    ));
+                }
+                std::fs::create_dir_all(directory).map_err(|source| io_error(directory, source))?;
+                let directory = std::fs::canonicalize(directory)
+                    .map_err(|source| io_error(directory, source))?;
+                Ok(RootOverlay {
+                    directory,
+                    maximum_bytes,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             program,
             root: root.to_owned(),
             network_mode,
+            root_overlay,
         })
     }
 
@@ -196,6 +221,28 @@ impl Runsc {
         checked_timeout(&self.program, &arguments, timeout)
     }
 
+    pub(super) fn export_rootfs_upper(
+        &self,
+        id: &str,
+        destination: &Path,
+        timeout: Duration,
+    ) -> Result<(), SandboxError> {
+        if destination.exists() || !destination.is_absolute() {
+            return Err(SandboxError::Runtime(
+                "writable rootfs export destination is invalid".to_owned(),
+            ));
+        }
+        let mut arguments = self.common_arguments();
+        arguments.extend([
+            "tar".to_owned(),
+            "rootfs-upper".to_owned(),
+            "--file".to_owned(),
+            destination.display().to_string(),
+            id.to_owned(),
+        ]);
+        checked_timeout(&self.program, &arguments, timeout)
+    }
+
     pub(super) fn version(&self) -> Result<String, SandboxError> {
         let output = checked(&self.program, &["--version".to_owned()])?;
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
@@ -206,6 +253,14 @@ impl Runsc {
             .common_arguments()
             .into_iter()
             .filter(|argument| !argument.starts_with("--root="))
+            .map(|argument| {
+                argument
+                    .strip_prefix("--overlay2=root:dir=")
+                    .and_then(|value| value.rsplit_once(",size="))
+                    .map_or(argument.clone(), |(_, size)| {
+                        format!("--overlay2=root:dir=<state>,size={size}")
+                    })
+            })
             .collect::<Vec<_>>()
             .join("\0");
         format!("sha256:{:x}", Sha256::digest(joined.as_bytes()))
@@ -417,7 +472,17 @@ impl Runsc {
     }
 
     fn common_arguments(&self) -> Vec<String> {
-        vec![
+        let overlay = self.root_overlay.as_ref().map_or_else(
+            || "--overlay2=none".to_owned(),
+            |overlay| {
+                format!(
+                    "--overlay2=root:dir={},size={}",
+                    overlay.directory.display(),
+                    overlay.maximum_bytes
+                )
+            },
+        );
+        let mut arguments = vec![
             format!("--root={}", self.root.display()),
             format!(
                 "--network={}",
@@ -429,7 +494,7 @@ impl Runsc {
             ),
             "--ignore-cgroups=true".to_owned(),
             "--platform=systrap".to_owned(),
-            "--overlay2=none".to_owned(),
+            overlay,
             "--file-access=exclusive".to_owned(),
             "--file-access-mounts=exclusive".to_owned(),
             "--directfs=false".to_owned(),
@@ -443,7 +508,11 @@ impl Runsc {
             ),
             "--host-fifo=none".to_owned(),
             "--net-raw=false".to_owned(),
-        ]
+        ];
+        if self.root_overlay.is_some() {
+            arguments.push("--allow-rootfs-tar-annotation=true".to_owned());
+        }
+        arguments
     }
 
     fn diagnostic_path(&self, id: &str) -> PathBuf {

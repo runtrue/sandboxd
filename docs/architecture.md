@@ -125,14 +125,13 @@ activation on graceful shutdown. Registry credentials are scoped to one tenant
 and registry, live only in mode-`0700` temporary provider state, and never enter
 topology locks or snapshot manifests.
 
-Read-only roots remain the default. For an explicitly writable service, the
-provider creates a sparse ext4 image at the authorized size, attaches it to a
-private loop device, and mounts an overlay above the immutable image root. The
-ext4 filesystem enforces the bound at write time; post-hoc byte accounting is
-not the quota. Project, service, and image identity determine a provider key,
-and callers never supply host paths, loop devices, upper directories, work
-directories, or mount options. Provider metadata and the immutable lower layer
-remain outside the guest root.
+Read-only roots remain the default. For an explicitly writable service, runsc
+creates a private directory-backed root overlay above the immutable image root
+and enforces the authorized upper-layer size. No loop device, filesystem image,
+host overlay mount, mount propagation, or formatting helper is involved.
+Project, service, and image identity determine a provider record, and callers
+never supply worker paths or runtime overlay options. Provider metadata and the
+immutable lower layer remain outside the guest root.
 
 ## Volume providers
 
@@ -292,9 +291,10 @@ x-runtrue-network:
 The worker creates cgroup-v2 paths for the sandbox services and configures host
 memory, swap, CPU, and PID bounds before launching runsc. Output capture shares
 a fixed byte budget between stdout and stderr. Guest tmpfs mounts have explicit
-size bounds. Each writable OCI root has its own ext4 block quota and overlay
-upper directory; writable roots are never shared even when services or tenants
-use the same immutable image.
+size bounds. Each writable OCI root has a gVisor-enforced upper-layer size and
+private runtime directory; writable roots are never shared even when services
+or tenants use the same immutable image. The worker Pod's bounded state volume
+is the aggregate sandbox storage ceiling.
 
 The shared Sentry performs guest work for every container. Host cgroup metrics
 therefore establish the sandbox containment boundary. Policy fields named
@@ -315,7 +315,7 @@ portable snapshot -> restore under a new sandbox identity -> running
 
 Pause and resume target the root sandbox once, which affects every child in the
 shared Sentry. Stop terminates child process trees, tears down the root Sentry,
-removes stopped child state, releases writable mounts and loop devices, tears
+removes stopped child state, releases writable-root provider records, tears
 down networking and cgroups, verifies that runsc state is empty, and removes
 the recovery journal only after successful cleanup.
 
@@ -329,10 +329,12 @@ Both snapshot modes operate on the complete gVisor sandbox:
 runsc writes one sandbox-scoped checkpoint into a private staging directory.
 When any OCI root is writable, the daemon pauses the complete sandbox before
 checkpoint and diff export so publication cannot observe a changing upper
-layer. Each upper layer is encoded as an uncompressed OCI diff tar, including
-overlay whiteouts and basic ownership, mode, timestamp, file, directory, and
-symlink metadata. Snapshot export rejects hard links and non-overlay extended
-attributes. A live snapshot resumes the source before artifact publication;
+layer. Each upper layer is exported with runsc's rootfs-upper interface,
+canonicalized to normalized relative paths, and then passed through the same
+bounded special-file, sparse-file, xattr, traversal, duplicate, entry-count,
+logical-size, archive-size, and deadline checks used for untrusted OCI diffs.
+Restore uses the reviewed gVisor rootfs-upper annotation only after that
+validation. A live snapshot resumes the source before artifact publication;
 failure also attempts to resume it.
 The artifact layer hashes each file while streaming, encrypts it with a random
 data key, wraps that key with a tenant/workspace-derived key, and publishes the

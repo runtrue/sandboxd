@@ -87,9 +87,9 @@ changes. UDP, QUIC, arbitrary TCP, inbound UDP, caller-selected host ports, and
 protocols other than HTTP proxy egress and reverse TCP transport for declared
 HTTP routes remain unsupported.
 
-The following larger set is only for the host-integrated compatibility
-profile that exercises lifecycle, kernel networking, and writable-root
-snapshot suites:
+The following larger set is only for the host-integrated compatibility profile
+that exercises kernel networking and the legacy loop-backed named volume
+provider:
 
 ```yaml
 securityContext:
@@ -114,9 +114,10 @@ securityContext:
 
 `SYS_ADMIN` is required for the current normal runsc namespace/mount setup.
 `NET_ADMIN` and `NET_RAW` are required only by `--network-mode private`.
-`MKNOD` is required only when writable-root snapshot restore recreates OCI
-whiteouts. Do not grant the compatibility set to fixed or userspace-network
-workers.
+Directory-backed writable roots and their snapshot/restore path add no
+capability to the fixed profile. `MKNOD`, loop devices, filesystem formatting,
+and host overlay mounts are not used by writable roots. Do not grant the
+compatibility set to fixed or userspace-network workers.
 
 The container also needs:
 
@@ -126,8 +127,8 @@ The container also needs:
   delegated by the container runtime at
   `/sys/fs/cgroup/runtrue-sandboxd`;
 - pod volumes for persistent worker state and image storage; and
-- loop-control and allocated loop devices when writable roots or local named
-  volumes are enabled.
+- loop-control and allocated loop devices only when the legacy local named
+  volume provider is explicitly enabled.
 
 Do not mount the Kubernetes node's containerd socket, snapshotter storage,
 cgroup tree, or other system paths. The container runtime must supply the
