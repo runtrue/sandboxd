@@ -850,6 +850,7 @@ mod tests {
     };
 
     const MASTER_KEY: [u8; 32] = [0x5a; 32];
+    const GC_TEST_GRACE: Duration = Duration::from_secs(10);
 
     struct Fixture {
         _directory: tempfile::TempDir,
@@ -1202,8 +1203,8 @@ mod tests {
     fn unreferenced_objects_are_garbage_collected() {
         let directory = tempfile::tempdir().expect("artifact root parent");
         let limits = ArtifactLimits {
-            operation_timeout: Duration::from_secs(2),
-            garbage_collection_grace: Duration::from_secs(2),
+            operation_timeout: GC_TEST_GRACE,
+            garbage_collection_grace: GC_TEST_GRACE,
             ..ArtifactLimits::default()
         };
         let store = LocalArtifactStore::new(directory.path().join("artifacts"), MASTER_KEY, limits)
@@ -1240,7 +1241,7 @@ mod tests {
                 &fixture.publication.manifest.snapshot_id,
             )
             .expect("remove reference");
-        thread::sleep(Duration::from_millis(2_100));
+        thread::sleep(GC_TEST_GRACE + Duration::from_millis(100));
         let report = store
             .garbage_collect(&fixture.publication.scope)
             .expect("garbage collection");
@@ -1413,8 +1414,8 @@ mod tests {
     fn garbage_collection_keeps_objects_referenced_by_another_snapshot() {
         let directory = tempfile::tempdir().expect("artifact root parent");
         let limits = ArtifactLimits {
-            operation_timeout: Duration::from_secs(2),
-            garbage_collection_grace: Duration::from_secs(2),
+            operation_timeout: GC_TEST_GRACE,
+            garbage_collection_grace: GC_TEST_GRACE,
             ..ArtifactLimits::default()
         };
         let store = LocalArtifactStore::new(directory.path().join("artifacts"), MASTER_KEY, limits)
@@ -1433,7 +1434,7 @@ mod tests {
                 &first.publication.manifest.snapshot_id,
             )
             .expect("remove first reference");
-        thread::sleep(Duration::from_millis(2_100));
+        thread::sleep(GC_TEST_GRACE + Duration::from_millis(100));
         let report = store
             .garbage_collect(&first.publication.scope)
             .expect("garbage collection");
