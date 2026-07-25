@@ -214,6 +214,11 @@ jobs:
           bash tools/test-k3s-fixed-runtime.sh \
             | tee k3s-diagnostics/conformance.log
 
+      - name: Run PVC-backed directory-volume conformance
+        run: |
+          bash tools/test-k3s-directory-volumes.sh \
+            | tee k3s-diagnostics/directory-volumes.log
+
       - name: Run attested image-preparation conformance
         run: |
           bash tools/test-k3s-image-preparation.sh \

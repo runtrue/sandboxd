@@ -37,12 +37,13 @@ live snapshot/restore of a read-only topology.
 | --- | --- | --- | --- | --- |
 | A. Rootless direct run | Non-root UID; all capabilities dropped; `allowPrivilegeEscalation: false` | One direct `runsc --rootless=true --network=none run` | Normal daemon create, save/restore, Netstack, managed cgroups | The node's AppArmor user-namespace restriction had to be disabled for this test. gVisor rootless documents the remaining runtime limits. This is not a viable full daemon profile. |
 | B. Fixed runtime | User namespace plus `SETGID`, `SETUID`, `SYS_CHROOT`, `SYS_ADMIN` | Fixed or signed pre-expanded images, multi-container Sentry, loopback, lifecycle APIs, directory-backed writable roots, local live snapshot | In-worker pulls, ingress/egress, named writable volumes, managed cgroups, replacement restore without durable artifacts | Custom AppArmor/seccomp, durable-state qualification, replacement-restore proof |
+| B-V. PVC directory volumes | Level B plus `CHOWN`, `DAC_OVERRIDE`, and one operator-selected bounded RWO PVC | Strict, root, and OCI-compatible named-volume writes; tenant-scoped persistent reopen after Pod loss; portable directory snapshot/restore | Hard per-volume write quota on a shared directory, CSI-native snapshots, cross-node recovery without a shared backend | Encrypted CSI class, retention/backup policy, per-slot claims, custom AppArmor/seccomp |
 | B-N. Userspace policy network | Level B; no networking capability or host-network setting; `network-mode=userspace`; gVisor `network=none` and `host-uds=open` | Policy-approved HTTP CONNECT and declared reverse HTTP ingress over one read-only mounted Unix-socket directory; static unprivileged guest agent; heartbeat-renewed serving leases; gateway/broker adapter; connection, byte, bandwidth, and deadline ceilings | Raw TCP/UDP, guest DNS, transparent proxying, software without explicit HTTP proxy support | Bake the released agent into each measured application image, restrict outer Pod egress with an FQDN-aware CNI or egress gateway, qualify custom MAC/seccomp profiles |
 | B+ measured runtime | Level B plus `DAC_READ_SEARCH` | Recomputes full root digest, entry count, and byte count at admission | Same feature limits as B | Use only when runtime measurement is worth pod-wide read/search bypass authority |
 | P. Isolated image preparation | Separate user-namespaced Job with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SYS_ADMIN`; no privilege escalation; default seccomp; private containerd | Resolve a mutable reference once, verify and unpack OCI content, attach evidence, sign, atomically publish an immutable root, audit revocation/pool impact, and lock-aware GC | Sandbox execution, host-runtime access, worker credential access | FQDN-aware registry egress, external key service or short-lived signing key, CSI physical quota, custom AppArmor profile permitting only required mounts/signals |
 | C. Dynamic runtime | One user-namespaced worker container with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, `SYS_ADMIN`, `SYS_CHROOT` and a private containerd process | Arbitrary pinned OCI pull, validation, unpack, and loopback execution | Kernel policy networking, current loop/ext4 storage, managed cgroups | Registry trust, credential delivery/rotation, image GC, egress policy, supervisor qualification, and a future safe privilege split |
 | D. Kernel networking | Level B or C plus `NET_ADMIN`, `NET_RAW`; `network-mode=private`; namespaced `net.ipv4.ip_forward=1` | Bridge/veth network, nftables policy, policy proxies, HTTP/TCP egress, ingress plumbing | Still no current writable storage or managed cgroups | Kubelet unsafe-sysctl allowlist, pod sysctl, dedicated nodes, custom network security profiles |
-| E. Durable storage/cgroups | Level B writable roots plus operator-mounted PVCs, CSI integration, or trusted resource brokers | Persistent named writable volumes, replacement restore, per-sandbox resources | Depends on the selected provider | Tenant/path binding, transactional cleanup, backend quota, fencing, recovery, dedicated threat model |
+| E. Delegated cgroups or advanced CSI | Level B or B-V plus a reviewed CSI integration or trusted resource broker | CSI-native snapshots, backend-specific hard quota, delegated per-sandbox resources | Depends on the selected provider | Provider-specific fencing, recovery, quota, and threat model |
 | F. Host integrated | Privileged pod, host containerd paths/socket, bidirectional mount propagation, host-backed state | Full current image, networking, loop/ext4 storage, and cgroup implementation | No meaningful worker/host kernel boundary | Dedicated tainted nodes or VMs, strict scheduling/admission, host hardening; compatibility profile only |
 
 Dynamic images, networking, storage, cgroups, and durable state are independent
@@ -70,6 +71,31 @@ Putting the four capabilities only on the `runsc` file was tested and failed:
 gVisor's internal gofer re-exec did not retain the required capability state.
 A future split must use a dedicated launcher with a narrow authenticated
 protocol rather than file capabilities.
+
+### PVC-backed directory volumes
+
+The directory-volume tier adds exactly:
+
+| Capability | Current purpose | Independent removal result |
+| --- | --- | --- |
+| `DAC_OVERRIDE` | Let gVisor's capability-reduced gofer create and traverse the exact provider-resolved bind source across the nested user-namespace boundary | Strict UID 65534 create failed with `EACCES` |
+| `CHOWN` | Assign the guest UID/GID to a newly created inode and preserve portable snapshot ownership | Create reached the bind but failed with `EPERM` |
+
+Both together passed strict-profile write/read, live snapshot, forced worker
+replacement, persistent reopen, and portable tar restore. An exact-capability
+restore test passed with only these two storage capabilities plus the normal
+runsc set; `FOWNER` was not required. `directfs=true` was also tested and
+failed during the gofer re-exec under the reduced outer capability set, so the
+profile retains the stricter `directfs=false`.
+
+These capabilities apply to the whole sandboxd process in its Kubernetes user
+namespace. Their reachable filesystem is constrained by the read-only image,
+dedicated runtime tmpfs, and the single operator-mounted state PVC; the profile
+has no host path, runtime socket, device, host namespace, or mount
+propagation. `DAC_OVERRIDE` still weakens Unix mode enforcement inside that
+mounted PVC, so tenant separation must continue to rely on opaque provider
+handles, canonical source validation, one-sandbox worker assignment, and
+storage encryption/fencing.
 
 ### Image preparation
 
@@ -180,13 +206,13 @@ signed per-topology policy remains mandatory.
 | Restricted raw TCP/UDP egress | D | Passed only in host-integrated profile | Keep disabled or qualify the kernel-network profile |
 | Kernel-network ingress | D | Plumbing exists; public exposure intentionally not tested | Prefer B-N reverse ingress; otherwise authenticated local/ClusterIP endpoint and policy tests, never host networking |
 | Writable OCI root | B | Strict UID write and bounded live snapshot passed in local k3s through the directory-backed gVisor upper layer | Durable artifact backend and replacement restore test |
-| Persistent named writable volume | E or F | Failed at B; passed at F | Broker/userspace provider and explicit ownership/idmapping |
+| Persistent named writable volume | B-V | Strict, root, and OCI-compatible writes plus reopen after forced Pod replacement passed on a PVC-backed worker | Encrypted production CSI qualification; use separate claims/project quota when hard per-volume enforcement is required |
 | Attested root on read-only RWO content volume | P+B | Integrity, signature, mount permission, and nested execution passed | CSI-specific recovery, multi-node delivery, quota, and GC conformance |
 | Secret volume | B expected | Not release-qualified | Non-persistent delivery, zeroization, access audit, snapshot exclusion |
 | Per-sandbox cgroup limits | E or F | External aggregate pod limit passed; managed subtree unavailable at B/C | Writable delegated cgroup subtree, one pod per sandbox, or resource broker |
-| Durable local recovery | B plus PVC | Not release-qualified | Compatible encrypted RWO PVC, fencing, restart and eviction tests |
+| Durable local recovery | B-V | Forced Pod loss cleared stale attachments and reopened retained content from the same RWO PVC | Repeated eviction/node-loss fault injection and storage-class-specific fencing |
 | Cross-worker restore | B plus shared artifact backend and egress | Not exercised | S3 backend, common key, identity fencing, compatibility cohort, credential rotation |
-| Root/OCI-compatible guest profiles | B | Root profile enabled only for host-integrated volume test | Treat as operator policy; design non-root volume ownership |
+| Root/OCI-compatible guest profiles | B-V | Strict UID/GID 65534, root-in-sandbox, and OCI-compatible volume paths passed | Treat profile enablement as explicit operator policy |
 | Signed workload socket | Any daemon level | Non-root, capability-free broker passed local-k3s dispatch and reverse-ingress conformance | Production key delivery/rotation and continuous replay/NetworkPolicy tests |
 
 ## Non-capability Kubernetes requirements
@@ -227,18 +253,14 @@ Also require:
 2. Image measurement cache identity mixes manifest digest with source registry
    identity. Registry aliases for the same manifest can cause a hard mismatch;
    define and enforce one canonical cache key.
-3. A named-volume mountpoint absent from a read-only root fails at runtime.
-   Validate required mountpoints during compilation/admission.
-4. Strict guest UID/GID 65534 cannot write a new root-owned named volume.
-   Add explicit ownership or idmapping policy.
-5. The first Compose service currently becomes the Sentry anchor. If it exits
+3. The first Compose service currently becomes the Sentry anchor. If it exits
    before dependents join, `service_completed_successfully` topologies fail.
    Select and manage an independent durable anchor.
-6. Durable PVC recovery, secret-volume lifecycle, cross-worker restore, and
-   CSI-specific artifact delivery still require release conformance. The
-   isolated private-containerd supervisor, bounded cache audit/GC, pool-impact
-   inventory, and read-only attested-root path have local-k3s conformance.
-7. Custom AppArmor and seccomp profiles are mandatory before mutually
+4. Multi-node PVC recovery, secret-volume lifecycle, cross-worker restore, and
+   CSI-specific snapshot delivery still require release conformance. Same-PVC
+   forced-Pod replacement, transactional directory cleanup, strict ownership,
+   and admission-time mountpoint rejection have local-k3s conformance.
+5. Custom AppArmor and seccomp profiles are mandatory before mutually
    untrusted workloads.
 
 Until these are closed, the fixed-runtime manifest is a hardened deployment

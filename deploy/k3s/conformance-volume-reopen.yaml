@@ -1,0 +1,22 @@
+name: volume-reopen-conformance
+
+volumes:
+  shared:
+    persistence_class: persistent
+    snapshot_policy: required
+    quota_bytes: 8388608
+
+services:
+  reader:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        from pathlib import Path
+        value = Path("/mnt/conformance.txt").read_text()
+        assert value == "named-volume-passed\n"
+        print(value, end="")
+    volumes:
+      - source: shared
+        target: /mnt
+    read_only: true

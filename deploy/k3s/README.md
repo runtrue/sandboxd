@@ -13,6 +13,7 @@ matrix is in [`SECURITY-PROFILES.md`](SECURITY-PROFILES.md).
 | --- | --- | --- | --- |
 | Isolated image preparation | `image-preparer.yaml` | `Dockerfile.preparer` | Resolve, verify, unpack, measure, attach evidence, sign, and atomically publish approved OCI roots without a host runtime socket. Runs separately from reduced workers. |
 | Fixed runtime | `sandboxd-fixed-runtime.yaml` | `Dockerfile.fixed-runtime` | Recommended minimum-authority profile. One attested, pre-expanded rootfs; internal loopback only; pod-level resource limits. |
+| PVC-backed directory volumes | `directory-volumes/` overlay | `Dockerfile.fixed-runtime` | Fixed runtime plus tenant-scoped persistent directories and portable volume snapshots. Adds only `CHOWN` and `DAC_OVERRIDE`; only the named-volume provider root uses an operator-selected RWO PVC. |
 | Userspace network runtime | `sandboxd-userspace-runtime.yaml` | `Dockerfile.fixed-runtime` | Fixed runtime plus policy-approved HTTPS CONNECT and declared reverse HTTP ingress over guest-visible Unix sockets. No `NET_ADMIN`, `NET_RAW`, veth, bridge, nftables, forwarding sysctl, host path, host namespace, Kubernetes Service/Ingress, or `hostPort`. |
 | Brokered fixed runtime | `sandboxd-fixed-runtime-brokered.yaml` | `Dockerfile.fixed-runtime` + `Dockerfile.broker` | Fixed worker plus a capability-free native broker sidecar, signed workload socket, authenticated registration, and default-deny control-plane routing. |
 | Dynamic runtime | `sandboxd-dynamic-runtime.yaml` | `Dockerfile.host-integrated` | Private containerd in the worker container for arbitrary pinned OCI images. No host socket, path, device, or namespace. |
@@ -101,6 +102,10 @@ that supports FQDN policy. Their control socket exists only inside the pod.
 - A PVC storage quota and a namespace `ResourceQuota` that bounds concurrent
   preparation Jobs. The CLI limits logical cache bytes and artifact count, but
   the CSI quota is the final physical-storage backstop.
+- A bounded, encrypted RWO CSI volume for each directory-volume worker slot.
+  Plain directories provide an aggregate PVC boundary, not a hard
+  per-volume quota. Use separate claims, CSI capacity, or a reviewed
+  project-quota backend when hard per-volume enforcement is required.
 - An operator signing identity delivered only to the isolated preparer. Use an
   external signing service or a short-lived projected Secret in production;
   never mount it into a worker.
@@ -189,6 +194,16 @@ containerd, registry Secret, pull egress, host path, host namespace, or
 service-account token; requires revocation and artifact mismatch to fail before
 readiness; and creates two nested containers under gVisor. CI retains cold
 preparation time, root size, cache-hit status, and signed-root activation time.
+
+[`tools/test-k3s-directory-volumes.sh`](../../tools/test-k3s-directory-volumes.sh)
+uses the production PVC overlay with a static local PV only inside the
+single-node conformance cluster. It proves strict UID/GID 65534 writes,
+portable live snapshots, crash cleanup, persistent reopen after forced Pod
+replacement, admission-time rejection of a missing image mountpoint, and the
+root and OCI-compatible guest profiles. It asserts the exact capability set
+and the absence of `hostPath`, devices, privileged mode, and mount propagation.
+Production deployments supply an encrypted CSI claim; they do not reproduce
+the conformance-only local PV.
 
 The preparer needs only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, and `SYS_ADMIN`
 inside its Kubernetes user namespace. `allowPrivilegeEscalation` is false and
@@ -457,6 +472,40 @@ kubectl exec -n sandboxd-system "$pod" -- \
 The result must have exit code zero, contain
 `"marker": "nested-container-passed"`, report kernel `4.19.0-gvisor`, and run
 as UID 65534.
+
+## Enable PVC-backed named volumes
+
+Provision one encrypted, capacity-bounded RWO claim per static worker slot.
+The supplied overlay declares `sandboxd-directory-state`; set its
+StorageClass, capacity, retention, backup, and topology policy to match the
+cluster before rendering it. Then render and apply the profile:
+
+```bash
+kubectl kustomize \
+  --load-restrictor LoadRestrictionsNone \
+  deploy/k3s/directory-volumes >directory-volumes.rendered.yaml
+kubectl apply -f directory-volumes.rendered.yaml
+kubectl wait -n sandboxd-system \
+  --for=condition=Ready pod \
+  -l app.kubernetes.io/name=sandboxd-fixed-runtime \
+  --timeout=180s
+```
+
+This tier adds `CHOWN` and `DAC_OVERRIDE` to the four runsc capabilities.
+Independent live removal tests established the boundary: without
+`DAC_OVERRIDE`, the capability-reduced gofer cannot create through the nested
+user-namespace bind; without `CHOWN`, it cannot assign the strict guest UID to
+the new inode. The pair is also sufficient for portable tar restore; `FOWNER`,
+devices, host mounts, mount propagation, and privileged mode are not required.
+
+The provider derives its directory and attachment identities from tenant,
+workspace, and volume IDs. Callers never submit a claim name or worker path.
+Persistent directories survive detach and Pod replacement; ephemeral
+directories are removed during cleanup. Snapshot export rejects special
+files, hard links, sparse files, unsafe links, excessive paths/depth/count,
+unsupported extended metadata, and content beyond the declared logical
+quota. The CSI/PVC capacity remains the physical and aggregate write-time
+backstop.
 
 `tools/test-k3s-brokered-runtime.sh` exercises the network-facing path through
 an integration-only loopback PostgreSQL sidecar:

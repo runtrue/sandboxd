@@ -123,6 +123,8 @@ pub(super) fn write_bundle(
         let mut options = vec!["rbind", "nosuid", "nodev"];
         if volume.read_only() {
             options.push("ro");
+        } else {
+            options.push("rw");
         }
         mounts.push(json!({
             "destination": volume.destination(),

@@ -30,8 +30,8 @@ use runtrue_sandbox_oci::{
     SandboxError, TopologyLock,
 };
 use runtrue_sandbox_volume::{
-    ArtifactVolumeStore, LocalSecretResolver, LocalVolumeConfig, LocalVolumeProvider,
-    VolumeProvider,
+    ArtifactVolumeStore, DirectoryVolumeConfig, DirectoryVolumeProvider, LocalSecretResolver,
+    LocalVolumeConfig, LocalVolumeProvider, VolumeProvider,
 };
 
 pub(crate) const MAXIMUM_WRITABLE_ROOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -183,7 +183,15 @@ pub(crate) fn serve(config: ServerConfig) -> Result<ServeOutcome, SandboxError> 
                 SandboxError::Runtime(format!("open local volume provider: {error}"))
             })?,
     );
-    let volume_provider: Arc<dyn VolumeProvider> = local_volume_provider.clone();
+    let volume_provider: Arc<dyn VolumeProvider> = Arc::new(
+        DirectoryVolumeProvider::open(
+            DirectoryVolumeConfig::new(config.state_root.join("directory-volumes")),
+            Arc::clone(&local_volume_provider),
+        )
+        .map_err(|error| {
+            SandboxError::Runtime(format!("open directory volume provider: {error}"))
+        })?,
+    );
     let artifact_volume_store: Arc<dyn ArtifactVolumeStore> = local_volume_provider;
 
     let mut endpoints = vec![BoundEndpoint {

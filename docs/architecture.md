@@ -146,12 +146,16 @@ image admission.
 `sandbox-volume` defines create, attach, mount, freeze/thaw, snapshot, restore,
 unmount, detach, delete, capability, and recovery operations over opaque
 provider handles. Operator-installed storage integrations connect at this
-boundary. The local provider derives a SHA-256 key from tenant, workspace, and
-volume ID. Ephemeral and persistent volumes use sparse ext4 images, private loop
-devices, and hard block quotas. Persistent storage remains after the final
-detach; ephemeral storage is destroyed. Attachment ownership is atomically
-persisted before a mount is issued, and startup recovery clears stale ownership,
-mounts, and loop devices after daemon or worker failure.
+boundary. The reduced directory provider derives a SHA-256 key from tenant,
+workspace, and volume ID beneath an operator-mounted PVC. It exposes only the
+canonical data leaf to runsc; tenant input never contains a claim, host path,
+or mount source. Persistent storage remains after the final detach; ephemeral
+storage is destroyed. Attachment ownership is atomically persisted before a
+mount is issued, and startup recovery clears stale ownership and reconciles an
+interrupted directory replacement after daemon or worker failure. Plain
+directory volumes use the worker Pod/PVC as their aggregate physical boundary;
+the declared per-volume quota additionally bounds portable export but is not
+misrepresented as a hard write-time directory quota.
 
 Artifact volumes resolve a provider-owned regular file by its SHA-256 digest,
 verify it is immutable, and expose it only through a read-only bind mount.
@@ -170,13 +174,17 @@ symlinks and special files, copy the bytes into a size-bounded tmpfs, and expose
 that tmpfs read-only. Secret bytes, source paths, and tmpfs handles do not enter
 topology locks or snapshot manifests.
 
-Snapshotting pauses the complete sandbox, freezes each named ext4 volume,
-copies the quota image, thaws it on success or failure, and publishes the image
-as a typed encrypted artifact. Manifest v3 binds each volume ID to exactly one
-object plus provider, persistence, and portability metadata. Restore verifies
-the topology, digest, size, quota, provider, and portability before attaching
-storage. Excluded named volumes reject snapshot creation explicitly; artifacts
-are reconstructed from their digest and secrets are freshly materialized.
+Snapshotting pauses the complete sandbox, marks each named directory frozen,
+exports one bounded portable tar, thaws on success or failure, and publishes
+the result as a typed encrypted artifact. Export and restore enforce path
+length/depth/count, logical bytes, special-file, hard-link, sparse-file,
+symlink, and extended-metadata policy. Restore validates the topology, digest,
+size, quota, provider, and portability before an atomic directory swap, with
+rollback and startup reconciliation for interrupted swaps. Manifest v3 binds
+each volume ID to exactly one object plus provider, persistence, and
+portability metadata. Excluded named volumes reject snapshot creation
+explicitly; artifacts are reconstructed from their digest and secrets are
+freshly materialized.
 
 ## gVisor execution
 

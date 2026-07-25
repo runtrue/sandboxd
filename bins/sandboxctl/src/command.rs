@@ -439,14 +439,29 @@ fn run(
             runtrue_sandbox_core::TenantId::parse("local").expect("local tenant"),
             runtrue_sandbox_core::WorkspaceId::parse("local").expect("local workspace"),
         ),
-        Arc::new(
-            runtrue_sandbox_volume::LocalVolumeProvider::open(
-                runtrue_sandbox_volume::LocalVolumeConfig::new(state_root.join(".volumes")),
+        {
+            let auxiliary = Arc::new(
+                runtrue_sandbox_volume::LocalVolumeProvider::open(
+                    runtrue_sandbox_volume::LocalVolumeConfig::new(
+                        state_root.join(".auxiliary-volumes"),
+                    ),
+                )
+                .map_err(|error| {
+                    SandboxError::Runtime(format!("open auxiliary volume provider: {error}"))
+                })?,
+            );
+            Arc::new(
+                runtrue_sandbox_volume::DirectoryVolumeProvider::open(
+                    runtrue_sandbox_volume::DirectoryVolumeConfig::new(
+                        state_root.join(".directory-volumes"),
+                    ),
+                    auxiliary,
+                )
+                .map_err(|error| {
+                    SandboxError::Runtime(format!("open directory volume provider: {error}"))
+                })?,
             )
-            .map_err(|error| {
-                SandboxError::Runtime(format!("open local volume provider: {error}"))
-            })?,
-        ),
+        },
         executor::ExecutorConfiguration::default(),
     );
     let mut release_error = None;

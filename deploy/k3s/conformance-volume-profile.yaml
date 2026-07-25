@@ -1,0 +1,27 @@
+name: volume-profile-conformance
+
+volumes:
+  shared:
+    persistence_class: persistent
+    snapshot_policy: required
+    quota_bytes: 8388608
+
+services:
+  writer:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import time
+        from pathlib import Path
+        Path("/mnt/profile.txt").write_text("profile-volume-passed\n")
+        time.sleep(300)
+    healthcheck:
+      test: [CMD, /usr/local/bin/python3, -c, 'from pathlib import Path; assert Path("/mnt/profile.txt").read_text() == "profile-volume-passed\n"']
+      interval_ms: 50
+      timeout_ms: 500
+      retries: 80
+    volumes:
+      - source: shared
+        target: /mnt
+    read_only: true
