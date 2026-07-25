@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+axum.workspace = true
 clap.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true

@@ -1,6 +1,6 @@
 use crate::config::read_owner_config;
 use axum::http::{header::AUTHORIZATION, HeaderMap};
-use runtrue_sandbox_core::{SubjectId, TenantId, WorkspaceId};
+use runtrue_sandbox_core::{ServiceLevelPolicy, SubjectId, TenantId, WorkerPool, WorkspaceId};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -9,7 +9,7 @@ use std::{
 };
 use subtle::ConstantTimeEq as _;
 
-const AUTH_POLICY_VERSION: u32 = 1;
+const AUTH_POLICY_VERSION: u32 = 2;
 const DUMMY_DIGEST: [u8; 32] = [0x5a; 32];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,6 +31,7 @@ struct CredentialPolicy {
     topologies: BTreeSet<String>,
     resource_shapes: BTreeSet<String>,
     compatibility_cohorts: BTreeSet<String>,
+    service_levels: BTreeMap<String, ServiceLevelPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,10 @@ impl AuthPolicy {
                     topologies: BTreeSet::from(["topology-v1".to_owned()]),
                     resource_shapes: BTreeSet::from(["standard-v1".to_owned()]),
                     compatibility_cohorts: BTreeSet::from(["runsc-v1".to_owned()]),
+                    service_levels: BTreeMap::from([(
+                        "fixed-standard-warm".to_owned(),
+                        ServiceLevelPolicy::RetainedWarm { clean_workers: 2 },
+                    )]),
                 },
             )]),
         }
@@ -89,6 +94,15 @@ impl AuthPolicy {
                 || !valid_allowlist(&credential.topologies)
                 || !valid_allowlist(&credential.resource_shapes)
                 || !valid_allowlist(&credential.compatibility_cohorts)
+                || credential.service_levels.keys().collect::<BTreeSet<_>>()
+                    != credential.pools.iter().collect::<BTreeSet<_>>()
+                || credential.service_levels.values().any(|service_level| {
+                    matches!(
+                        service_level,
+                        ServiceLevelPolicy::RetainedWarm { clean_workers }
+                            if *clean_workers == 0 || *clean_workers > 100_000
+                    )
+                })
             {
                 return Err("auth policy contains an invalid credential".to_owned());
             }
@@ -152,6 +166,25 @@ impl Principal {
         }
         Ok(())
     }
+
+    pub(crate) fn authorize_service_level(&self, pool: &WorkerPool) -> Result<(), ()> {
+        let policy = pool.policy;
+        match self.policy.service_levels.get(&pool.name).ok_or(())? {
+            ServiceLevelPolicy::ScaleToZero
+                if policy.minimum_workers == 0 && policy.warm_headroom == 0 =>
+            {
+                Ok(())
+            }
+            ServiceLevelPolicy::RetainedWarm { clean_workers }
+                if *clean_workers > 0
+                    && policy.warm_headroom >= *clean_workers
+                    && policy.maximum_workers >= *clean_workers =>
+            {
+                Ok(())
+            }
+            _ => Err(()),
+        }
+    }
 }
 
 fn valid_allowlist(values: &BTreeSet<String>) -> bool {
@@ -207,6 +240,15 @@ mod tests {
         let principal = policy.authenticate(&headers).expect("principal");
         assert_eq!(principal.tenant_id.as_str(), "tenant-gateway");
         assert_eq!(principal.subject_id.as_str(), "subject-gateway");
+        let catalog: runtrue_sandbox_core::WorkerPoolCatalog =
+            serde_json::from_str(include_str!("../../../deploy/k3s/worker-pools.json"))
+                .expect("worker pools");
+        assert!(principal
+            .authorize_service_level(catalog.pool("fixed-standard-warm").expect("warm pool"))
+            .is_ok());
+        assert!(principal
+            .authorize_service_level(catalog.pool("reviewed-cold-fallback").expect("cold pool"))
+            .is_err());
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_static("Bearer key-a.wrong-wrong-wrong-wrong-wrong-wrong"),

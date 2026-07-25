@@ -27,7 +27,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 const MIGRATION_LOCK: i64 = 7_223_510_449_421;
 const QUEUE_LOCK: i64 = 7_223_510_449_422;
 const AUTOSCALE_LOCK: i64 = 7_223_510_449_423;
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 const MAXIMUM_PEM_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_OPERATION_BYTES: usize = 512 * 1024;
 const MAXIMUM_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -183,6 +183,54 @@ CREATE TABLE IF NOT EXISTS sandboxd_placement.autoscale_state (
 UPDATE sandboxd_placement.schema_version SET version = 4 WHERE singleton = TRUE;
 "#;
 
+const MIGRATION_V5: &str = r#"
+ALTER TABLE sandboxd_placement.requests
+    ADD COLUMN IF NOT EXISTS assigned_unix_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS first_output_unix_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS capacity_class TEXT;
+UPDATE sandboxd_placement.requests
+SET capacity_class = 'unknown'
+WHERE capacity_class IS NULL;
+ALTER TABLE sandboxd_placement.requests
+    ALTER COLUMN capacity_class SET NOT NULL;
+DO $migration$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'requests_capacity_class'
+          AND conrelid = 'sandboxd_placement.requests'::regclass
+    ) THEN
+        ALTER TABLE sandboxd_placement.requests
+            ADD CONSTRAINT requests_capacity_class
+            CHECK (capacity_class IN ('warm', 'cold', 'unknown'));
+    END IF;
+END
+$migration$;
+
+CREATE TABLE IF NOT EXISTS sandboxd_placement.pool_activations (
+    sequence BIGSERIAL PRIMARY KEY,
+    pool_name TEXT NOT NULL,
+    requested_unix_ms BIGINT NOT NULL CHECK (requested_unix_ms > 0),
+    target_workers INTEGER NOT NULL CHECK (target_workers > 0),
+    ready_unix_ms BIGINT,
+    cancelled_unix_ms BIGINT,
+    CHECK (ready_unix_ms IS NULL OR cancelled_unix_ms IS NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS pool_activations_one_pending
+ON sandboxd_placement.pool_activations (pool_name)
+WHERE ready_unix_ms IS NULL AND cancelled_unix_ms IS NULL;
+CREATE INDEX IF NOT EXISTS pool_activations_history
+ON sandboxd_placement.pool_activations (pool_name, requested_unix_ms);
+CREATE INDEX IF NOT EXISTS requests_metrics_assigned
+ON sandboxd_placement.requests (pool_name, assigned_unix_ms)
+WHERE assigned_unix_ms IS NOT NULL;
+CREATE INDEX IF NOT EXISTS requests_metrics_terminal
+ON sandboxd_placement.requests (pool_name, terminal_unix_ms)
+WHERE terminal_unix_ms IS NOT NULL;
+
+UPDATE sandboxd_placement.schema_version SET version = 5 WHERE singleton = TRUE;
+"#;
+
 #[derive(Debug, Clone, Copy)]
 pub struct PlacementStoreConfig {
     pub global_queue_limit: i64,
@@ -298,6 +346,34 @@ pub struct PlacementRecord {
 pub struct DurablePoolDecision {
     pub observation: PoolObservation,
     pub decision: AutoscaleDecision,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolAutoscaleMetrics {
+    pub pool_name: String,
+    pub queued_assignments: u64,
+    pub active_leases: u64,
+    pub clean_warm_slots: u64,
+    pub draining_workers: u64,
+    pub desired_workers: u64,
+    pub utilization_ratio: f64,
+    pub saturated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolLatencyMetrics {
+    pub pool_name: String,
+    pub phase: String,
+    pub samples: u64,
+    pub p50_milliseconds: u64,
+    pub p95_milliseconds: u64,
+    pub p99_milliseconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoscaleMetrics {
+    pub pools: Vec<PoolAutoscaleMetrics>,
+    pub latencies: Vec<PoolLatencyMetrics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,6 +534,10 @@ impl PostgresPlacementStore {
         if version == 3 {
             transaction.batch_execute(MIGRATION_V4).await?;
             version = 4;
+        }
+        if version == 4 {
+            transaction.batch_execute(MIGRATION_V5).await?;
+            version = 5;
         }
         if version != SCHEMA_VERSION {
             return Err(PlacementStoreError::Invalid(format!(
@@ -630,13 +710,35 @@ impl PostgresPlacementStore {
                 &[&submission.work.tenant_id.as_str(), &fair_finish],
             )
             .await?;
+        let heartbeat_cutoff = now
+            .checked_sub(duration_millis(self.config.worker_heartbeat_timeout)?)
+            .ok_or_else(|| PlacementStoreError::Invalid("invalid heartbeat time".to_owned()))?;
+        let warm_capacity: bool = transaction
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sandboxd_placement.workers
+                    WHERE pool_name = $1 AND topology = $2 AND resource_shape = $3
+                    AND compatibility_cohort = $4 AND state = 'clean'
+                    AND heartbeat_unix_ms > $5
+                 )",
+                &[
+                    &submission.pool_name,
+                    &submission.topology,
+                    &submission.resource_shape,
+                    &submission.compatibility_cohort,
+                    &heartbeat_cutoff,
+                ],
+            )
+            .await?
+            .get(0);
+        let capacity_class = if warm_capacity { "warm" } else { "cold" };
         transaction
             .execute(
                 "INSERT INTO sandboxd_placement.requests
                  (request_id, idempotency_key, tenant_id, workspace_id, sandbox_id, subject_id,
                   pool_name, topology, resource_shape, compatibility_cohort, deadline_unix_ms,
-                  created_unix_ms, fair_finish, operation, state)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'queued')",
+                  created_unix_ms, fair_finish, operation, state, capacity_class)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'queued',$15)",
                 &[
                     &request_id(&submission.work),
                     &submission.work.idempotency_key,
@@ -652,6 +754,7 @@ impl PostgresPlacementStore {
                     &now,
                     &fair_finish,
                     &operation,
+                    &capacity_class,
                 ],
             )
             .await?;
@@ -896,7 +999,8 @@ impl PostgresPlacementStore {
                     .execute(
                         "UPDATE sandboxd_placement.requests SET state = 'queued',
                          worker_id = NULL, assignment_epoch = NULL,
-                         lease_expires_unix_ms = NULL WHERE request_id = $1",
+                         lease_expires_unix_ms = NULL, assigned_unix_ms = NULL,
+                         first_output_unix_ms = NULL WHERE request_id = $1",
                         &[&record.request_id],
                     )
                     .await?;
@@ -1049,6 +1153,249 @@ impl PostgresPlacementStore {
         })
     }
 
+    pub async fn record_scale_up(
+        &self,
+        pool_name: &str,
+        target_workers: u32,
+        now_unix_ms: u64,
+    ) -> Result<(), PlacementStoreError> {
+        if !valid_pool_name(pool_name) || target_workers == 0 || now_unix_ms == 0 {
+            return Err(PlacementStoreError::Invalid(
+                "scale-up activation is invalid".to_owned(),
+            ));
+        }
+        let target = i32::try_from(target_workers).map_err(|_| {
+            PlacementStoreError::Invalid("activation target exceeds PostgreSQL integer".to_owned())
+        })?;
+        let now = to_i64(now_unix_ms)?;
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        transaction
+            .query_one("SELECT pg_advisory_xact_lock($1)", &[&AUTOSCALE_LOCK])
+            .await?;
+        let updated = transaction
+            .execute(
+                "UPDATE sandboxd_placement.pool_activations
+                 SET target_workers = GREATEST(target_workers, $2)
+                 WHERE pool_name = $1 AND ready_unix_ms IS NULL
+                 AND cancelled_unix_ms IS NULL",
+                &[&pool_name, &target],
+            )
+            .await?;
+        if updated == 0 {
+            transaction
+                .execute(
+                    "INSERT INTO sandboxd_placement.pool_activations
+                     (pool_name, requested_unix_ms, target_workers)
+                     VALUES ($1, $2, $3)",
+                    &[&pool_name, &now, &target],
+                )
+                .await?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM sandboxd_placement.pool_activations
+                 WHERE sequence IN (
+                    SELECT sequence FROM sandboxd_placement.pool_activations
+                    WHERE pool_name = $1
+                    AND (ready_unix_ms IS NOT NULL OR cancelled_unix_ms IS NOT NULL)
+                    ORDER BY sequence DESC OFFSET 10000
+                 )",
+                &[&pool_name],
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn observe_pool_activation(
+        &self,
+        pool_name: &str,
+        desired_workers: u32,
+        ready_workers: u32,
+        now_unix_ms: u64,
+    ) -> Result<(), PlacementStoreError> {
+        if !valid_pool_name(pool_name) || now_unix_ms == 0 {
+            return Err(PlacementStoreError::Invalid(
+                "activation observation is invalid".to_owned(),
+            ));
+        }
+        let desired = i32::try_from(desired_workers).map_err(|_| {
+            PlacementStoreError::Invalid("desired workers exceed PostgreSQL integer".to_owned())
+        })?;
+        let ready = i32::try_from(ready_workers).map_err(|_| {
+            PlacementStoreError::Invalid("ready workers exceed PostgreSQL integer".to_owned())
+        })?;
+        let now = to_i64(now_unix_ms)?;
+        self.client
+            .lock()
+            .await
+            .execute(
+                "UPDATE sandboxd_placement.pool_activations
+                 SET ready_unix_ms = CASE
+                        WHEN target_workers <= $2 THEN $4::BIGINT ELSE NULL
+                     END,
+                     cancelled_unix_ms = CASE
+                        WHEN target_workers > $1 AND target_workers > $2 THEN $4::BIGINT
+                        ELSE NULL
+                     END
+                 WHERE pool_name = $3 AND ready_unix_ms IS NULL
+                 AND cancelled_unix_ms IS NULL
+                 AND (target_workers <= $2 OR (target_workers > $1 AND target_workers > $2))",
+                &[&desired, &ready, &pool_name, &now],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn autoscale_metrics(
+        &self,
+        pool_names: &[String],
+        now_unix_ms: u64,
+        lookback: Duration,
+    ) -> Result<AutoscaleMetrics, PlacementStoreError> {
+        if pool_names.is_empty()
+            || pool_names.len() > 1_024
+            || lookback.is_zero()
+            || lookback > Duration::from_secs(90 * 24 * 60 * 60)
+            || now_unix_ms == 0
+            || pool_names.iter().any(|pool| !valid_pool_name(pool))
+        {
+            return Err(PlacementStoreError::Invalid(
+                "autoscale metrics query is invalid".to_owned(),
+            ));
+        }
+        let mut unique = pool_names.to_vec();
+        unique.sort();
+        unique.dedup();
+        if unique.len() != pool_names.len() {
+            return Err(PlacementStoreError::Invalid(
+                "autoscale metrics pools contain duplicates".to_owned(),
+            ));
+        }
+        let now = to_i64(now_unix_ms)?;
+        let cutoff = now
+            .checked_sub(duration_millis(lookback)?)
+            .ok_or_else(|| PlacementStoreError::Invalid("metrics cutoff is invalid".to_owned()))?;
+        let heartbeat_cutoff = now
+            .checked_sub(duration_millis(self.config.worker_heartbeat_timeout)?)
+            .ok_or_else(|| PlacementStoreError::Invalid("invalid heartbeat time".to_owned()))?;
+        let client = self.client.lock().await;
+        let pool_rows = client
+            .query(
+                "WITH selected(pool_name) AS (SELECT unnest($1::text[])),
+                 workers AS (
+                    SELECT pool_name,
+                        count(*) FILTER (WHERE state = 'clean') AS clean,
+                        count(*) FILTER (WHERE state = 'leased') AS leased,
+                        count(*) FILTER (WHERE state = 'draining') AS draining
+                    FROM sandboxd_placement.workers
+                    WHERE pool_name = ANY($1) AND heartbeat_unix_ms > $2
+                    AND state IN ('clean', 'leased', 'draining')
+                    GROUP BY pool_name
+                 ),
+                 demand AS (
+                    SELECT pool_name,
+                        count(*) FILTER (WHERE state = 'queued') AS queued,
+                        count(*) FILTER (WHERE state = 'assigned') AS active
+                    FROM sandboxd_placement.requests
+                    WHERE pool_name = ANY($1) AND state IN ('queued', 'assigned')
+                    GROUP BY pool_name
+                 )
+                 SELECT selected.pool_name,
+                    COALESCE(demand.queued, 0)::BIGINT AS queued,
+                    COALESCE(demand.active, 0)::BIGINT AS active,
+                    COALESCE(workers.clean, 0)::BIGINT AS clean,
+                    COALESCE(workers.leased, 0)::BIGINT AS leased,
+                    COALESCE(workers.draining, 0)::BIGINT AS draining,
+                    COALESCE(autoscale_state.desired_workers, 0)::BIGINT AS desired
+                 FROM selected
+                 LEFT JOIN workers USING (pool_name)
+                 LEFT JOIN demand USING (pool_name)
+                 LEFT JOIN sandboxd_placement.autoscale_state USING (pool_name)
+                 ORDER BY selected.pool_name",
+                &[&unique, &heartbeat_cutoff],
+            )
+            .await?;
+        let mut pools = Vec::with_capacity(pool_rows.len());
+        for row in pool_rows {
+            let clean = metric_u64(row.get("clean"))?;
+            let leased = metric_u64(row.get("leased"))?;
+            let queued = metric_u64(row.get("queued"))?;
+            let routable = clean.saturating_add(leased);
+            pools.push(PoolAutoscaleMetrics {
+                pool_name: row.get("pool_name"),
+                queued_assignments: queued,
+                active_leases: metric_u64(row.get("active"))?,
+                clean_warm_slots: clean,
+                draining_workers: metric_u64(row.get("draining"))?,
+                desired_workers: metric_u64(row.get("desired"))?,
+                utilization_ratio: if routable == 0 {
+                    0.0
+                } else {
+                    leased as f64 / routable as f64
+                },
+                saturated: queued > 0 && clean == 0,
+            });
+        }
+        let latency_rows = client
+            .query(
+                "WITH samples AS (
+                    SELECT pool_name, 'queue_residence'::TEXT AS phase,
+                        assigned_unix_ms - created_unix_ms AS duration_ms,
+                        assigned_unix_ms AS sampled_unix_ms
+                    FROM sandboxd_placement.requests
+                    WHERE pool_name = ANY($1) AND assigned_unix_ms >= $2
+                    UNION ALL
+                    SELECT pool_name, capacity_class || '_wait',
+                        assigned_unix_ms - created_unix_ms, assigned_unix_ms
+                    FROM sandboxd_placement.requests
+                    WHERE pool_name = ANY($1) AND assigned_unix_ms >= $2
+                    AND capacity_class IN ('warm', 'cold')
+                    UNION ALL
+                    SELECT pool_name, 'first_output',
+                        first_output_unix_ms - created_unix_ms, first_output_unix_ms
+                    FROM sandboxd_placement.requests
+                    WHERE pool_name = ANY($1) AND first_output_unix_ms >= $2
+                    AND state = 'completed'
+                    UNION ALL
+                    SELECT pool_name, 'execution',
+                        terminal_unix_ms - assigned_unix_ms, terminal_unix_ms
+                    FROM sandboxd_placement.requests
+                    WHERE pool_name = ANY($1) AND terminal_unix_ms >= $2
+                    AND state = 'completed' AND assigned_unix_ms IS NOT NULL
+                    UNION ALL
+                    SELECT pool_name, 'create_to_ready',
+                        ready_unix_ms - requested_unix_ms, ready_unix_ms
+                    FROM sandboxd_placement.pool_activations
+                    WHERE pool_name = ANY($1) AND ready_unix_ms >= $2
+                 )
+                 SELECT pool_name, phase, count(*)::BIGINT AS samples,
+                    percentile_disc(0.50) WITHIN GROUP (ORDER BY duration_ms)::BIGINT AS p50,
+                    percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::BIGINT AS p95,
+                    percentile_disc(0.99) WITHIN GROUP (ORDER BY duration_ms)::BIGINT AS p99
+                 FROM samples
+                 WHERE sampled_unix_ms >= $2 AND duration_ms >= 0
+                 GROUP BY pool_name, phase ORDER BY pool_name, phase",
+                &[&unique, &cutoff],
+            )
+            .await?;
+        let latencies = latency_rows
+            .into_iter()
+            .map(|row| {
+                Ok(PoolLatencyMetrics {
+                    pool_name: row.get("pool_name"),
+                    phase: row.get("phase"),
+                    samples: metric_u64(row.get("samples"))?,
+                    p50_milliseconds: metric_u64(row.get("p50"))?,
+                    p95_milliseconds: metric_u64(row.get("p95"))?,
+                    p99_milliseconds: metric_u64(row.get("p99"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, PlacementStoreError>>()?;
+        Ok(AutoscaleMetrics { pools, latencies })
+    }
+
     pub async fn assign_next(
         &self,
         worker_id: &WorkerId,
@@ -1148,9 +1495,16 @@ impl PostgresPlacementStore {
             .execute(
                 "UPDATE sandboxd_placement.requests SET
                  state = 'assigned', worker_id = $2, assignment_epoch = $3,
-                 lease_expires_unix_ms = $4
+                 lease_expires_unix_ms = $4, assigned_unix_ms = $5,
+                 first_output_unix_ms = NULL
                  WHERE request_id = $1 AND state = 'queued'",
-                &[&request_id, &worker_id.as_str(), &epoch, &lease_expires],
+                &[
+                    &request_id,
+                    &worker_id.as_str(),
+                    &epoch,
+                    &lease_expires,
+                    &now,
+                ],
             )
             .await?;
         let candidate_finish: i64 = candidate.get("fair_finish");
@@ -1289,16 +1643,19 @@ impl PostgresPlacementStore {
         {
             return Err(PlacementStoreError::StaleAssignment);
         }
+        let first_output = response.as_ref().map(|_| now);
         transaction
             .execute(
                 "UPDATE sandboxd_placement.requests SET state = 'completed',
-                 result_digest = $2, terminal_response = $3, terminal_unix_ms = $4
+                 result_digest = $2, terminal_response = $3, terminal_unix_ms = $4,
+                 first_output_unix_ms = $5
                  WHERE request_id = $1",
                 &[
                     &assignment.request_id,
                     &result_digest,
                     &response.as_ref().map(|(encoded, _)| encoded),
                     &now,
+                    &first_output,
                 ],
             )
             .await?;
@@ -1416,7 +1773,8 @@ impl PostgresPlacementStore {
                 transaction
                     .execute(
                         "UPDATE sandboxd_placement.requests SET state = 'queued',
-                         worker_id = NULL, assignment_epoch = NULL, lease_expires_unix_ms = NULL
+                         worker_id = NULL, assignment_epoch = NULL, lease_expires_unix_ms = NULL,
+                         assigned_unix_ms = NULL, first_output_unix_ms = NULL
                          WHERE request_id = $1",
                         &[&previous.request_id],
                     )
@@ -1716,6 +2074,11 @@ fn to_u64(value: i64) -> Result<u64, PlacementStoreError> {
 fn count_u32(value: i64) -> Result<u32, PlacementStoreError> {
     u32::try_from(value)
         .map_err(|_| PlacementStoreError::Invalid("database count exceeds u32".to_owned()))
+}
+
+fn metric_u64(value: i64) -> Result<u64, PlacementStoreError> {
+    u64::try_from(value)
+        .map_err(|_| PlacementStoreError::Invalid("database metric is negative".to_owned()))
 }
 
 fn valid_digest(value: &str) -> bool {

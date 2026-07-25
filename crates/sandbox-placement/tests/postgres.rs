@@ -455,6 +455,48 @@ async fn exercise(url: &str) {
         pool_assignment.identity.sandbox_id,
         pool_bound.work.sandbox_id
     );
+
+    replica_b
+        .record_scale_up("fixed-standard-warm", 3, 423)
+        .await
+        .expect("record activation");
+    replica_b
+        .record_scale_up("fixed-standard-warm", 3, 424)
+        .await
+        .expect("duplicate activation");
+    replica_b
+        .observe_pool_activation("fixed-standard-warm", 3, 2, 425)
+        .await
+        .expect("activation is still pending");
+    replica_b
+        .observe_pool_activation("fixed-standard-warm", 3, 3, 430)
+        .await
+        .expect("activation becomes ready");
+    let metrics = replica_b
+        .autoscale_metrics(
+            &[
+                "fixed-standard-warm".to_owned(),
+                "other-reviewed-pool".to_owned(),
+            ],
+            500,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("durable autoscale metrics");
+    assert_eq!(metrics.pools.len(), 2);
+    assert!(metrics
+        .latencies
+        .iter()
+        .any(|metric| metric.phase == "queue_residence"));
+    let activation = metrics
+        .latencies
+        .iter()
+        .find(|metric| {
+            metric.pool_name == "fixed-standard-warm" && metric.phase == "create_to_ready"
+        })
+        .expect("activation quantiles");
+    assert_eq!(activation.samples, 1);
+    assert_eq!(activation.p99_milliseconds, 7);
 }
 
 async fn assert_terminal_audit(url: &str, assignment: &Assignment, result_digest: &str) {

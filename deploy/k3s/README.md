@@ -328,6 +328,26 @@ identity. Apply a site-specific egress policy allowing only the Kubernetes API
 and PostgreSQL endpoints; those addresses cannot be expressed portably in the
 checked-in manifest.
 
+`--maximum-total-workers` is required and must equal the smaller worker budget
+allocated by cluster capacity policy and the namespace quota. The controller
+uses that reviewed number for immediate backpressure instead of creating
+permanently Pending Pods. It deliberately has no permission to read
+ResourceQuota or node capacity. Sites that require automatic reaction to quota
+changes must add read-only `get/list/watch` access for ResourceQuota and a
+separate reviewed capacity source; the least-privilege profile keeps the budget
+explicit and grants neither permission.
+
+The autoscaler exposes Prometheus text metrics on port `9090`. The checked-in
+NetworkPolicy admits only same-namespace Pods labeled
+`runtrue.io/metrics-scraper=true`; adapt the peer selector when the monitoring
+stack runs in a dedicated namespace. Gauges come directly from durable
+placement state. P50/P95/P99 samples cover cold wait, warm wait,
+create-to-ready, queue residence, execution, and first output over a bounded
+lookback. The current work protocol returns output only with its terminal
+response, so `first_output` records that first observable response; a future
+streaming worker protocol can persist an earlier timestamp without changing
+the metric contract.
+
 Scale-down is StatefulSet-ordinal-safe. The controller examines the exact
 highest ordinals Kubernetes will remove, atomically changes only clean workers
 to `draining`, and then patches the replica count with the observed resource

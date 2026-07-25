@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod controller;
+mod metrics;
 
 use clap::Parser as _;
 

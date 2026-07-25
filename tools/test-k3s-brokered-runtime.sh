@@ -39,7 +39,7 @@ printf %s "$work_order_key" >"$temporary/key"
 
 cat >"$temporary/policy.json" <<EOF
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "credentials": {
     "tenant-key": {
       "token_sha256": "$tenant_digest",
@@ -50,7 +50,16 @@ cat >"$temporary/policy.json" <<EOF
       "pools": ["fixed-standard-warm", "reviewed-cold-fallback"],
       "topologies": ["fixed-v1"],
       "resource_shapes": ["standard-v1", "cold-standard-v1"],
-      "compatibility_cohorts": ["runsc-20260714-fixed"]
+      "compatibility_cohorts": ["runsc-20260714-fixed"],
+      "service_levels": {
+        "fixed-standard-warm": {
+          "mode": "retained_warm",
+          "clean_workers": 2
+        },
+        "reviewed-cold-fallback": {
+          "mode": "scale_to_zero"
+        }
+      }
     }
   }
 }

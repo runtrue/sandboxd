@@ -1729,6 +1729,7 @@ dependencies = [
 name = "runtrue-sandbox-autoscaler"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "axum",
  "clap",
  "k8s-openapi",
  "kube",
