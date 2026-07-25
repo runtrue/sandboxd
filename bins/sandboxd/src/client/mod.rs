@@ -6,14 +6,27 @@ use runtrue_sandbox_core::{SubjectId, TenantId, WorkspaceId};
 use runtrue_sandbox_oci::{io_error, SandboxError, TopologyLock};
 use std::{fs, os::unix::net::UnixStream, path::Path};
 
+const OPERATOR_TENANT_ENV: &str = "RUNTRUE_SANDBOXD_OPERATOR_TENANT_ID";
+const OPERATOR_WORKSPACE_ENV: &str = "RUNTRUE_SANDBOXD_OPERATOR_WORKSPACE_ID";
+const OPERATOR_SUBJECT_ENV: &str = "RUNTRUE_SANDBOXD_OPERATOR_SUBJECT_ID";
+
 pub(crate) fn send(socket: &Path, operation: Operation) -> Result<(), SandboxError> {
+    let operator_value = |name: &str, default: &str| {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_owned())
+            .trim()
+            .to_owned()
+    };
     let request = Request {
         schema_version: PROTOCOL_VERSION,
         request_id: format!("client-{}", std::process::id()),
         authorization: Some(RequestAuthorization::Operator {
-            tenant_id: TenantId::parse("local").expect("static tenant identity"),
-            workspace_id: WorkspaceId::parse("local").expect("static workspace identity"),
-            subject_id: SubjectId::parse("local-root").expect("static subject identity"),
+            tenant_id: TenantId::parse(operator_value(OPERATOR_TENANT_ENV, "local"))
+                .map_err(|error| SandboxError::Runtime(error.to_string()))?,
+            workspace_id: WorkspaceId::parse(operator_value(OPERATOR_WORKSPACE_ENV, "local"))
+                .map_err(|error| SandboxError::Runtime(error.to_string()))?,
+            subject_id: SubjectId::parse(operator_value(OPERATOR_SUBJECT_ENV, "local-root"))
+                .map_err(|error| SandboxError::Runtime(error.to_string()))?,
         }),
         operation,
     };

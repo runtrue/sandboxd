@@ -95,7 +95,7 @@ pub fn restore_admitted(
                 volume_id.clone(),
                 (
                     VolumeSnapshot {
-                        schema_version: runtrue_sandbox_volume::VOLUME_SNAPSHOT_VERSION,
+                        schema_version: descriptor.schema_version,
                         provider_id: descriptor.provider_id.clone(),
                         volume_id: volume_id.clone(),
                         persistence_class: descriptor.persistence_class,
@@ -221,21 +221,12 @@ pub fn restore_admitted(
         Err(error) => cleanup_after_restore_error(&mut resources, error)?,
     }
     let deadline = Instant::now() + timeout;
-    let selected_services = metadata
-        .service_states
-        .iter()
-        .filter(|(service, state)| {
-            *service == &metadata.root_service || matches!(state.as_str(), "running" | "paused")
-        })
-        .map(|(service, _)| service.clone())
-        .collect::<BTreeSet<_>>();
     if let Err(error) = restore_services(
         &mut resources,
         lock,
         project,
         deadline,
         &restored.image_path,
-        &selected_services,
     ) {
         let cleanup = resources.cleanup();
         return match cleanup {
@@ -470,14 +461,10 @@ fn restore_services(
     project: &str,
     deadline: Instant,
     image_path: &Path,
-    selected_services: &BTreeSet<String>,
 ) -> Result<(), SandboxError> {
     let guest_profile = super::reviewed_guest_profile(lock)?;
     let sandbox_runtime_id = resources.sandbox_runtime_id.clone();
     for service_name in &lock.startup_order {
-        if !selected_services.contains(service_name) {
-            continue;
-        }
         let service = &lock.services[service_name];
         let cgroup = match resources.cgroups.as_mut() {
             Some(cgroups) => cgroups.create_service(service_name, &lock.policy)?,
@@ -543,10 +530,14 @@ fn restore_services(
             )?;
         }
     }
+    // A gVisor checkpoint contains the complete container set, including
+    // containers whose init process had already exited. Restore does not start
+    // the sandbox until every recorded container has supplied its replacement
+    // OCI spec and filesystem handles.
+    resources
+        .runsc
+        .wait_restore_complete(&sandbox_runtime_id, deadline)?;
     for service_name in &lock.startup_order {
-        if !selected_services.contains(service_name) {
-            continue;
-        }
         resources.runsc.wait_restored(
             resources
                 .processes

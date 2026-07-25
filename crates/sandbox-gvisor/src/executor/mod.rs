@@ -746,9 +746,12 @@ impl Resources {
                         path: writable.rootfs().to_owned(),
                         read_only: false,
                         writable: Some(writable),
-                        restore_diff: writable_diffs
-                            .and_then(|diffs| diffs.get(service_name))
-                            .cloned(),
+                        // runsc restores its writable root overlay from the
+                        // checkpoint. The exported diff is validated above as
+                        // a durable artifact, but supplying it through the
+                        // rootfs-upper annotation would change the OCI spec
+                        // and is unsupported by runsc checkpoint restore.
+                        restore_diff: None,
                     }
                 }
             };

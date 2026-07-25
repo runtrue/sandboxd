@@ -41,6 +41,8 @@ pub struct VolumeSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeSnapshotDescriptor {
+    #[serde(default = "legacy_volume_snapshot_schema_version")]
+    pub schema_version: u32,
     pub provider_id: String,
     pub persistence_class: VolumePersistenceClass,
     pub portability: SnapshotPortability,
@@ -50,6 +52,11 @@ pub struct VolumeSnapshotDescriptor {
 
 impl VolumeSnapshotDescriptor {
     pub(crate) fn validate(&self) -> Result<(), CoreError> {
+        if self.schema_version == 0 {
+            return Err(CoreError::InvalidSnapshot(
+                "volume snapshot schema version is invalid".to_owned(),
+            ));
+        }
         if !matches!(
             self.persistence_class,
             VolumePersistenceClass::Ephemeral | VolumePersistenceClass::Persistent
@@ -84,6 +91,10 @@ impl VolumeSnapshotDescriptor {
         }
         Ok(())
     }
+}
+
+const fn legacy_volume_snapshot_schema_version() -> u32 {
+    1
 }
 
 impl VolumeSpec {

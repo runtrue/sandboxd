@@ -277,6 +277,7 @@ impl SnapshotStaging {
             path,
             media_type: snapshot.format,
             volume: Some(StagedVolumeMetadata {
+                schema_version: snapshot.schema_version,
                 volume_id: snapshot.volume_id,
                 provider_id: snapshot.provider_id,
                 persistence_class: snapshot.persistence_class,

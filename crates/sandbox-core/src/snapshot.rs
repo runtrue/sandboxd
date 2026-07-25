@@ -401,6 +401,7 @@ mod tests {
         manifest.volumes.insert(
             VolumeId::parse("database").expect("volume"),
             VolumeSnapshotDescriptor {
+                schema_version: 1,
                 provider_id: "local-loopback-v1".to_owned(),
                 persistence_class: crate::VolumePersistenceClass::Persistent,
                 portability: SnapshotPortability::CrossWorkerSameBackend,
@@ -427,6 +428,7 @@ mod tests {
         manifest.volumes.insert(
             VolumeId::parse("database").expect("volume"),
             VolumeSnapshotDescriptor {
+                schema_version: 1,
                 provider_id: "worker-local-v1".to_owned(),
                 persistence_class: crate::VolumePersistenceClass::Persistent,
                 portability: SnapshotPortability::SameWorker,

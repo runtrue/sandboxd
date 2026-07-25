@@ -115,6 +115,7 @@ pub struct StagedSnapshotObject {
 
 #[derive(Debug, Clone)]
 pub struct StagedVolumeMetadata {
+    pub schema_version: u32,
     pub volume_id: VolumeId,
     pub provider_id: String,
     pub persistence_class: VolumePersistenceClass,
