@@ -41,6 +41,7 @@ cleanup() {
   fi
   rm -rf "$temporary"
 }
+trap 'printf "autoscaling conformance failed at line %s\n" "$LINENO" >&2' ERR
 trap cleanup EXIT
 
 install -m 0600 deploy/k3s/worker-pools.json "$temporary/catalog.json"
@@ -228,6 +229,131 @@ done
 test "$(kubectl get statefulset -n "$namespace" sandboxd-fixed-standard-warm \
   -o jsonpath='{.spec.replicas}')" = 2
 
+userspace_sandbox="userspace-ingress-$(date +%s)"
+jq -n \
+  --arg sandbox "$userspace_sandbox" \
+  --slurpfile topology deploy/k3s/conformance-userspace-egress.lock.json \
+  '{
+    workspace_id: "workspace-a",
+    sandbox_id: $sandbox,
+    deadline_ms: 120000,
+    pool_name: "userspace-ingress",
+    topology: "userspace-v1",
+    resource_shape: "standard-v1",
+    compatibility_cohort: "runsc-20260714-fixed",
+    operation: {
+      kind: "create",
+      parameters: {
+        topology: $topology[0],
+        sandbox: $sandbox,
+        timeout_ms: 30000
+      }
+    }
+  }' >"$temporary/userspace-request.json"
+status=$(curl -sS -o "$temporary/userspace-submitted.json" -w '%{http_code}' \
+  -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+  -H "Idempotency-Key: userspace-ingress-e2e" \
+  -H "Content-Type: application/json" \
+  --data-binary @"$temporary/userspace-request.json" \
+  "http://127.0.0.1:${gateway_port}/v1/placements")
+test "$status" = 202
+
+userspace_result=
+for _ in $(seq 1 240); do
+  userspace_result=$(curl -fsS \
+    -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+    "http://127.0.0.1:${gateway_port}/v1/placements/userspace-ingress-e2e")
+  if [[ "$(jq -r .state <<<"$userspace_result")" = serving ]]; then
+    break
+  fi
+  sleep 1
+done
+jq -e '
+  .state == "serving"
+  and .pool_name == "userspace-ingress"
+  and (.worker_id | startswith("worker-"))
+  and .response.ok
+' >/dev/null <<<"$userspace_result"
+test "$(kubectl get statefulset -n "$namespace" sandboxd-userspace-ingress \
+  -o jsonpath='{.spec.replicas}')" = 1
+
+userspace_pod=$(kubectl get pod -n "$namespace" \
+  -l runtrue.io/worker-pool=userspace-ingress \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl get pod -n "$namespace" "$userspace_pod" -o json |
+  jq -e '
+    .spec.hostUsers == false
+    and .spec.hostNetwork != true
+    and .spec.automountServiceAccountToken == false
+    and (.spec.containers[0].args | index("--network-mode")) != null
+    and (.spec.containers[0].args | index("userspace")) != null
+    and .spec.containers[0].securityContext.privileged == false
+    and (.spec.containers[0].securityContext.capabilities.add | index("NET_ADMIN")) == null
+    and (.spec.containers[0].securityContext.capabilities.add | index("NET_RAW")) == null
+    and .spec.initContainers[0].securityContext.capabilities.drop == ["ALL"]
+  ' >/dev/null
+
+ingress_started_ns=$(date +%s%N)
+ingress_status=
+for _ in $(seq 1 60); do
+  ingress_status=$(curl -sS -o "$temporary/userspace-ingress.json" -w '%{http_code}' \
+    -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+    "http://127.0.0.1:${gateway_port}/v1/placements/userspace-ingress-e2e/ingress/server/8080/ready?full=1")
+  if [[ "$ingress_status" = 200 ]]; then
+    break
+  fi
+  sleep 0.25
+done
+test "$ingress_status" = 200
+ingress_ms=$((($(date +%s%N) - ingress_started_ns) / 1000000))
+jq -e '.from == "nested-server" and .ok == true' \
+  "$temporary/userspace-ingress.json" >/dev/null
+bulk_started_ns=$(date +%s%N)
+bulk_status=
+for _ in $(seq 1 60); do
+  bulk_status=$(curl -sS -o "$temporary/userspace-ingress-bulk" -w '%{http_code}' \
+    -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+    "http://127.0.0.1:${gateway_port}/v1/placements/userspace-ingress-e2e/ingress/server/8080/bulk")
+  if [[ "$bulk_status" = 200 ]]; then
+    break
+  fi
+  sleep 0.25
+done
+test "$bulk_status" = 200
+bulk_ms=$((($(date +%s%N) - bulk_started_ns) / 1000000))
+test "$(wc -c <"$temporary/userspace-ingress-bulk")" = 131072
+undeclared_status=$(curl -sS -o "$temporary/userspace-undeclared.json" -w '%{http_code}' \
+  -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+  "http://127.0.0.1:${gateway_port}/v1/placements/userspace-ingress-e2e/ingress/client/8080")
+test "$undeclared_status" = 503
+
+lease_before=$(kubectl exec -n "$namespace" deployment/sandbox-gateway -c postgres -- \
+  env PGPASSWORD=sandboxd psql -h 127.0.0.1 -U sandboxd \
+  -d sandboxd_placement_test -Atc \
+  "SELECT lease_expires_unix_ms FROM sandboxd_placement.requests WHERE tenant_id = 'tenant-a' AND idempotency_key = 'userspace-ingress-e2e'")
+sleep 2
+lease_after=$(kubectl exec -n "$namespace" deployment/sandbox-gateway -c postgres -- \
+  env PGPASSWORD=sandboxd psql -h 127.0.0.1 -U sandboxd \
+  -d sandboxd_placement_test -Atc \
+  "SELECT lease_expires_unix_ms FROM sandboxd_placement.requests WHERE tenant_id = 'tenant-a' AND idempotency_key = 'userspace-ingress-e2e'")
+test "$lease_after" -gt "$lease_before"
+curl -fsS \
+  -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+  "http://127.0.0.1:${gateway_port}/v1/placements/userspace-ingress-e2e/ingress/server/8080/ready" \
+  >/dev/null
+
+cancel_status=$(curl -sS -o "$temporary/userspace-cancelled.json" -w '%{http_code}' \
+  -X DELETE \
+  -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+  "http://127.0.0.1:${gateway_port}/v1/placements/userspace-ingress-e2e")
+test "$cancel_status" = 200
+jq -e '.state == "cancelled"' "$temporary/userspace-cancelled.json" >/dev/null
+withdrawn_status=$(curl -sS -o "$temporary/userspace-withdrawn.json" -w '%{http_code}' \
+  -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+  "http://127.0.0.1:${gateway_port}/v1/placements/userspace-ingress-e2e/ingress/server/8080/ready")
+test "$withdrawn_status" = 503
+
 curl -fsS "http://127.0.0.1:${active_metrics_port}/metrics" \
   >"$temporary/autoscaler-metrics.txt"
 grep -F 'phase="cold_wait",quantile="0.99"' \
@@ -316,4 +442,6 @@ kubectl get pod -n "$namespace" -l runtrue.io/autoscaled-worker=true -o json |
     )
   ' >/dev/null
 
+printf 'userspace_ingress_gateway_ms=%s\n' "$ingress_ms"
+printf 'userspace_ingress_gateway_bulk_128k_ms=%s\n' "$bulk_ms"
 echo "$result"

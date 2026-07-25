@@ -180,9 +180,11 @@ request revalidates the durable lease and carries a fresh signed inspect order
 to the selected worker broker. The broker resolves only sandboxd's current
 loopback endpoint and injects its bearer locally; the tenant cannot choose a
 worker address or host port. The adapter is bounded to 16 KiB headers and
-1 MiB request/response bodies. Successful create/restore placements enter
-`serving`; authenticated worker heartbeats renew only their current unexpired
-lease. Cancel, quarantine, lease expiry, and reassignment withdraw the route.
+1 MiB request/response bodies. The combined autoscaling suite retains gateway
+latency and 128 KiB transfer measurements alongside the direct-worker
+measurements above. Successful create/restore placements enter `serving`;
+authenticated worker heartbeats renew only their current unexpired lease.
+Cancel, quarantine, lease expiry, and reassignment withdraw the route.
 
 [`tools/test-k3s-resource-limits.sh`](../../tools/test-k3s-resource-limits.sh)
 separately drives CPU saturation, fork exhaustion, bounded temporary-storage
@@ -347,12 +349,18 @@ operator-reviewed maximum. The controller integration and drain-first
 StatefulSet reconciliation consume this catalog; the static Deployment below
 remains the single-worker conformance fixture.
 
-`sandboxd-worker-pools.yaml` pre-creates the two reviewed StatefulSets at zero
-replicas. Worker Pods still have `automountServiceAccountToken: false`; they
-carry neither a Kubernetes credential nor a shared worker-registration secret.
-The autoscaler observes only Ready Pods owned by the exact reviewed
-StatefulSet, derives `worker-<pod-uid>`, and registers the catalog-fixed
-topology, shape, cohort, broker address, and resource ceilings in PostgreSQL.
+`sandboxd-worker-pools.yaml` pre-creates three reviewed StatefulSets at zero
+replicas: retained-warm loopback, scale-to-zero userspace ingress, and reviewed
+cold fallback. Worker Pods still have `automountServiceAccountToken: false`;
+they carry neither a Kubernetes credential nor a shared worker-registration
+secret. The autoscaler registers only Ready Pods owned by the exact reviewed
+StatefulSet, derives `worker-<pod-uid>`, and records the catalog-fixed topology,
+shape, cohort, broker address, and resource ceilings in PostgreSQL.
+It continues heartbeat renewal for an already registered worker while
+sandboxd's container is Running; readiness intentionally becomes false while
+that worker is occupied.
+Only the userspace pool receives DNS and TCP/443 Pod egress; none of the pools
+has a Kubernetes Service, Ingress, host port, or host-network access.
 
 `sandbox-autoscaler.yaml` is the only component in this path with a Kubernetes
 service-account token. Its namespaced Role permits exactly:

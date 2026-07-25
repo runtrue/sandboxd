@@ -38,6 +38,25 @@ items:
           ports:
             - protocol: TCP
               port: 8081
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: sandboxd-userspace-ingress-egress
+      namespace: sandboxd-system
+    spec:
+      podSelector:
+        matchLabels:
+          runtrue.io/worker-pool: userspace-ingress
+      policyTypes: [Egress]
+      egress:
+        - ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+        - ports:
+            - protocol: TCP
+              port: 443
   - apiVersion: apps/v1
     kind: StatefulSet
     metadata:
@@ -270,6 +289,155 @@ items:
               secret:
                 secretName: sandbox-work-order
                 defaultMode: 0440
+  - apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: sandboxd-userspace-ingress
+      namespace: sandboxd-system
+      labels:
+        runtrue.io/worker-pool: userspace-ingress
+    spec:
+      <<: *worker_stateful_set
+      selector:
+        matchLabels:
+          runtrue.io/worker-pool: userspace-ingress
+      template:
+        metadata:
+          labels:
+            runtrue.io/autoscaled-worker: "true"
+            runtrue.io/worker-pool: userspace-ingress
+            runtrue.io/resource-shape: standard-v1
+            runtrue.io/network-tier: userspace-ingress
+            runtrue.io/worker-broker: "true"
+        spec:
+          <<: *fixed_worker_pod
+          dnsPolicy: Default
+          containers:
+            - name: sandboxd
+              restartPolicy: Never
+              image: sandboxd-fixed-runtime:local
+              imagePullPolicy: Never
+              command: [/usr/local/bin/runtrue-sandboxd]
+              args:
+                - serve
+                - --worker-pod-uid-env
+                - POD_UID
+                - --resource-shape
+                - standard-v1
+                - --sandbox-cpu-millis
+                - "1000"
+                - --sandbox-memory-bytes
+                - "1073741824"
+                - --sandbox-pids
+                - "256"
+                - --sandbox-ephemeral-storage-bytes
+                - "2147483648"
+                - --maximum-services
+                - "8"
+                - --socket
+                - /run/runtrue-sandboxd-operator/control.sock
+                - --workload-socket
+                - /run/runtrue-sandboxd/workload.sock
+                - --broker-uid
+                - "65533"
+                - --broker-gid
+                - "65533"
+                - --work-order-key
+                - /run/secrets/work-order/key
+                - --state-root
+                - /var/lib/runtrue-sandboxd/state
+                - --image-store
+                - /var/lib/runtrue-sandboxd/images
+                - --fixed-rootfs
+                - /opt/runtrue-sandboxd/fixed-rootfs
+                - --fixed-topology-lock
+                - /opt/runtrue-sandboxd/fixed-runtime.lock.json
+                - --fixed-rootfs-digest
+                - sha256:c73e49867e5b68681c2222e1e7b60aca9218d5a83ded507226f89438cea40db1
+                - --fixed-rootfs-entries
+                - "5621"
+                - --fixed-rootfs-bytes
+                - "118293769"
+                - --network-mode
+                - userspace
+                - --cgroup-mode
+                - external
+                - --runsc
+                - /usr/local/bin/runsc
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+              securityContext:
+                privileged: false
+                allowPrivilegeEscalation: true
+                readOnlyRootFilesystem: true
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  drop: [ALL]
+                  add: [SETGID, SETUID, SYS_ADMIN, SYS_CHROOT]
+                seccompProfile:
+                  type: Unconfined
+                appArmorProfile:
+                  type: Unconfined
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                  ephemeral-storage: 128Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+                  ephemeral-storage: 4Gi
+              readinessProbe:
+                exec:
+                  command:
+                    - /usr/local/bin/runtrue-sandboxd
+                    - ready
+                    - --socket
+                    - /run/runtrue-sandboxd-operator/control.sock
+                periodSeconds: 5
+              startupProbe:
+                exec:
+                  command:
+                    - /usr/local/bin/runtrue-sandboxd
+                    - ping
+                    - --socket
+                    - /run/runtrue-sandboxd-operator/control.sock
+                periodSeconds: 2
+                failureThreshold: 90
+              livenessProbe:
+                exec:
+                  command:
+                    - /usr/local/bin/runtrue-sandboxd
+                    - ping
+                    - --socket
+                    - /run/runtrue-sandboxd-operator/control.sock
+                initialDelaySeconds: 15
+                periodSeconds: 10
+              lifecycle:
+                preStop:
+                  exec:
+                    command:
+                      - /usr/local/bin/runtrue-sandboxd
+                      - shutdown
+                      - --socket
+                      - /run/runtrue-sandboxd-operator/control.sock
+              volumeMounts:
+                - name: sandboxd-tmp
+                  mountPath: /tmp
+                - name: sandboxd-runtime
+                  mountPath: /run/runtrue-sandboxd
+                - name: sandboxd-operator-runtime
+                  mountPath: /run/runtrue-sandboxd-operator
+                - name: sandboxd-state
+                  mountPath: /var/lib/runtrue-sandboxd
+                - name: work-order-key
+                  mountPath: /run/secrets/work-order/key
+                  subPath: key
+                  readOnly: true
   - apiVersion: apps/v1
     kind: StatefulSet
     metadata:

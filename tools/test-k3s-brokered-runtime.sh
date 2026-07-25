@@ -47,14 +47,17 @@ cat >"$temporary/policy.json" <<EOF
       "subject_id": "integration-client",
       "workspaces": ["workspace-a"],
       "maximum_deadline_ms": 120000,
-      "pools": ["fixed-standard-warm", "reviewed-cold-fallback"],
-      "topologies": ["fixed-v1"],
+      "pools": ["fixed-standard-warm", "userspace-ingress", "reviewed-cold-fallback"],
+      "topologies": ["fixed-v1", "userspace-v1"],
       "resource_shapes": ["standard-v1", "cold-standard-v1"],
       "compatibility_cohorts": ["runsc-20260714-fixed"],
       "service_levels": {
         "fixed-standard-warm": {
           "mode": "retained_warm",
           "clean_workers": 2
+        },
+        "userspace-ingress": {
+          "mode": "scale_to_zero"
         },
         "reviewed-cold-fallback": {
           "mode": "scale_to_zero"

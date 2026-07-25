@@ -40,6 +40,44 @@
       "cold_fallback": false
     },
     {
+      "name": "userspace-ingress",
+      "kubernetes_stateful_set": "sandboxd-userspace-ingress",
+      "placement_topology": "userspace-v1",
+      "resource_ceilings": {
+        "allowed_guest_profiles": [{"name": "strict", "version": 1}],
+        "maximum_services": 8,
+        "maximum_timeout_ms": 30000,
+        "memory_bytes_per_service": 1073741824,
+        "cpu_per_service_millis": 1000,
+        "pids_per_service": 256,
+        "tmpfs_bytes": 67108864,
+        "writable_root_bytes_per_service": 67108864,
+        "maximum_volumes": 8,
+        "maximum_volume_bytes": 536870912,
+        "maximum_output_bytes": 1048576
+      },
+      "key": {
+        "attested_root_cohort": "fixed-rootset-20260724",
+        "resource_shape": "standard-v1",
+        "guest_profile": {
+          "name": "strict",
+          "version": 1
+        },
+        "runtime_compatibility_cohort": "runsc-20260714-fixed",
+        "network_tier": "userspace_ingress",
+        "storage_tier": "ephemeral"
+      },
+      "policy": {
+        "minimum_workers": 0,
+        "maximum_workers": 20,
+        "warm_headroom": 0,
+        "maximum_scale_up_per_reconcile": 2,
+        "maximum_scale_down_per_reconcile": 2,
+        "idle_before_scale_down_ms": 60000
+      },
+      "cold_fallback": false
+    },
+    {
       "name": "reviewed-cold-fallback",
       "kubernetes_stateful_set": "sandboxd-reviewed-cold",
       "placement_topology": "fixed-v1",
