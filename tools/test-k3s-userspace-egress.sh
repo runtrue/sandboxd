@@ -15,14 +15,19 @@ else
   privilege=(sudo -n)
 fi
 
-for command in ip jq kubectl nft pgrep sha256sum; do
+for command in curl ip jq kubectl nft pgrep python3 sha256sum; do
   command -v "$command" >/dev/null
 done
 test -s "$lock"
 
 pod=
 active_sandbox=false
+port_forward_pid=
 cleanup() {
+  if [[ -n $port_forward_pid ]]; then
+    kill "$port_forward_pid" >/dev/null 2>&1 || true
+    wait "$port_forward_pid" >/dev/null 2>&1 || true
+  fi
   if [[ -n $pod ]] && [[ $active_sandbox == true ]]; then
     kubectl exec -n "$namespace" "$pod" -- \
       runtrue-sandboxd stop \
@@ -104,6 +109,45 @@ compare_host_network_state() {
   done
 }
 
+stop_port_forward() {
+  if [[ -n $port_forward_pid ]]; then
+    kill "$port_forward_pid" >/dev/null 2>&1 || true
+    wait "$port_forward_pid" >/dev/null 2>&1 || true
+    port_forward_pid=
+  fi
+}
+
+start_port_forward() {
+  local destination_port=$1
+  stop_port_forward
+  local_port=$(
+    python3 -c '
+import socket
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+print(listener.getsockname()[1])
+listener.close()
+'
+  )
+  port_forward_log="${state_directory}/port-forward-${local_port}.log"
+  kubectl port-forward -n "$namespace" "pod/${pod}" \
+    --address 127.0.0.1 "${local_port}:${destination_port}" \
+    >"$port_forward_log" 2>&1 &
+  port_forward_pid=$!
+  for _ in $(seq 1 80); do
+    if grep -Fq "Forwarding from 127.0.0.1:${local_port}" "$port_forward_log"; then
+      return 0
+    fi
+    if ! kill -0 "$port_forward_pid" >/dev/null 2>&1; then
+      cat "$port_forward_log" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  cat "$port_forward_log" >&2
+  return 1
+}
+
 kubectl apply --dry-run=server \
   -f deploy/k3s/sandboxd-userspace-runtime.yaml >/dev/null
 kubectl delete deployment -n "$namespace" "$worker_controller" \
@@ -128,6 +172,17 @@ jq -e '
   and (.spec.containers[0].args | index("--network-mode")) != null
   and (.spec.containers[0].args | index("userspace")) != null
 ' >/dev/null <<<"$pod_json"
+
+capabilities=$(kubectl exec -n "$namespace" "$pod" -- \
+  runtrue-sandboxd ping --socket "$socket")
+jq -e '
+  .ok == true
+  and .result.backends[0].capabilities.network.http_connect_proxy == true
+  and .result.backends[0].capabilities.network.reverse_http_ingress == true
+  and .result.backends[0].capabilities.network.restricted_tcp == false
+  and .result.backends[0].capabilities.network.transparent_tcp == false
+  and .result.backends[0].capabilities.network.udp == false
+' >/dev/null <<<"$capabilities"
 
 if kubectl get service -n "$namespace" "$worker_controller" >/dev/null 2>&1; then
   echo "userspace worker must not have a Kubernetes Service" >&2
@@ -163,6 +218,9 @@ jq -e '
   .ok == true
   and .result.state == "running"
   and .result.running_services == 2
+  and (.result.ingress_endpoints | length) == 1
+  and .result.ingress_endpoints[0].service == "server"
+  and .result.ingress_endpoints[0].container_port == 8080
 ' >/dev/null <<<"$create"
 runtime_project=$(jq -r '.result.runtime_project' <<<"$create")
 active_sandbox=true
@@ -197,6 +255,61 @@ jq -e '
   and (.result.stdout | contains("\"unapproved_domain_denied\": true"))
 ' >/dev/null <<<"$logs"
 
+host_endpoint=$(jq -r '.result.ingress_endpoints[0].host_endpoint' <<<"$create")
+host_port=${host_endpoint##*:}
+ingress_token=$(jq -r '.result.ingress_endpoints[0].bearer_token' <<<"$create")
+start_port_forward "$host_port"
+
+unauthorized_status=$(
+  curl --silent --show-error --max-time 5 \
+    --output /dev/null --write-out '%{http_code}' \
+    "http://127.0.0.1:${local_port}/ready"
+)
+test "$unauthorized_status" = 401
+
+ingress_started_ns=$(date +%s%N)
+ingress_body=$(
+  curl --silent --show-error --max-time 5 \
+    --header "Authorization: Bearer ${ingress_token}" \
+    "http://127.0.0.1:${local_port}/ready"
+)
+ingress_completed_ns=$(date +%s%N)
+jq -e '.from == "nested-server" and .ok == true' >/dev/null <<<"$ingress_body"
+
+bulk_measurement=$(
+  curl --silent --show-error --max-time 5 \
+    --header "Authorization: Bearer ${ingress_token}" \
+    --output /dev/null \
+    --write-out '%{size_download} %{time_total}' \
+    "http://127.0.0.1:${local_port}/bulk"
+)
+test "${bulk_measurement%% *}" = 131072
+
+kubectl exec -n "$namespace" "$pod" -- \
+  runtrue-sandboxd pause \
+  --socket "$socket" \
+  --sandbox "$sandbox" >/dev/null
+paused_status=$(
+  curl --silent --show-error --max-time 5 \
+    --header "Authorization: Bearer ${ingress_token}" \
+    --output /dev/null --write-out '%{http_code}' \
+    "http://127.0.0.1:${local_port}/ready"
+)
+test "$paused_status" = 503
+kubectl exec -n "$namespace" "$pod" -- \
+  runtrue-sandboxd resume \
+  --socket "$socket" \
+  --sandbox "$sandbox" >/dev/null
+start_port_forward "$host_port"
+resumed_body=$(
+  curl --silent --show-error --max-time 5 \
+    --header "Authorization: Bearer ${ingress_token}" \
+    "http://127.0.0.1:${local_port}/ready"
+)
+jq -e '.from == "nested-server" and .ok == true' >/dev/null <<<"$resumed_body"
+
+stop_port_forward
+
 capture_host_network_state "$after"
 compare_host_network_state "$before" "$after"
 
@@ -217,12 +330,23 @@ guest_https_ms=$(
     tail -n1 |
     jq -r '.approved_https_ms'
 )
+direct_bulk_ms=$(
+  jq -r '.result.stdout' <<<"$logs" |
+    sed -n '/^{/p' |
+    tail -n1 |
+    jq -r '.direct_bulk_ms'
+)
+ingress_ms=$(((ingress_completed_ns - ingress_started_ns) / 1000000))
+ingress_bulk_seconds=${bulk_measurement#* }
 printf 'userspace_egress_total_ms=%s\n' "$elapsed_ms"
 printf 'userspace_egress_guest_https_ms=%s\n' "$guest_https_ms"
+printf 'userspace_ingress_ms=%s\n' "$ingress_ms"
+printf 'userspace_direct_bulk_ms=%s\n' "$direct_bulk_ms"
+printf 'userspace_ingress_bulk_seconds=%s\n' "$ingress_bulk_seconds"
 printf 'host_network_state_sha256=%s\n' "$(
   sha256sum "${after}.links.json" "${after}.netns" \
     "${after}.nft.json" "${after}.sysctls" |
     sha256sum |
     cut -d' ' -f1
 )"
-echo "USERSPACE_EGRESS_PASS: approved HTTPS traversed the policy socket; direct, raw, private, and unapproved paths were denied without host network mutation."
+echo "USERSPACE_NETWORK_PASS: approved HTTPS and declared reverse ingress passed; stale, direct, raw, private, and unapproved paths were denied without host network mutation."

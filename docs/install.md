@@ -48,7 +48,7 @@ build.
 
 Run the container as UID 0 with `privileged: false`. The worker needs a bounded
 set of kernel capabilities selected by feature. The recommended fixed and
-userspace-egress profiles use only `SETGID`, `SETUID`, `SYS_CHROOT`, and
+userspace-network profiles use only `SETGID`, `SETUID`, `SYS_CHROOT`, and
 `SYS_ADMIN` inside a Kubernetes-created user namespace:
 
 ```yaml
@@ -60,11 +60,11 @@ securityContext:
     add: [SETGID, SETUID, SYS_ADMIN, SYS_CHROOT]
 ```
 
-The userspace-egress profile adds no Linux capability and no host networking
+The userspace-network profile adds no Linux capability and no host networking
 setting. It uses `--network-mode userspace`, runsc `network=none`, and a single
 read-only Unix-socket directory. It supports policy-approved HTTP CONNECT;
-direct guest DNS, raw TCP/UDP, transparent networking, and ingress remain
-disabled.
+declared reverse HTTP ingress uses separate epoch-scoped tunnel credentials.
+Direct guest DNS, raw TCP/UDP, and transparent networking remain disabled.
 
 The following larger set is only for the host-integrated compatibility
 profile that exercises lifecycle, kernel networking, and writable-root
@@ -94,7 +94,7 @@ securityContext:
 `SYS_ADMIN` is required for the current normal runsc namespace/mount setup.
 `NET_ADMIN` and `NET_RAW` are required only by `--network-mode private`.
 `MKNOD` is required only when writable-root snapshot restore recreates OCI
-whiteouts. Do not grant the compatibility set to fixed or userspace-egress
+whiteouts. Do not grant the compatibility set to fixed or userspace-network
 workers.
 
 The container also needs:

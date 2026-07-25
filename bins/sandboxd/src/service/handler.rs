@@ -5,7 +5,9 @@ use crate::{
     protocol::Operation,
     state::DaemonState,
 };
-use runtrue_sandbox_core::{BackendCapabilities, BackendKind, RestoreTarget, SandboxId};
+use runtrue_sandbox_core::{
+    BackendCapabilities, BackendKind, NetworkCapabilities, RestoreTarget, SandboxId,
+};
 use runtrue_sandbox_gvisor::executor;
 use runtrue_sandbox_oci::{SandboxError, TopologyLock};
 use serde::Serialize;
@@ -104,7 +106,17 @@ fn capabilities(daemon: &DaemonState) -> Value {
                     crate::server::MAXIMUM_WRITABLE_ROOT_BYTES,
                     daemon.artifact_store.snapshot_portability(),
                     daemon.guest_profiles.clone(),
-                ),
+                ).with_network(match daemon.executor.network_mode {
+                    runtrue_sandbox_gvisor::executor::NetworkMode::Loopback => {
+                        NetworkCapabilities::LOOPBACK
+                    }
+                    runtrue_sandbox_gvisor::executor::NetworkMode::Userspace => {
+                        NetworkCapabilities::USERSPACE
+                    }
+                    runtrue_sandbox_gvisor::executor::NetworkMode::Private => {
+                        NetworkCapabilities::PRIVATE
+                    }
+                }),
             }
         ]
     })

@@ -59,7 +59,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: sandboxd-userspace-runtime
-        runtrue.io/network-tier: userspace-egress
+        runtrue.io/network-tier: userspace-ingress
         runtrue.io/resource-shape: standard-v1
     spec:
       hostUsers: false

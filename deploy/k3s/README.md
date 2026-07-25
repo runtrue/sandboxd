@@ -12,7 +12,7 @@ matrix is in [`SECURITY-PROFILES.md`](SECURITY-PROFILES.md).
 | Profile | Manifest | Image build | Intended use |
 | --- | --- | --- | --- |
 | Fixed runtime | `sandboxd-fixed-runtime.yaml` | `Dockerfile.fixed-runtime` | Recommended minimum-authority profile. One attested, pre-expanded rootfs; internal loopback only; pod-level resource limits. |
-| Userspace egress runtime | `sandboxd-userspace-runtime.yaml` | `Dockerfile.fixed-runtime` | Fixed runtime plus policy-approved HTTPS CONNECT over one guest-visible Unix socket. No `NET_ADMIN`, `NET_RAW`, veth, bridge, nftables, forwarding sysctl, host path, or host namespace. |
+| Userspace network runtime | `sandboxd-userspace-runtime.yaml` | `Dockerfile.fixed-runtime` | Fixed runtime plus policy-approved HTTPS CONNECT and declared reverse HTTP ingress over guest-visible Unix sockets. No `NET_ADMIN`, `NET_RAW`, veth, bridge, nftables, forwarding sysctl, host path, host namespace, Kubernetes Service/Ingress, or `hostPort`. |
 | Brokered fixed runtime | `sandboxd-fixed-runtime-brokered.yaml` | `Dockerfile.fixed-runtime` + `Dockerfile.broker` | Fixed worker plus a capability-free native broker sidecar, signed workload socket, authenticated registration, and default-deny control-plane routing. |
 | Dynamic runtime | `sandboxd-dynamic-runtime.yaml` | `Dockerfile.host-integrated` | Private containerd in the worker container for arbitrary pinned OCI images. No host socket, path, device, or namespace. |
 | Host integrated | `sandboxd-host-integrated.yaml` | `Dockerfile.host-integrated` | Compatibility profile for features implemented with host containerd, loop devices, mounts, networking, and cgroups. Requires dedicated trusted nodes. |
@@ -155,12 +155,14 @@ networking, writable roots, and a mismatched OCI image. Pod, k3s, firewall, and
 image diagnostics are retained for every workflow run.
 
 [`tools/test-k3s-userspace-egress.sh`](../../tools/test-k3s-userspace-egress.sh)
-proves the reduced egress profile in the same real cluster. It requires
+proves the reduced network profile in the same real cluster. It requires
 approved TLS to traverse the policy socket; denies guest DNS, direct IP, raw
 socket, metadata/private, unapproved-domain, and over-limit connection paths;
-checks runsc uses `network=none` and `host-uds=open`; and compares host links,
-network namespaces, nftables, and forwarding sysctls before and after the
-nested run.
+routes authenticated ingress only to the declared service; rejects a stale
+pre-pause tunnel after resume; measures warm ingress latency and 128 KiB
+throughput; checks runsc uses `network=none` and `host-uds=open`; and compares
+host links, network namespaces, nftables, and forwarding sysctls before and
+after the nested run.
 
 [`tools/test-k3s-resource-limits.sh`](../../tools/test-k3s-resource-limits.sh)
 separately drives CPU saturation, fork exhaustion, bounded temporary-storage
@@ -262,11 +264,12 @@ Production behavior is selected by typed command-line options:
   `--fixed-rootfs-bytes` install build-time measurements as one atomic set.
 - `--network-mode loopback` creates no bridge, veth, network namespace, or
   nftables state and rejects any topology requesting egress or ingress.
-- `--network-mode userspace` accepts HTTP CONNECT egress policies without
-  ingress, keeps gVisor networking disabled, and exposes the policy transport
-  at `RUNTRUE_EGRESS_SOCKET`. Applications must use that narrow socket
-  protocol; transparent sockets and conventional `HTTP_PROXY` support are not
-  enabled in this tier.
+- `--network-mode userspace` accepts HTTP CONNECT egress and declared reverse
+  HTTP ingress policies, keeps gVisor networking disabled, exposes egress at
+  `RUNTRUE_EGRESS_SOCKET`, and writes epoch-scoped ingress registration data to
+  `/run/lock/ingress.json`. Applications must use those narrow protocols;
+  transparent sockets and conventional `HTTP_PROXY` support are not enabled
+  in this tier.
 - `--network-mode private` enables the kernel networking provider.
 - `--cgroup-mode external` delegates aggregate enforcement to the enclosing
   Kubernetes pod.

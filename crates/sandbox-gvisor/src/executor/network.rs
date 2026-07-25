@@ -56,8 +56,10 @@ impl ProjectNetwork {
                     if lock.policy.network.profile == NetworkProfile::None
                         && lock.policy.network.ingress.is_empty() => {}
                 NetworkMode::Userspace
-                    if lock.policy.network.profile == NetworkProfile::HttpConnect
-                        && lock.policy.network.ingress.is_empty() => {}
+                    if matches!(
+                        lock.policy.network.profile,
+                        NetworkProfile::None | NetworkProfile::HttpConnect
+                    ) => {}
                 NetworkMode::Loopback => {
                     return Err(SandboxError::Unsupported(
                         "loopback network mode requires the none network profile".to_owned(),
@@ -65,7 +67,8 @@ impl ProjectNetwork {
                 }
                 NetworkMode::Userspace => {
                     return Err(SandboxError::Unsupported(
-                        "userspace network mode requires HTTP egress without ingress".to_owned(),
+                        "userspace network mode supports HTTP CONNECT egress and declared ingress"
+                            .to_owned(),
                     ))
                 }
                 NetworkMode::Private => unreachable!("private network handled below"),
@@ -91,7 +94,9 @@ impl ProjectNetwork {
             write_guest_files(&sandbox, lock, None)?;
             let policy_services = userspace_socket
                 .as_deref()
-                .map(|socket| PolicyServices::start_userspace(socket, &lock.policy.network))
+                .map(|socket| {
+                    PolicyServices::start_userspace(socket, project, &lock.policy.network)
+                })
                 .transpose()?;
             return Ok(Self {
                 ip: ip_program.to_path_buf(),
