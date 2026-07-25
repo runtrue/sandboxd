@@ -175,7 +175,9 @@ pub fn restore_admitted(
         ));
     }
     let mut transfer_claim_millis = 0;
-    if manifest.source_worker != restore_target.worker_id {
+    if manifest.source_worker != restore_target.worker_id
+        && manifest.mode == runtrue_sandbox_core::SnapshotMode::StopAndMove
+    {
         let claim_started = Instant::now();
         artifact_store
             .claim_transfer(artifact_scope, snapshot_id, restore_target)

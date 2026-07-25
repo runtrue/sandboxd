@@ -35,6 +35,9 @@ items:
             - podSelector:
                 matchLabels:
                   app.kubernetes.io/name: sandbox-gateway
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: sandbox-autoscaler
           ports:
             - protocol: TCP
               port: 8081

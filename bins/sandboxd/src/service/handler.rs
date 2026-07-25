@@ -53,7 +53,16 @@ pub(crate) fn handle(
             sandbox,
             snapshot,
             timeout_ms,
-        } => restore(daemon, context, topology, &sandbox, &snapshot, timeout_ms),
+            fenced_source_epoch,
+        } => restore(
+            daemon,
+            context,
+            topology,
+            &sandbox,
+            &snapshot,
+            timeout_ms,
+            fenced_source_epoch,
+        ),
         Operation::Inspect { sandbox } => inspect(daemon, context, &sandbox),
         Operation::Pause { sandbox } => pause(daemon, context, &sandbox),
         Operation::Resume { sandbox } => resume(daemon, context, &sandbox),
@@ -269,6 +278,7 @@ fn restore(
     sandbox: &str,
     snapshot: &str,
     timeout_ms: u64,
+    fenced_source_epoch: Option<u64>,
 ) -> Result<Value, SandboxError> {
     validate_timeout(timeout_ms)?;
     let snapshot_id = runtrue_sandbox_core::SnapshotId::parse(snapshot)
@@ -307,6 +317,10 @@ fn restore(
         assignment_epoch: epoch,
         artifact_portability: daemon.artifact_store.snapshot_portability(),
         guest_profile: topology.policy.guest_profile.clone(),
+        fenced_source_epoch: fenced_source_epoch
+            .map(runtrue_sandbox_core::AssignmentEpoch::new)
+            .transpose()
+            .map_err(|error| SandboxError::Runtime(error.to_string()))?,
     };
     let instance = match executor::restore_admitted(
         &topology,

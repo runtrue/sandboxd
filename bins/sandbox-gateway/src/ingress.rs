@@ -541,6 +541,7 @@ mod tests {
                                 sandbox: sandbox.to_string(),
                                 timeout_ms: 1_000,
                             },
+                            recovery_policy: None,
                         },
                         now,
                     )

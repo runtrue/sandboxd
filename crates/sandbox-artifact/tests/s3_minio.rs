@@ -147,6 +147,7 @@ fn publish_on_worker_a_and_materialize_on_worker_b() {
         assignment_epoch: AssignmentEpoch::new(8).expect("destination epoch"),
         artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
         guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
+        fenced_source_epoch: None,
     };
     let claim = worker_b
         .claim_transfer(

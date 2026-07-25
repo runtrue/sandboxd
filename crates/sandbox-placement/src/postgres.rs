@@ -1,6 +1,6 @@
 use runtrue_sandbox_core::{
     reconcile_worker_pool, AssignmentEpoch, AutoscaleDecision, PlacementIdentity, PoolObservation,
-    PoolPolicy, QueuedWork, ResourceCeilings, SandboxId, SubjectId, TenantId, WorkerId,
+    PoolPolicy, QueuedWork, ResourceCeilings, SandboxId, SnapshotId, SubjectId, TenantId, WorkerId,
     WorkspaceId,
 };
 use runtrue_sandbox_protocol::{Operation, WorkloadResponse};
@@ -27,7 +27,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 const MIGRATION_LOCK: i64 = 7_223_510_449_421;
 const QUEUE_LOCK: i64 = 7_223_510_449_422;
 const AUTOSCALE_LOCK: i64 = 7_223_510_449_423;
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 const MAXIMUM_PEM_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_OPERATION_BYTES: usize = 512 * 1024;
 const MAXIMUM_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -246,6 +246,49 @@ WHERE state IN ('queued', 'assigned', 'serving', 'completed');
 UPDATE sandboxd_placement.schema_version SET version = 6 WHERE singleton = TRUE;
 "#;
 
+const MIGRATION_V7: &str = r#"
+ALTER TABLE sandboxd_placement.requests
+    ADD COLUMN IF NOT EXISTS recovery_snapshot_interval_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS recovery_max_staleness_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS recovery_max_attempts SMALLINT,
+    ADD COLUMN IF NOT EXISTS latest_snapshot_id TEXT,
+    ADD COLUMN IF NOT EXISTS latest_snapshot_unix_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS checkpoint_due_unix_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS pending_snapshot_id TEXT,
+    ADD COLUMN IF NOT EXISTS recovery_source_epoch BIGINT,
+    ADD COLUMN IF NOT EXISTS recovery_fence_worker TEXT,
+    ADD COLUMN IF NOT EXISTS recovery_fence_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS recovery_started_unix_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS recovered_unix_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS recovery_attempts SMALLINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS recovery_error TEXT;
+ALTER TABLE sandboxd_placement.audit
+    ADD COLUMN IF NOT EXISTS snapshot_id TEXT;
+
+ALTER TABLE sandboxd_placement.requests
+    DROP CONSTRAINT IF EXISTS requests_state_check;
+ALTER TABLE sandboxd_placement.requests
+    ADD CONSTRAINT requests_state_check
+    CHECK (state IN (
+        'queued', 'assigned', 'serving', 'recovering', 'completed',
+        'recovery_failed', 'cancelled', 'expired'
+    ));
+
+DROP INDEX IF EXISTS sandboxd_placement.requests_live_sandbox;
+CREATE UNIQUE INDEX requests_live_sandbox
+ON sandboxd_placement.requests (tenant_id, workspace_id, sandbox_id)
+WHERE state IN ('queued', 'assigned', 'serving', 'recovering', 'completed');
+
+CREATE INDEX IF NOT EXISTS requests_checkpoint_due
+ON sandboxd_placement.requests (checkpoint_due_unix_ms)
+WHERE state = 'serving' AND recovery_snapshot_interval_ms IS NOT NULL;
+CREATE INDEX IF NOT EXISTS requests_recovery_metrics
+ON sandboxd_placement.requests (pool_name, recovered_unix_ms)
+WHERE recovered_unix_ms IS NOT NULL;
+
+UPDATE sandboxd_placement.schema_version SET version = 7 WHERE singleton = TRUE;
+"#;
+
 #[derive(Debug, Clone, Copy)]
 pub struct PlacementStoreConfig {
     pub global_queue_limit: i64,
@@ -310,6 +353,33 @@ pub struct PlacementSubmission {
     pub resource_shape: String,
     pub compatibility_cohort: String,
     pub operation: Operation,
+    pub recovery_policy: Option<RecoveryPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryPolicy {
+    pub snapshot_interval_ms: u64,
+    pub maximum_staleness_ms: u64,
+    pub maximum_attempts: u8,
+}
+
+impl RecoveryPolicy {
+    fn validate(self) -> Result<Self, PlacementStoreError> {
+        const MINIMUM_INTERVAL_MS: u64 = 1_000;
+        const MAXIMUM_INTERVAL_MS: u64 = 24 * 60 * 60 * 1_000;
+        const MAXIMUM_STALENESS_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+        if !(MINIMUM_INTERVAL_MS..=MAXIMUM_INTERVAL_MS).contains(&self.snapshot_interval_ms)
+            || self.maximum_staleness_ms < self.snapshot_interval_ms
+            || self.maximum_staleness_ms > MAXIMUM_STALENESS_MS
+            || !(1..=10).contains(&self.maximum_attempts)
+        {
+            return Err(PlacementStoreError::Invalid(
+                "recovery policy is invalid".to_owned(),
+            ));
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,7 +399,9 @@ pub enum PlacementState {
     Queued,
     Assigned,
     Serving,
+    Recovering,
     Completed,
+    RecoveryFailed,
     Cancelled,
     Expired,
 }
@@ -356,6 +428,21 @@ pub struct PlacementRecord {
     pub lease_expires_unix_ms: Option<u64>,
     pub result_digest: Option<String>,
     pub response: Option<WorkloadResponse>,
+    pub recovery: Option<RecoveryStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveryStatus {
+    pub policy: RecoveryPolicy,
+    pub latest_snapshot_id: Option<SnapshotId>,
+    pub latest_snapshot_unix_ms: Option<u64>,
+    pub source_epoch: Option<AssignmentEpoch>,
+    pub fence_worker: Option<WorkerId>,
+    pub fence_confirmed: bool,
+    pub started_unix_ms: Option<u64>,
+    pub recovered_unix_ms: Option<u64>,
+    pub attempts: u8,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +497,12 @@ pub struct Assignment {
     pub broker_address: SocketAddr,
     pub resource_ceilings: ResourceCeilings,
     pub operation: Operation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointAssignment {
+    pub assignment: Assignment,
+    pub snapshot_id: SnapshotId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -559,6 +652,10 @@ impl PostgresPlacementStore {
             transaction.batch_execute(MIGRATION_V6).await?;
             version = 6;
         }
+        if version == 6 {
+            transaction.batch_execute(MIGRATION_V7).await?;
+            version = 7;
+        }
         if version != SCHEMA_VERSION {
             return Err(PlacementStoreError::Invalid(format!(
                 "placement database schema version {version} is not supported"
@@ -639,6 +736,18 @@ impl PostgresPlacementStore {
         validate_submission(submission, now_unix_ms)?;
         let operation = serde_json::to_string(&submission.operation)
             .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+        let recovery_policy = submission
+            .recovery_policy
+            .map(RecoveryPolicy::validate)
+            .transpose()?;
+        let recovery_snapshot_interval = recovery_policy
+            .map(|policy| to_i64(policy.snapshot_interval_ms))
+            .transpose()?;
+        let recovery_max_staleness = recovery_policy
+            .map(|policy| to_i64(policy.maximum_staleness_ms))
+            .transpose()?;
+        let recovery_max_attempts =
+            recovery_policy.map(|policy| i16::from(policy.maximum_attempts));
         let now = to_i64(now_unix_ms)?;
         let deadline = to_i64(submission.work.deadline_unix_ms)?;
         let mut client = self.client.lock().await;
@@ -697,7 +806,7 @@ impl PostgresPlacementStore {
             .query_opt(
                 "SELECT 1 FROM sandboxd_placement.requests
                  WHERE tenant_id = $1 AND workspace_id = $2 AND sandbox_id = $3
-                 AND state IN ('queued', 'assigned', 'serving', 'completed')",
+                 AND state IN ('queued', 'assigned', 'serving', 'recovering', 'completed')",
                 &[
                     &submission.work.tenant_id.as_str(),
                     &submission.work.workspace_id.as_str(),
@@ -757,8 +866,10 @@ impl PostgresPlacementStore {
                 "INSERT INTO sandboxd_placement.requests
                  (request_id, idempotency_key, tenant_id, workspace_id, sandbox_id, subject_id,
                   pool_name, topology, resource_shape, compatibility_cohort, deadline_unix_ms,
-                  created_unix_ms, fair_finish, operation, state, capacity_class)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'queued',$15)",
+                  created_unix_ms, fair_finish, operation, state, capacity_class,
+                  recovery_snapshot_interval_ms, recovery_max_staleness_ms,
+                  recovery_max_attempts)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'queued',$15,$16,$17,$18)",
                 &[
                     &request_id(&submission.work),
                     &submission.work.idempotency_key,
@@ -775,6 +886,9 @@ impl PostgresPlacementStore {
                     &fair_finish,
                     &operation,
                     &capacity_class,
+                    &recovery_snapshot_interval,
+                    &recovery_max_staleness,
+                    &recovery_max_attempts,
                 ],
             )
             .await?;
@@ -992,56 +1106,45 @@ impl PostgresPlacementStore {
         now_unix_ms: u64,
     ) -> Result<(), PlacementStoreError> {
         let now = to_i64(now_unix_ms)?;
-        let mut client = self.client.lock().await;
-        let transaction = client.transaction().await?;
-        transaction
-            .query_one("SELECT pg_advisory_xact_lock($1)", &[&QUEUE_LOCK])
-            .await?;
-        let updated = transaction
-            .execute(
-                "UPDATE sandboxd_placement.workers SET state = 'quarantined'
-                 WHERE worker_id = $1
-                 AND state IN ('clean', 'leased', 'draining', 'quarantined')",
-                &[&worker_id.as_str()],
-            )
-            .await?;
-        if updated != 1 {
-            return Err(PlacementStoreError::WorkerUnavailable);
-        }
-        let rows = transaction
-            .query(
-                "SELECT * FROM sandboxd_placement.requests
-                 WHERE worker_id = $1 AND state IN ('assigned', 'serving') FOR UPDATE",
-                &[&worker_id.as_str()],
-            )
-            .await?;
-        for row in rows {
-            let record = record_from_row(&row)?;
-            let deadline: i64 = row.get("deadline_unix_ms");
-            if deadline <= now {
-                transaction
-                    .execute(
-                        "UPDATE sandboxd_placement.requests SET state = 'expired',
-                         terminal_unix_ms = $2 WHERE request_id = $1",
-                        &[&record.request_id, &now],
-                    )
-                    .await?;
-            } else {
-                transaction
-                    .execute(
-                        "UPDATE sandboxd_placement.requests SET state = 'queued',
-                         worker_id = NULL, assignment_epoch = NULL,
-                         lease_expires_unix_ms = NULL, assigned_unix_ms = NULL,
-                         first_output_unix_ms = NULL, result_digest = NULL,
-                         terminal_response = NULL, terminal_unix_ms = NULL
-                         WHERE request_id = $1",
-                        &[&record.request_id],
-                    )
-                    .await?;
+        {
+            let mut client = self.client.lock().await;
+            let transaction = client.transaction().await?;
+            transaction
+                .query_one("SELECT pg_advisory_xact_lock($1)", &[&QUEUE_LOCK])
+                .await?;
+            let updated = transaction
+                .execute(
+                    "UPDATE sandboxd_placement.workers SET state = 'quarantined'
+                     WHERE worker_id = $1
+                     AND state IN ('clean', 'leased', 'draining', 'quarantined')",
+                    &[&worker_id.as_str()],
+                )
+                .await?;
+            if updated != 1 {
+                return Err(PlacementStoreError::WorkerUnavailable);
             }
-            append_audit(&transaction, &record, now, "worker_quarantined").await?;
+            let rows = transaction
+                .query(
+                    "SELECT * FROM sandboxd_placement.requests
+                     WHERE worker_id = $1 AND state IN ('assigned', 'serving') FOR UPDATE",
+                    &[&worker_id.as_str()],
+                )
+                .await?;
+            for row in rows {
+                let record = record_from_row(&row)?;
+                append_audit(&transaction, &record, now, "worker_quarantined").await?;
+            }
+            transaction
+                .execute(
+                    "UPDATE sandboxd_placement.requests
+                     SET lease_expires_unix_ms = LEAST(lease_expires_unix_ms, $2)
+                     WHERE worker_id = $1 AND state IN ('assigned', 'serving')",
+                    &[&worker_id.as_str(), &now],
+                )
+                .await?;
+            transaction.commit().await?;
         }
-        transaction.commit().await?;
+        self.fence_expired(now_unix_ms).await?;
         Ok(())
     }
 
@@ -1075,6 +1178,76 @@ impl PostgresPlacementStore {
                     .map_err(|error| PlacementStoreError::Invalid(error.to_string()))
             })
             .collect()
+    }
+
+    pub async fn recovery_fences(
+        &self,
+        pool_name: &str,
+        limit: u16,
+    ) -> Result<Vec<WorkerId>, PlacementStoreError> {
+        if !valid_pool_name(pool_name) || limit == 0 || limit > 1_024 {
+            return Err(PlacementStoreError::Invalid(
+                "recovery fence query is invalid".to_owned(),
+            ));
+        }
+        self.client
+            .lock()
+            .await
+            .query(
+                "SELECT DISTINCT recovery_fence_worker
+                 FROM sandboxd_placement.requests
+                 WHERE pool_name = $1 AND state = 'recovering'
+                 AND NOT recovery_fence_confirmed
+                 AND recovery_fence_worker IS NOT NULL
+                 ORDER BY recovery_fence_worker LIMIT $2",
+                &[&pool_name, &i64::from(limit)],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                WorkerId::parse(row.get::<_, String>("recovery_fence_worker"))
+                    .map_err(|error| PlacementStoreError::Invalid(error.to_string()))
+            })
+            .collect()
+    }
+
+    pub async fn confirm_recovery_fence(
+        &self,
+        worker_id: &WorkerId,
+        now_unix_ms: u64,
+    ) -> Result<u64, PlacementStoreError> {
+        let now = to_i64(now_unix_ms)?;
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        let rows = transaction
+            .query(
+                "SELECT * FROM sandboxd_placement.requests
+                 WHERE state = 'recovering' AND NOT recovery_fence_confirmed
+                 AND recovery_fence_worker = $1 FOR UPDATE",
+                &[&worker_id.as_str()],
+            )
+            .await?;
+        for row in &rows {
+            let mut record = record_from_row(row)?;
+            record.worker_id = Some(worker_id.clone());
+            record.assignment_epoch = record
+                .recovery
+                .as_ref()
+                .and_then(|recovery| recovery.source_epoch);
+            append_audit(&transaction, &record, now, "source_fence_confirmed").await?;
+        }
+        transaction
+            .execute(
+                "UPDATE sandboxd_placement.requests
+                 SET recovery_fence_confirmed = TRUE
+                 WHERE state = 'recovering' AND NOT recovery_fence_confirmed
+                 AND recovery_fence_worker = $1",
+                &[&worker_id.as_str()],
+            )
+            .await?;
+        transaction.commit().await?;
+        u64::try_from(rows.len())
+            .map_err(|_| PlacementStoreError::Invalid("fence count overflow".to_owned()))
     }
 
     pub async fn reconcile_pool(
@@ -1118,10 +1291,10 @@ impl PostgresPlacementStore {
         let demand = transaction
             .query_one(
                 "SELECT
-                    count(*) FILTER (WHERE state = 'queued') AS queued,
+                    count(*) FILTER (WHERE state IN ('queued', 'recovering')) AS queued,
                     count(*) FILTER (WHERE state IN ('assigned', 'serving')) AS assigned
                  FROM sandboxd_placement.requests
-                 WHERE pool_name = $1 AND state IN ('queued', 'assigned', 'serving')",
+                 WHERE pool_name = $1 AND state IN ('queued', 'recovering', 'assigned', 'serving')",
                 &[&pool_name],
             )
             .await?;
@@ -1330,10 +1503,11 @@ impl PostgresPlacementStore {
                  ),
                  demand AS (
                     SELECT pool_name,
-                        count(*) FILTER (WHERE state = 'queued') AS queued,
+                        count(*) FILTER (WHERE state IN ('queued', 'recovering')) AS queued,
                         count(*) FILTER (WHERE state IN ('assigned', 'serving')) AS active
                     FROM sandboxd_placement.requests
-                    WHERE pool_name = ANY($1) AND state IN ('queued', 'assigned', 'serving')
+                    WHERE pool_name = ANY($1)
+                    AND state IN ('queued', 'recovering', 'assigned', 'serving')
                     GROUP BY pool_name
                  )
                  SELECT selected.pool_name,
@@ -1403,6 +1577,19 @@ impl PostgresPlacementStore {
                         ready_unix_ms - requested_unix_ms, ready_unix_ms
                     FROM sandboxd_placement.pool_activations
                     WHERE pool_name = ANY($1) AND ready_unix_ms >= $2
+                    UNION ALL
+                    SELECT pool_name, 'recovery_rpo/' || resource_shape,
+                        recovery_started_unix_ms - latest_snapshot_unix_ms,
+                        recovery_started_unix_ms
+                    FROM sandboxd_placement.requests
+                    WHERE pool_name = ANY($1) AND recovery_started_unix_ms >= $2
+                    AND latest_snapshot_unix_ms IS NOT NULL
+                    UNION ALL
+                    SELECT pool_name, 'recovery_rto/' || resource_shape,
+                        recovered_unix_ms - recovery_started_unix_ms,
+                        recovered_unix_ms
+                    FROM sandboxd_placement.requests
+                    WHERE pool_name = ANY($1) AND recovered_unix_ms >= $2
                  )
                  SELECT pool_name, phase, count(*)::BIGINT AS samples,
                     percentile_disc(0.50) WITHIN GROUP (ORDER BY duration_ms)::BIGINT AS p50,
@@ -1492,7 +1679,10 @@ impl PostgresPlacementStore {
             .query_opt(
                 "SELECT r.* FROM sandboxd_placement.requests r
                  JOIN sandboxd_placement.tenant_policy p ON p.tenant_id = r.tenant_id
-                 WHERE r.state = 'queued' AND r.deadline_unix_ms > $1
+                 WHERE (
+                    r.state = 'queued'
+                    OR (r.state = 'recovering' AND r.recovery_fence_confirmed)
+                 ) AND r.deadline_unix_ms > $1
                  AND r.pool_name = $4
                  AND r.topology = $2 AND r.resource_shape = $3
                  AND r.compatibility_cohort = $5
@@ -1533,7 +1723,10 @@ impl PostgresPlacementStore {
                  state = 'assigned', worker_id = $2, assignment_epoch = $3,
                  lease_expires_unix_ms = $4, assigned_unix_ms = $5,
                  first_output_unix_ms = NULL
-                 WHERE request_id = $1 AND state = 'queued'",
+                 WHERE request_id = $1 AND (
+                    state = 'queued'
+                    OR (state = 'recovering' AND recovery_fence_confirmed)
+                 )",
                 &[
                     &request_id,
                     &worker_id.as_str(),
@@ -1564,7 +1757,16 @@ impl PostgresPlacementStore {
             )
             .await?;
         let record = record_from_row(&row)?;
-        append_audit(&transaction, &record, now, "assigned").await?;
+        let assignment_event = if record
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.attempts > 0)
+        {
+            "recovery_assigned"
+        } else {
+            "assigned"
+        };
+        append_audit(&transaction, &record, now, assignment_event).await?;
         let assignment =
             assignment_from_record(record, broker_address, resource_ceilings, operation)?;
         transaction.commit().await?;
@@ -1687,8 +1889,18 @@ impl PostgresPlacementStore {
                 assignment.operation,
                 Operation::Create { .. } | Operation::Restore { .. }
             );
+        let recovering = record
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.started_unix_ms.is_some());
         let first_output = response.as_ref().map(|_| now);
-        let next_state = if serving { "serving" } else { "completed" };
+        let next_state = if serving {
+            "serving"
+        } else if recovering {
+            "recovery_failed"
+        } else {
+            "completed"
+        };
         let terminal = (!serving).then_some(now);
         let serving_expiry = serving
             .then(|| {
@@ -1698,12 +1910,33 @@ impl PostgresPlacementStore {
                     })
             })
             .transpose()?;
+        let checkpoint_due = if serving {
+            record
+                .recovery
+                .as_ref()
+                .map(|recovery| {
+                    now.checked_add(to_i64(recovery.policy.snapshot_interval_ms)?)
+                        .ok_or_else(|| {
+                            PlacementStoreError::Invalid("checkpoint deadline overflow".to_owned())
+                        })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let recovered = (serving && recovering).then_some(now);
+        let recovery_error = (!serving && recovering)
+            .then(|| response.as_ref().and_then(|(_, value)| value.error.clone()))
+            .flatten()
+            .or_else(|| (!serving && recovering).then(|| "restore failed".to_owned()));
         transaction
             .execute(
                 "UPDATE sandboxd_placement.requests SET state = $4,
                  result_digest = $2, terminal_response = $3, terminal_unix_ms = $5,
                  first_output_unix_ms = $6,
-                 lease_expires_unix_ms = COALESCE($7, lease_expires_unix_ms)
+                 lease_expires_unix_ms = COALESCE($7, lease_expires_unix_ms),
+                 checkpoint_due_unix_ms = $8, recovered_unix_ms = $9,
+                 recovery_error = $10
                  WHERE request_id = $1",
                 &[
                     &assignment.request_id,
@@ -1713,6 +1946,9 @@ impl PostgresPlacementStore {
                     &terminal,
                     &first_output,
                     &serving_expiry,
+                    &checkpoint_due,
+                    &recovered,
+                    &recovery_error,
                 ],
             )
             .await?;
@@ -1727,6 +1963,8 @@ impl PostgresPlacementStore {
         let mut completed = record;
         completed.state = if serving {
             PlacementState::Serving
+        } else if recovering {
+            PlacementState::RecoveryFailed
         } else {
             PlacementState::Completed
         };
@@ -1736,7 +1974,15 @@ impl PostgresPlacementStore {
             &transaction,
             &completed,
             now,
-            if serving { "serving" } else { "completed" },
+            if serving && recovering {
+                "recovery_completed"
+            } else if serving {
+                "serving"
+            } else if recovering {
+                "recovery_failed"
+            } else {
+                "completed"
+            },
         )
         .await?;
         transaction.commit().await?;
@@ -1767,7 +2013,10 @@ impl PostgresPlacementStore {
         let mut record = record_from_row(&row)?;
         if matches!(
             record.state,
-            PlacementState::Completed | PlacementState::Cancelled | PlacementState::Expired
+            PlacementState::Completed
+                | PlacementState::RecoveryFailed
+                | PlacementState::Cancelled
+                | PlacementState::Expired
         ) {
             transaction.commit().await?;
             return Ok(Some(record));
@@ -1792,6 +2041,151 @@ impl PostgresPlacementStore {
         append_audit(&transaction, &record, now, "cancelled").await?;
         transaction.commit().await?;
         Ok(Some(record))
+    }
+
+    pub async fn claim_due_checkpoints(
+        &self,
+        now_unix_ms: u64,
+        limit: u16,
+    ) -> Result<Vec<CheckpointAssignment>, PlacementStoreError> {
+        if limit == 0 || limit > 1_024 {
+            return Err(PlacementStoreError::Invalid(
+                "checkpoint claim limit is invalid".to_owned(),
+            ));
+        }
+        let now = to_i64(now_unix_ms)?;
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        let rows = transaction
+            .query(
+                "SELECT r.*, w.broker_address, w.resource_ceilings
+                 FROM sandboxd_placement.requests r
+                 JOIN sandboxd_placement.workers w ON w.worker_id = r.worker_id
+                 WHERE r.state = 'serving' AND r.checkpoint_due_unix_ms <= $1
+                 AND r.lease_expires_unix_ms > $1 AND w.state = 'leased'
+                 AND w.broker_address IS NOT NULL AND w.resource_ceilings IS NOT NULL
+                 ORDER BY r.checkpoint_due_unix_ms, r.request_id
+                 LIMIT $2 FOR UPDATE OF r SKIP LOCKED",
+                &[&now, &i64::from(limit)],
+            )
+            .await?;
+        let mut checkpoints = Vec::with_capacity(rows.len());
+        for row in rows {
+            let record = record_from_row(&row)?;
+            let epoch = record.assignment_epoch.ok_or_else(|| {
+                PlacementStoreError::Invalid("checkpoint has no epoch".to_owned())
+            })?;
+            let snapshot_id = SnapshotId::parse(format!("recovery-{}-{now_unix_ms}", epoch.get()))
+                .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+            let interval: i64 = row.get("recovery_snapshot_interval_ms");
+            let claim_lifetime = duration_millis(self.config.lease_lifetime)?;
+            let next_due = now
+                .checked_add(interval.max(claim_lifetime))
+                .ok_or_else(|| {
+                    PlacementStoreError::Invalid("checkpoint deadline overflow".to_owned())
+                })?;
+            transaction
+                .execute(
+                    "UPDATE sandboxd_placement.requests
+                     SET pending_snapshot_id = $2, checkpoint_due_unix_ms = $3
+                     WHERE request_id = $1 AND state = 'serving'",
+                    &[&record.request_id, &snapshot_id.as_str(), &next_due],
+                )
+                .await?;
+            let broker_address = row
+                .get::<_, String>("broker_address")
+                .parse::<SocketAddr>()
+                .map_err(|_| PlacementStoreError::Invalid("invalid broker address".to_owned()))?;
+            let resource_ceilings: ResourceCeilings =
+                serde_json::from_str(row.get::<_, &str>("resource_ceilings"))
+                    .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+            resource_ceilings
+                .validate()
+                .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+            let operation: Operation = serde_json::from_str(row.get::<_, &str>("operation"))
+                .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+            checkpoints.push(CheckpointAssignment {
+                assignment: assignment_from_record(
+                    record,
+                    broker_address,
+                    resource_ceilings,
+                    operation,
+                )?,
+                snapshot_id,
+            });
+        }
+        transaction.commit().await?;
+        Ok(checkpoints)
+    }
+
+    pub async fn publish_checkpoint(
+        &self,
+        checkpoint: &CheckpointAssignment,
+        now_unix_ms: u64,
+    ) -> Result<(), PlacementStoreError> {
+        let now = to_i64(now_unix_ms)?;
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        let row = transaction
+            .query_opt(
+                "SELECT * FROM sandboxd_placement.requests
+                 WHERE request_id = $1 FOR UPDATE",
+                &[&checkpoint.assignment.request_id],
+            )
+            .await?
+            .ok_or(PlacementStoreError::StaleAssignment)?;
+        let record = record_from_row(&row)?;
+        if record.state != PlacementState::Serving
+            || record.worker_id.as_ref() != Some(&checkpoint.assignment.worker_id)
+            || record.assignment_epoch != Some(checkpoint.assignment.epoch)
+            || row.get::<_, Option<&str>>("pending_snapshot_id")
+                != Some(checkpoint.snapshot_id.as_str())
+            || record
+                .lease_expires_unix_ms
+                .is_none_or(|expiry| expiry <= now_unix_ms)
+        {
+            return Err(PlacementStoreError::StaleAssignment);
+        }
+        let next_due = now
+            .checked_add(to_i64(
+                record
+                    .recovery
+                    .as_ref()
+                    .expect("checkpoint has recovery policy")
+                    .policy
+                    .snapshot_interval_ms,
+            )?)
+            .ok_or_else(|| {
+                PlacementStoreError::Invalid("checkpoint deadline overflow".to_owned())
+            })?;
+        transaction
+            .execute(
+                "UPDATE sandboxd_placement.requests
+                 SET latest_snapshot_id = $2, latest_snapshot_unix_ms = $3,
+                     pending_snapshot_id = NULL, checkpoint_due_unix_ms = $4
+                 WHERE request_id = $1",
+                &[
+                    &record.request_id,
+                    &checkpoint.snapshot_id.as_str(),
+                    &now,
+                    &next_due,
+                ],
+            )
+            .await?;
+        let mut checkpoint_record = record;
+        if let Some(recovery) = &mut checkpoint_record.recovery {
+            recovery.latest_snapshot_id = Some(checkpoint.snapshot_id.clone());
+            recovery.latest_snapshot_unix_ms = Some(now_unix_ms);
+        }
+        append_audit(
+            &transaction,
+            &checkpoint_record,
+            now,
+            "checkpoint_published",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn fence_expired(
@@ -1825,12 +2219,14 @@ impl PostgresPlacementStore {
                     )
                     .await?;
             }
+            append_audit(&transaction, &previous, now, "source_fenced").await?;
             let deadline: i64 = row.get("deadline_unix_ms");
             if deadline <= now {
                 transaction
                     .execute(
                         "UPDATE sandboxd_placement.requests SET state = 'expired',
-                         terminal_unix_ms = $2 WHERE request_id = $1",
+                         terminal_unix_ms = $2, recovery_error = 'deadline expired'
+                         WHERE request_id = $1",
                         &[&previous.request_id, &now],
                     )
                     .await?;
@@ -1838,6 +2234,125 @@ impl PostgresPlacementStore {
                 let mut expired = previous;
                 expired.state = PlacementState::Expired;
                 fenced.push(expired);
+                continue;
+            }
+
+            let policy = previous.recovery.as_ref().map(|recovery| recovery.policy);
+            if let Some(policy) = policy {
+                let attempts = previous
+                    .recovery
+                    .as_ref()
+                    .map_or(0, |recovery| recovery.attempts);
+                let latest_snapshot = previous
+                    .recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.latest_snapshot_id.clone());
+                let latest_unix_ms = previous
+                    .recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.latest_snapshot_unix_ms);
+                let snapshot_fresh = latest_unix_ms.is_some_and(|created| {
+                    created
+                        .checked_add(policy.maximum_staleness_ms)
+                        .is_some_and(|expiry| expiry >= now_unix_ms)
+                });
+                if let (Some(snapshot_id), true, true) = (
+                    latest_snapshot.clone(),
+                    snapshot_fresh,
+                    attempts < policy.maximum_attempts,
+                ) {
+                    let operation: Operation =
+                        serde_json::from_str(row.get::<_, &str>("operation"))
+                            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+                    let (topology, sandbox, timeout_ms) = match operation {
+                        Operation::Create {
+                            topology,
+                            sandbox,
+                            timeout_ms,
+                        }
+                        | Operation::Restore {
+                            topology,
+                            sandbox,
+                            timeout_ms,
+                            ..
+                        } => (topology, sandbox, timeout_ms),
+                        _ => {
+                            return Err(PlacementStoreError::Invalid(
+                                "recoverable assignment is not create or restore".to_owned(),
+                            ))
+                        }
+                    };
+                    let source_epoch = previous
+                        .recovery
+                        .as_ref()
+                        .and_then(|recovery| recovery.source_epoch)
+                        .unwrap_or_else(|| {
+                            previous
+                                .assignment_epoch
+                                .expect("expired assignment has an epoch")
+                        });
+                    let restore = serde_json::to_string(&Operation::Restore {
+                        topology,
+                        sandbox,
+                        snapshot: snapshot_id.to_string(),
+                        timeout_ms,
+                        fenced_source_epoch: Some(source_epoch.get()),
+                    })
+                    .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+                    let next_attempt = i16::from(attempts) + 1;
+                    transaction
+                        .execute(
+                            "UPDATE sandboxd_placement.requests SET state = 'recovering',
+                             worker_id = NULL, assignment_epoch = NULL,
+                             lease_expires_unix_ms = NULL, assigned_unix_ms = NULL,
+                             result_digest = NULL, terminal_response = NULL,
+                             terminal_unix_ms = NULL, operation = $2,
+                             recovery_source_epoch = $3,
+                             recovery_started_unix_ms = COALESCE(recovery_started_unix_ms, $4),
+                             recovered_unix_ms = NULL, recovery_attempts = $5,
+                             recovery_error = NULL, pending_snapshot_id = NULL,
+                             recovery_fence_worker = $6,
+                             recovery_fence_confirmed = FALSE
+                             WHERE request_id = $1",
+                            &[
+                                &previous.request_id,
+                                &restore,
+                                &to_i64(source_epoch.get())?,
+                                &now,
+                                &next_attempt,
+                                &previous.worker_id.as_ref().map(WorkerId::as_str),
+                            ],
+                        )
+                        .await?;
+                    append_audit(&transaction, &previous, now, "recovery_queued").await?;
+                    let mut recovering = previous;
+                    recovering.state = PlacementState::Recovering;
+                    recovering.worker_id = None;
+                    recovering.assignment_epoch = None;
+                    recovering.lease_expires_unix_ms = None;
+                    fenced.push(recovering);
+                    continue;
+                }
+
+                let reason = if latest_snapshot.is_none() {
+                    "no durable checkpoint"
+                } else if !snapshot_fresh {
+                    "latest checkpoint exceeds maximum staleness"
+                } else {
+                    "recovery attempts exhausted"
+                };
+                transaction
+                    .execute(
+                        "UPDATE sandboxd_placement.requests SET state = 'recovery_failed',
+                         terminal_unix_ms = $2, recovery_error = $3,
+                         pending_snapshot_id = NULL WHERE request_id = $1",
+                        &[&previous.request_id, &now, &reason],
+                    )
+                    .await?;
+                append_audit(&transaction, &previous, now, "recovery_failed").await?;
+                let mut failed = previous;
+                failed.state = PlacementState::RecoveryFailed;
+                fenced.push(failed);
             } else {
                 transaction
                     .execute(
@@ -1958,7 +2473,7 @@ async fn expire_queued(
     let rows = transaction
         .query(
             "UPDATE sandboxd_placement.requests SET state = 'expired', terminal_unix_ms = $1
-             WHERE state = 'queued' AND deadline_unix_ms <= $1 RETURNING *",
+             WHERE state IN ('queued', 'recovering') AND deadline_unix_ms <= $1 RETURNING *",
             &[&now],
         )
         .await?;
@@ -1981,12 +2496,17 @@ async fn append_audit(
         .map(AssignmentEpoch::get)
         .map(to_i64)
         .transpose()?;
+    let snapshot_id = record
+        .recovery
+        .as_ref()
+        .and_then(|recovery| recovery.latest_snapshot_id.as_ref())
+        .map(SnapshotId::as_str);
     transaction
         .execute(
             "INSERT INTO sandboxd_placement.audit
              (event_unix_ms, request_id, tenant_id, workspace_id, sandbox_id,
-              subject_id, worker_id, assignment_epoch, event, result_digest)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+              subject_id, worker_id, assignment_epoch, event, result_digest, snapshot_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             &[
                 &now,
                 &record.request_id,
@@ -1998,6 +2518,7 @@ async fn append_audit(
                 &epoch,
                 &event,
                 &record.result_digest,
+                &snapshot_id,
             ],
         )
         .await?;
@@ -2028,6 +2549,62 @@ fn record_from_row(row: &Row) -> Result<PlacementRecord, PlacementStoreError> {
                 .map_err(|_| PlacementStoreError::Invalid("negative lease expiration".to_owned()))
         })
         .transpose()?;
+    let recovery = match row.get::<_, Option<i64>>("recovery_snapshot_interval_ms") {
+        Some(snapshot_interval_ms) => {
+            let maximum_staleness_ms: i64 = row.get("recovery_max_staleness_ms");
+            let maximum_attempts: i16 = row.get("recovery_max_attempts");
+            let latest_snapshot_id = row
+                .get::<_, Option<String>>("latest_snapshot_id")
+                .map(SnapshotId::parse)
+                .transpose()
+                .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+            let source_epoch = row
+                .get::<_, Option<i64>>("recovery_source_epoch")
+                .map(positive_epoch)
+                .transpose()?;
+            Some(RecoveryStatus {
+                policy: RecoveryPolicy {
+                    snapshot_interval_ms: nonnegative_u64(
+                        snapshot_interval_ms,
+                        "snapshot interval",
+                    )?,
+                    maximum_staleness_ms: nonnegative_u64(
+                        maximum_staleness_ms,
+                        "maximum staleness",
+                    )?,
+                    maximum_attempts: u8::try_from(maximum_attempts).map_err(|_| {
+                        PlacementStoreError::Invalid("recovery attempt limit is invalid".to_owned())
+                    })?,
+                }
+                .validate()?,
+                latest_snapshot_id,
+                latest_snapshot_unix_ms: optional_nonnegative_u64(
+                    row.get("latest_snapshot_unix_ms"),
+                    "latest snapshot time",
+                )?,
+                source_epoch,
+                fence_worker: row
+                    .get::<_, Option<String>>("recovery_fence_worker")
+                    .map(WorkerId::parse)
+                    .transpose()
+                    .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?,
+                fence_confirmed: row.get("recovery_fence_confirmed"),
+                started_unix_ms: optional_nonnegative_u64(
+                    row.get("recovery_started_unix_ms"),
+                    "recovery start time",
+                )?,
+                recovered_unix_ms: optional_nonnegative_u64(
+                    row.get("recovered_unix_ms"),
+                    "recovery completion time",
+                )?,
+                attempts: u8::try_from(row.get::<_, i16>("recovery_attempts")).map_err(|_| {
+                    PlacementStoreError::Invalid("recovery attempt count is invalid".to_owned())
+                })?,
+                error: row.get("recovery_error"),
+            })
+        }
+        None => None,
+    };
     Ok(PlacementRecord {
         request_id: row.get("request_id"),
         idempotency_key: row.get("idempotency_key"),
@@ -2046,7 +2623,9 @@ fn record_from_row(row: &Row) -> Result<PlacementRecord, PlacementStoreError> {
             "queued" => PlacementState::Queued,
             "assigned" => PlacementState::Assigned,
             "serving" => PlacementState::Serving,
+            "recovering" => PlacementState::Recovering,
             "completed" => PlacementState::Completed,
+            "recovery_failed" => PlacementState::RecoveryFailed,
             "cancelled" => PlacementState::Cancelled,
             "expired" => PlacementState::Expired,
             state => {
@@ -2064,7 +2643,24 @@ fn record_from_row(row: &Row) -> Result<PlacementRecord, PlacementStoreError> {
             .map(|encoded| serde_json::from_str(&encoded))
             .transpose()
             .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?,
+        recovery,
     })
+}
+
+fn positive_epoch(value: i64) -> Result<AssignmentEpoch, PlacementStoreError> {
+    let value = nonnegative_u64(value, "assignment epoch")?;
+    AssignmentEpoch::new(value).map_err(|error| PlacementStoreError::Invalid(error.to_string()))
+}
+
+fn nonnegative_u64(value: i64, name: &str) -> Result<u64, PlacementStoreError> {
+    u64::try_from(value).map_err(|_| PlacementStoreError::Invalid(format!("{name} is negative")))
+}
+
+fn optional_nonnegative_u64(
+    value: Option<i64>,
+    name: &str,
+) -> Result<Option<u64>, PlacementStoreError> {
+    value.map(|value| nonnegative_u64(value, name)).transpose()
 }
 
 fn assignment_from_record(
@@ -2100,6 +2696,18 @@ fn validate_submission(
     let operation_bytes = serde_json::to_vec(&submission.operation)
         .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
     let workload_operation = submission.operation.work_order_operation();
+    let client_supplied_recovery_fence = matches!(
+        submission.operation,
+        Operation::Restore {
+            fenced_source_epoch: Some(_),
+            ..
+        }
+    );
+    let recovery_operation_supported = submission.recovery_policy.is_none()
+        || matches!(
+            submission.operation,
+            Operation::Create { .. } | Operation::Restore { .. }
+        );
     if submission.work.idempotency_key.is_empty()
         || submission.work.idempotency_key.len() > 128
         || !submission
@@ -2115,6 +2723,8 @@ fn validate_submission(
         || operation_bytes.len() > MAXIMUM_OPERATION_BYTES
         || workload_operation.is_none_or(|operation| !operation.requires_sandbox())
         || submission.operation.sandbox() != Some(submission.work.sandbox_id.as_str())
+        || client_supplied_recovery_fence
+        || !recovery_operation_supported
     {
         return Err(PlacementStoreError::Invalid(
             "placement submission is invalid".to_owned(),

@@ -382,11 +382,22 @@ is immutable, idempotent for the same worker and epoch, and rejects a competing
 worker. The S3 provider implements the claim with a strong conditional create
 before advertising cross-worker portability.
 
+For failure recovery, the controller periodically requests manifest-last live
+checkpoints while the source lease is current. PostgreSQL stores only a
+successfully published pointer. After lease expiry it quarantines the source
+before creating a restore operation with the exact source epoch and a higher
+destination epoch. This signed fence proof is the only path that permits a live
+checkpoint to cross workers; ordinary live snapshots remain same-worker. A
+returning quarantined Pod receives no route, heartbeat, or signed command and
+the namespaced autoscaler deletes it with exact Pod UID and resource-version
+preconditions.
+
 Restore bounds the pointer, encrypted object, object count, individual object,
 and total snapshot sizes before publication into an empty read-only directory.
 It authenticates every encrypted chunk, re-hashes every plaintext file, and
 checks tenant scope, sandbox identity, source and destination workers,
-monotonically increasing assignment epoch, stop-and-move mode, provider
+monotonically increasing assignment epoch, stop-and-move grant or signed live
+recovery fence, provider
 portability, topology, runsc state format and version, runtime configuration,
 CPU features, architecture, and operating system. These checks finish before
 destination cgroups, namespaces, or runsc state are allocated. The root restore

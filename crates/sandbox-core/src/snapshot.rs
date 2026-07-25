@@ -59,6 +59,7 @@ pub struct RestoreTarget {
     pub assignment_epoch: crate::AssignmentEpoch,
     pub artifact_portability: SnapshotPortability,
     pub guest_profile: GuestProfileIdentity,
+    pub fenced_source_epoch: Option<crate::AssignmentEpoch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,10 +219,17 @@ impl SnapshotManifest {
         let moves_worker = self.source_worker != target.worker_id;
         let reuses_identity = self.sandbox_id == target.sandbox_id;
         if moves_worker {
-            if self.mode != SnapshotMode::StopAndMove {
-                return Err(CoreError::InvalidSnapshot(
-                    "cross-worker restore requires a stop-and-move snapshot".to_owned(),
-                ));
+            if self.mode == SnapshotMode::Live {
+                let source_epoch = crate::AssignmentEpoch::new(self.source_assignment_epoch)
+                    .map_err(|error| CoreError::InvalidSnapshot(error.to_string()))?;
+                if target.fenced_source_epoch != Some(source_epoch)
+                    || target.assignment_epoch <= source_epoch
+                {
+                    return Err(CoreError::InvalidSnapshot(
+                        "live cross-worker restore requires an exact fenced source epoch and a newer destination epoch"
+                            .to_owned(),
+                    ));
+                }
             }
             if !reuses_identity {
                 return Err(CoreError::InvalidSnapshot(
@@ -344,6 +352,7 @@ mod tests {
             assignment_epoch: crate::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
             guest_profile: manifest.restore_requirements.guest_profile.clone(),
+            fenced_source_epoch: None,
         };
         manifest
             .validate_restore_target(&target)
@@ -359,6 +368,12 @@ mod tests {
         live.mode = SnapshotMode::Live;
         target.artifact_portability = SnapshotPortability::CrossWorkerSameBackend;
         assert!(live.validate_restore_target(&target).is_err());
+        target.fenced_source_epoch =
+            Some(crate::AssignmentEpoch::new(live.source_assignment_epoch).expect("source epoch"));
+        live.validate_restore_target(&target)
+            .expect("signed fenced recovery target");
+        target.fenced_source_epoch = Some(crate::AssignmentEpoch::new(6).expect("wrong epoch"));
+        assert!(live.validate_restore_target(&target).is_err());
     }
 
     #[test]
@@ -372,6 +387,7 @@ mod tests {
             assignment_epoch: crate::AssignmentEpoch::new(1).expect("epoch"),
             artifact_portability: SnapshotPortability::SameWorker,
             guest_profile: manifest.restore_requirements.guest_profile.clone(),
+            fenced_source_epoch: None,
         };
         manifest
             .validate_restore_target(&target)
@@ -428,6 +444,7 @@ mod tests {
             assignment_epoch: crate::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
             guest_profile: manifest.restore_requirements.guest_profile.clone(),
+            fenced_source_epoch: None,
         };
         assert!(manifest.validate_restore_target(&target).is_err());
     }
@@ -445,6 +462,7 @@ mod tests {
             guest_profile: GuestProfile::reviewed_named(crate::ROOT_GUEST_PROFILE)
                 .expect("root profile")
                 .identity,
+            fenced_source_epoch: None,
         };
         assert!(manifest.validate_restore_target(&target).is_err());
     }
