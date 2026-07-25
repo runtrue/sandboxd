@@ -81,3 +81,20 @@ garbage-collection races, and abandoned multipart cleanup.
 
 Loopback MinIO measurements isolate provider overhead. For WAN or AWS S3
 measurements, record the commit, host cohort, configuration, and raw JSON.
+
+## Dense-worker decision gate
+
+The optional multi-sandbox worker design was rejected after a real k3s
+measurement and an intentionally optimistic dense upper-bound comparison.
+Reproduce the gate with:
+
+```bash
+tools/performance/run-density-gate.sh \
+  --slots 16 \
+  --output /tmp/sandboxd-density-gate.json
+```
+
+See [Dense multi-sandbox worker decision](dense-worker-decision.md) for the
+measured P50/P95/P99 results, security constraints, decision thresholds, and
+reconsideration criteria. The production boundary remains one active sandbox
+per worker Pod.

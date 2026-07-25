@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "revision": "abaf313000f70b6d42aa6b41598acf1583dcd669",
+  "node": "llm-test",
+  "slots": 16,
+  "environment": {
+    "os_image": "Ubuntu 26.04 LTS",
+    "kernel_version": "7.0.0-1009-ibm",
+    "kubernetes_version": "v1.36.1+k3s1",
+    "runsc_version": "runsc version release-20260714.0",
+    "allocatable_memory_bytes": 16757301248,
+    "allocatable_cpu_millis": 8000
+  },
+  "methodology": {
+    "baseline": "one active sandbox per Kubernetes worker Pod",
+    "dense_upper_bound": "one median clean-worker footprint plus every measured per-sandbox active increment",
+    "activation_issuance": "sequential while retaining earlier sandboxes so all slots are active for the memory sample",
+    "caveat": "optimistic model excludes dense slot bookkeeping, cgroup broker, monitoring, cleanup, and contention overhead"
+  },
+  "one_sandbox_per_worker": {
+    "idle_memory_bytes": {
+      "samples": [
+        1728512,
+        1716224,
+        1736704,
+        1712128,
+        1716224,
+        1736704,
+        1712128,
+        1720320,
+        1720320,
+        1720320,
+        1875968,
+        1716224,
+        1789952,
+        1744896,
+        1716224,
+        1724416
+      ],
+      "p50": 1720320,
+      "p95": 1875968,
+      "p99": 1875968
+    },
+    "active_memory_bytes": {
+      "samples": [
+        41164800,
+        40792064,
+        41566208,
+        40988672,
+        41156608,
+        40951808,
+        41562112,
+        41775104,
+        41603072,
+        41476096,
+        41177088,
+        41422848,
+        41299968,
+        41558016,
+        41033728,
+        40841216
+      ],
+      "p50": 41177088,
+      "p95": 41775104,
+      "p99": 41775104
+    },
+    "total_active_memory_bytes": 660369408,
+    "activation_milliseconds": {
+      "samples": [
+        783,
+        778,
+        769,
+        786,
+        815,
+        779,
+        766,
+        819,
+        829,
+        835,
+        841,
+        784,
+        818,
+        843,
+        770,
+        799
+      ],
+      "p50": 786,
+      "p95": 843,
+      "p99": 843
+    },
+    "cleanup_to_replacement_milliseconds": {
+      "samples": [
+        5461,
+        5465,
+        5470,
+        5474,
+        6186,
+        6192,
+        6197,
+        6578,
+        6583,
+        6588,
+        6592,
+        6597,
+        6601,
+        6605,
+        6609,
+        6614
+      ],
+      "p50": 6578,
+      "p95": 6614,
+      "p99": 6614
+    },
+    "activation_batch_milliseconds": 13024,
+    "cleanup_batch_milliseconds": 6618,
+    "scale_to_ready_batch_milliseconds": 4213,
+    "pod_objects": 16,
+    "failure_blast_radius_sandboxes": 1,
+    "declared_broker_memory_request_bytes_per_slot": 16777216,
+    "declared_broker_cpu_request_millis_per_slot": 10,
+    "brokered_memory_request_bytes_per_slot": 285212672,
+    "brokered_cpu_request_millis_per_slot": 110,
+    "brokered_node_packing_slots": 58
+  },
+  "optimistic_dense_upper_bound": {
+    "shared_control_memory_bytes": 1720320,
+    "total_active_memory_bytes": 634302464,
+    "active_memory_bytes_per_slot": 39643904,
+    "memory_reduction_percent": 3.94,
+    "estimated_brokered_memory_request_per_slot": 258888006,
+    "estimated_brokered_cpu_request_millis_per_slot": 98,
+    "brokered_node_packing_slots": 64,
+    "node_packing_gain_percent": 10.34,
+    "pod_objects": 1,
+    "failure_blast_radius_sandboxes": 16
+  },
+  "decision_thresholds": {
+    "minimum_memory_reduction_percent": 25,
+    "minimum_node_packing_gain_percent": 20,
+    "requires_standard_kubernetes_hard_resource_boundary": true
+  },
+  "economic_gate_passed": false,
+  "security_gate_passed": false,
+  "security_gate_reason": "Kubernetes does not provide hard per-sandbox cgroups inside one ordinary Pod; current options require delegated writable cgroups or a trusted node broker"
+}

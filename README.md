@@ -92,6 +92,7 @@ see [Installation and operation](docs/install.md).
 | [Control plane](docs/control-plane.md) | Broker boundary, protocol, work orders, ownership, and recovery |
 | [Installation and operation](docs/install.md) | Worker container, Kubernetes, S3, and maintenance |
 | [Performance](docs/performance.md) | Pull-request benchmarks and local measurements |
+| [Dense-worker decision](docs/dense-worker-decision.md) | Measured density gate, security cost, and rejection rationale |
 | [Release process](docs/releasing.md) | Public release gates and signed tags |
 | [Security policy](SECURITY.md) | Supported boundary and vulnerability reporting |
 | [Contributing](CONTRIBUTING.md) | Development checks and design rules |
@@ -103,6 +104,8 @@ see [Installation and operation](docs/install.md).
 - The worker is self-contained and does not mount the Kubernetes node's
   containerd socket or snapshotter storage.
 - A sandbox uses one shared network and port namespace.
+- A worker Pod admits exactly one active sandbox; the measured dense-worker
+  design did not justify a host cgroup broker or larger failure blast radius.
 - Host CPU and memory limits apply to the complete sandbox.
 - Local artifact storage supports same-worker restore; S3-compatible storage
   supports cross-worker restore within a compatible backend cohort.

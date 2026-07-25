@@ -59,7 +59,9 @@ jobs:
       - name: Validate performance harness
         run: |
           python3 -m unittest discover -s tools/performance/tests
-          shellcheck tools/performance/run-control-plane.sh
+          shellcheck \
+            tools/performance/run-control-plane.sh \
+            tools/performance/run-density-gate.sh
       - name: Validate GitHub workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
