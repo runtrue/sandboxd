@@ -200,7 +200,7 @@ pub(super) fn write_writable_rootfs(
 
 fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), SandboxError> {
     validate_project(&record.project)?;
-    let valid_network_resources = if record.network_mode == NetworkMode::Loopback {
+    let valid_network_resources = if record.network_mode != NetworkMode::Private {
         record.network_namespaces.is_empty()
             && record.bridge.is_empty()
             && record.nft_table.is_empty()
@@ -311,6 +311,10 @@ mod tests {
 
         record.bridge = network::bridge_name(&record.project);
         assert!(validate_recovery_record(&record).is_err());
+
+        record.bridge.clear();
+        record.network_mode = NetworkMode::Userspace;
+        assert!(validate_recovery_record(&record).is_ok());
     }
 
     #[test]

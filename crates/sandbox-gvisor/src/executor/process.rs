@@ -421,7 +421,7 @@ impl Runsc {
             format!("--root={}", self.root.display()),
             format!(
                 "--network={}",
-                if self.network_mode == NetworkMode::Loopback {
+                if self.network_mode != NetworkMode::Private {
                     "none"
                 } else {
                     "sandbox"
@@ -433,7 +433,14 @@ impl Runsc {
             "--file-access=exclusive".to_owned(),
             "--file-access-mounts=exclusive".to_owned(),
             "--directfs=false".to_owned(),
-            "--host-uds=none".to_owned(),
+            format!(
+                "--host-uds={}",
+                if self.network_mode == NetworkMode::Userspace {
+                    "open"
+                } else {
+                    "none"
+                }
+            ),
             "--host-fifo=none".to_owned(),
             "--net-raw=false".to_owned(),
         ]

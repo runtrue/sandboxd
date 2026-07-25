@@ -22,6 +22,7 @@ pub(super) fn write_bundle(
     resolv: &Path,
     http_proxy: Option<&str>,
     no_proxy: Option<&str>,
+    userspace_socket: Option<&Path>,
     tmpfs_bytes: u64,
     guest_process_limit: u32,
     volumes: &[MountedVolume],
@@ -54,6 +55,12 @@ pub(super) fn write_bundle(
     if let Some(no_proxy) = no_proxy {
         environment.insert("NO_PROXY".to_owned(), no_proxy.to_owned());
         environment.insert("no_proxy".to_owned(), no_proxy.to_owned());
+    }
+    if userspace_socket.is_some() {
+        environment.insert(
+            "RUNTRUE_EGRESS_SOCKET".to_owned(),
+            "/run/lock/egress.sock".to_owned(),
+        );
     }
     let environment = environment
         .into_iter()
@@ -104,6 +111,17 @@ pub(super) fn write_bundle(
             "type": "bind",
             "source": volume.source(),
             "options": options,
+        }));
+    }
+    if let Some(socket) = userspace_socket {
+        let socket_directory = socket.parent().ok_or_else(|| {
+            SandboxError::Runtime("userspace transport has no parent directory".to_owned())
+        })?;
+        mounts.push(json!({
+            "destination": "/run/lock",
+            "type": "bind",
+            "source": socket_directory,
+            "options": ["rbind", "ro", "nosuid", "nodev", "noexec"],
         }));
     }
     let network_namespace = if network_namespace.is_empty() {
@@ -199,7 +217,7 @@ mod tests {
         }
     }
 
-    fn generated(profile_name: &str) -> serde_json::Value {
+    fn generated_with_userspace(profile_name: &str, userspace: bool) -> serde_json::Value {
         let directory = tempfile::tempdir().expect("temporary directory");
         let bundle = directory.path().join("bundle");
         let rootfs = directory.path().join("rootfs");
@@ -208,6 +226,11 @@ mod tests {
         fs::create_dir(&rootfs).expect("rootfs");
         fs::write(&hosts, "127.0.0.1 localhost\n").expect("hosts");
         fs::write(&resolv, "").expect("resolv");
+        let userspace_socket = userspace.then(|| {
+            let transport = directory.path().join("userspace-network");
+            fs::create_dir(&transport).expect("transport directory");
+            transport.join("egress.sock")
+        });
         let profile = GuestProfile::reviewed_named(profile_name).expect("reviewed profile");
         write_bundle(
             &bundle,
@@ -221,6 +244,7 @@ mod tests {
             &resolv,
             None,
             None,
+            userspace_socket.as_deref(),
             1024,
             96,
             &[],
@@ -229,6 +253,10 @@ mod tests {
         .expect("write bundle");
         serde_json::from_slice(&fs::read(bundle.join("config.json")).expect("read bundle"))
             .expect("decode bundle")
+    }
+
+    fn generated(profile_name: &str) -> serde_json::Value {
+        generated_with_userspace(profile_name, false)
     }
 
     #[test]
@@ -292,5 +320,30 @@ mod tests {
             assert!(config["linux"]["maskedPaths"].as_array().unwrap().len() >= 9);
             assert!(config["linux"]["readonlyPaths"].as_array().unwrap().len() >= 5);
         }
+    }
+
+    #[test]
+    fn userspace_transport_mounts_only_its_read_only_directory() {
+        let config = generated_with_userspace(STRICT_GUEST_PROFILE, true);
+        assert!(config["process"]["env"]
+            .as_array()
+            .expect("environment")
+            .iter()
+            .any(|value| value == "RUNTRUE_EGRESS_SOCKET=/run/lock/egress.sock"));
+        let transport = config["mounts"]
+            .as_array()
+            .expect("mounts")
+            .iter()
+            .find(|mount| mount["destination"] == "/run/lock")
+            .expect("transport mount");
+        assert_eq!(transport["type"], "bind");
+        assert_eq!(
+            transport["options"],
+            json!(["rbind", "ro", "nosuid", "nodev", "noexec"])
+        );
+        assert!(transport["source"]
+            .as_str()
+            .expect("transport source")
+            .ends_with("/userspace-network"));
     }
 }

@@ -7,6 +7,7 @@ pub(crate) const DEFAULT_SOCKET: &str = "/run/runtrue-sandboxd/control.sock";
 pub(crate) enum NetworkMode {
     Private,
     Loopback,
+    Userspace,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

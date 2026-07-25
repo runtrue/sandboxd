@@ -14,6 +14,7 @@ on:
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
       - "tools/test-k3s-autoscaling.sh"
+      - "tools/test-k3s-userspace-egress.sh"
   push:
     branches: [main]
     paths:
@@ -28,6 +29,7 @@ on:
       - "tools/test-k3s-resource-limits.sh"
       - "tools/test-k3s-brokered-runtime.sh"
       - "tools/test-k3s-autoscaling.sh"
+      - "tools/test-k3s-userspace-egress.sh"
   schedule:
     - cron: "41 3 * * 2"
   workflow_dispatch:
@@ -200,6 +202,11 @@ jobs:
           bash tools/test-k3s-fixed-runtime.sh \
             | tee k3s-diagnostics/conformance.log
 
+      - name: Run capability-free userspace egress conformance
+        run: |
+          bash tools/test-k3s-userspace-egress.sh \
+            | tee k3s-diagnostics/userspace-egress.log
+
       - name: Run k3s resource-boundary conformance
         run: |
           bash tools/test-k3s-resource-limits.sh \
@@ -233,6 +240,10 @@ jobs:
             -l app.kubernetes.io/name=sandboxd-fixed-runtime \
             --all-containers \
             --prefix >k3s-diagnostics/sandboxd.log 2>&1 || true
+          kubectl logs -n sandboxd-system \
+            -l app.kubernetes.io/name=sandboxd-userspace-runtime \
+            --all-containers \
+            --prefix >k3s-diagnostics/userspace-worker.log 2>&1 || true
           kubectl logs -n sandboxd-system \
             -l app.kubernetes.io/name=sandboxd-fixed-runtime-brokered \
             --all-containers \

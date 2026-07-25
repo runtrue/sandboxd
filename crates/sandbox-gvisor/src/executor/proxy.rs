@@ -2,9 +2,14 @@ use crate::SandboxError;
 use runtrue_sandbox_oci::{is_protected_destination, HttpScheme, NetworkPolicy, NetworkProfile};
 use std::{
     collections::BTreeSet,
-    fs::File,
-    io::{self, Read as _, Write as _},
+    fs::{self, File},
+    io::{self, Read, Write},
     net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs as _, UdpSocket},
+    os::unix::{
+        fs::PermissionsExt as _,
+        net::{UnixListener, UnixStream},
+    },
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
@@ -61,6 +66,45 @@ impl Drop for ConnectionGuard<'_> {
 }
 
 impl PolicyServices {
+    pub(super) fn start_userspace(
+        socket_path: &Path,
+        policy: &NetworkPolicy,
+    ) -> Result<Self, SandboxError> {
+        if policy.profile != NetworkProfile::HttpConnect || !policy.ingress.is_empty() {
+            return Err(SandboxError::Unsupported(
+                "userspace transport currently supports HTTP egress without ingress".to_owned(),
+            ));
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicBool::new(false));
+        let shared = shared_policy(policy, &stop);
+        let listener = UnixListener::bind(socket_path).map_err(|error| {
+            SandboxError::Runtime(format!("bind userspace egress transport: {error}"))
+        })?;
+        fs::set_permissions(socket_path, fs::Permissions::from_mode(0o666)).map_err(|error| {
+            SandboxError::Runtime(format!(
+                "set userspace egress transport permissions: {error}"
+            ))
+        })?;
+        listener.set_nonblocking(true).map_err(|error| {
+            SandboxError::Runtime(format!("configure userspace egress transport: {error}"))
+        })?;
+        let thread_shared = Arc::clone(&shared);
+        let thread = thread::Builder::new()
+            .name("sandbox-userspace-http".to_owned())
+            .spawn(move || serve_unix_proxy(listener, &thread_shared))
+            .map_err(|error| {
+                SandboxError::Runtime(format!("start userspace HTTP policy proxy: {error}"))
+            })?;
+        Ok(Self {
+            stop,
+            active,
+            shared,
+            threads: vec![thread],
+            endpoints: Vec::new(),
+        })
+    }
+
     pub(super) fn start(
         gateway: IpAddr,
         guest: IpAddr,
@@ -71,18 +115,7 @@ impl PolicyServices {
         }
         let stop = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicBool::new(false));
-        let shared = Arc::new(Shared {
-            policy: policy.clone(),
-            stop: Arc::clone(&stop),
-            active_connections: AtomicU32::new(0),
-            transferred_bytes: AtomicU64::new(0),
-            dns_queries: AtomicU32::new(0),
-            dns_bytes: AtomicU64::new(0),
-            bandwidth: Mutex::new(Bandwidth {
-                available: Instant::now(),
-            }),
-            connections: Mutex::new(Vec::new()),
-        });
+        let shared = shared_policy(policy, &stop);
         let dns = if policy.profile == NetworkProfile::None {
             None
         } else {
@@ -192,6 +225,21 @@ impl PolicyServices {
     }
 }
 
+fn shared_policy(policy: &NetworkPolicy, stop: &Arc<AtomicBool>) -> Arc<Shared> {
+    Arc::new(Shared {
+        policy: policy.clone(),
+        stop: Arc::clone(stop),
+        active_connections: AtomicU32::new(0),
+        transferred_bytes: AtomicU64::new(0),
+        dns_queries: AtomicU32::new(0),
+        dns_bytes: AtomicU64::new(0),
+        bandwidth: Mutex::new(Bandwidth {
+            available: Instant::now(),
+        }),
+        connections: Mutex::new(Vec::new()),
+    })
+}
+
 impl Drop for PolicyServices {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -206,6 +254,35 @@ impl Drop for PolicyServices {
             .drain(..)
         {
             let _ = connection.join();
+        }
+    }
+}
+
+fn serve_unix_proxy(listener: UnixListener, shared: &Arc<Shared>) {
+    while !shared.stop.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if !try_acquire_connection(shared) {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                let connection_shared = Arc::clone(shared);
+                match thread::Builder::new()
+                    .name("sandbox-userspace-http-connection".to_owned())
+                    .spawn(move || {
+                        let _ = handle_unix_proxy(stream, &connection_shared);
+                    }) {
+                    Ok(connection) => track_connection(shared, connection),
+                    Err(_) => {
+                        shared.active_connections.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
         }
     }
 }
@@ -445,6 +522,42 @@ fn handle_proxy(mut client: TcpStream, shared: &Shared) -> io::Result<()> {
     relay(client, upstream, shared)
 }
 
+fn handle_unix_proxy(mut client: UnixStream, shared: &Shared) -> io::Result<()> {
+    let _guard = ConnectionGuard(&shared.active_connections);
+    client.set_read_timeout(Some(IO_TIMEOUT))?;
+    client.set_write_timeout(Some(IO_TIMEOUT))?;
+    let request = read_header(&mut client)?;
+    let parsed =
+        parse_request(&request).ok_or_else(|| io::Error::other("invalid proxy request"))?;
+    if !shared
+        .policy
+        .permits_http(&parsed.domain, parsed.scheme, parsed.port)
+    {
+        client.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")?;
+        return Ok(());
+    }
+    let destination = resolve_public(&parsed.domain, parsed.port)?;
+    let mut upstream = TcpStream::connect_timeout(&destination, IO_TIMEOUT)?;
+    upstream.set_read_timeout(Some(IO_TIMEOUT))?;
+    upstream.set_write_timeout(Some(IO_TIMEOUT))?;
+    if parsed.connect {
+        client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+    } else {
+        reserve_bytes(
+            &shared.transferred_bytes,
+            shared.policy.limits.maximum_bytes,
+            parsed.forward_header.len() as u64,
+        )?;
+        throttle(
+            &shared.bandwidth,
+            shared.policy.limits.bandwidth_bytes_per_second,
+            parsed.forward_header.len() as u64,
+        );
+        upstream.write_all(&parsed.forward_header)?;
+    }
+    relay_unix(client, upstream, shared)
+}
+
 fn try_acquire_connection(shared: &Shared) -> bool {
     shared
         .active_connections
@@ -468,7 +581,7 @@ struct ParsedRequest {
     forward_header: Vec<u8>,
 }
 
-fn read_header(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+fn read_header(stream: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut result = Vec::new();
     let mut buffer = [0_u8; 1024];
     while result.len() < MAXIMUM_HEADER_BYTES {
@@ -605,10 +718,47 @@ fn relay(client: TcpStream, upstream: TcpStream, shared: &Shared) -> io::Result<
     })
 }
 
+fn relay_unix(client: UnixStream, upstream: TcpStream, shared: &Shared) -> io::Result<()> {
+    let mut client_reader = client.try_clone()?;
+    let mut upstream_writer = upstream.try_clone()?;
+    let stop = Arc::clone(&shared.stop);
+    let bytes = &shared.transferred_bytes;
+    let maximum = shared.policy.limits.maximum_bytes;
+    let rate = shared.policy.limits.bandwidth_bytes_per_second;
+    thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            copy_limited(
+                &mut client_reader,
+                &mut upstream_writer,
+                &stop,
+                bytes,
+                maximum,
+                rate,
+                &shared.bandwidth,
+            )
+        });
+        let second = copy_limited(
+            &mut upstream.try_clone()?,
+            &mut client.try_clone()?,
+            &shared.stop,
+            bytes,
+            maximum,
+            rate,
+            &shared.bandwidth,
+        );
+        let first = first
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("userspace relay panicked")));
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = upstream.shutdown(Shutdown::Both);
+        first.and(second).map(|_| ())
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn copy_limited(
-    reader: &mut TcpStream,
-    writer: &mut TcpStream,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
     stop: &AtomicBool,
     bytes: &AtomicU64,
     maximum: u64,
@@ -862,6 +1012,34 @@ mod tests {
         };
         assert!(policy.permits_http("api.example.com", HttpScheme::Https, 443));
         assert!(!policy.permits_http("example.com", HttpScheme::Https, 443));
+    }
+
+    #[test]
+    fn userspace_transport_denies_before_host_resolution() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let socket = directory.path().join("egress.sock");
+        let policy = NetworkPolicy {
+            profile: NetworkProfile::HttpConnect,
+            http_rules: vec![HttpEgressRule {
+                domains: vec!["api.example.com".to_owned()],
+                schemes: vec![HttpScheme::Https],
+                ports: vec![443],
+            }],
+            ..NetworkPolicy::default()
+        };
+        let services = PolicyServices::start_userspace(&socket, &policy).expect("transport");
+        let mut client = UnixStream::connect(&socket).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("timeout");
+        client
+            .write_all(b"CONNECT denied.invalid:443 HTTP/1.1\r\n\r\n")
+            .expect("request");
+        let mut response = [0_u8; 128];
+        let read = client.read(&mut response).expect("response");
+        assert!(response[..read].starts_with(b"HTTP/1.1 403 Forbidden"));
+        drop(client);
+        drop(services);
     }
 
     #[test]
