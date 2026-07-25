@@ -1,0 +1,149 @@
+name: userspace-egress-conformance
+
+x-runtrue-network:
+  profile: http_connect
+  http_rules:
+    - domains: [example.com]
+      schemes: [https]
+      ports: [443]
+  limits:
+    maximum_connections: 2
+    maximum_bytes: 1048576
+    bandwidth_bytes_per_second: 1048576
+
+networks:
+  application:
+    internal: true
+    driver: bridge
+
+services:
+  server:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import http.server, json
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"from": "nested-server", "ok": True}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *_):
+                pass
+        http.server.ThreadingHTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+    networks: [application]
+    healthcheck:
+      test: [CMD, /usr/local/bin/python3, -c, 'import socket; socket.create_connection(("127.0.0.1", 8080), timeout=0.5).close()']
+      interval_ms: 50
+      timeout_ms: 500
+      retries: 80
+    read_only: true
+
+  client:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import json, os, socket, ssl, time, urllib.request
+
+        with urllib.request.urlopen("http://server:8080/ready", timeout=2) as response:
+            internal = json.load(response)
+
+        direct_denied = False
+        try:
+            socket.create_connection(("93.184.216.34", 443), timeout=1)
+        except OSError:
+            direct_denied = True
+
+        dns_denied = False
+        try:
+            socket.getaddrinfo("example.com", 443)
+        except OSError:
+            dns_denied = True
+
+        raw_socket_denied = False
+        try:
+            socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        except OSError:
+            raw_socket_denied = True
+
+        def connect_request(authority):
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.settimeout(5)
+            connection.connect(os.environ["RUNTRUE_EGRESS_SOCKET"])
+            connection.sendall(
+                f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode()
+            )
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            return connection, response
+
+        blockers = []
+        for _ in range(2):
+            blocker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            blocker.settimeout(2)
+            blocker.connect(os.environ["RUNTRUE_EGRESS_SOCKET"])
+            blockers.append(blocker)
+        time.sleep(0.1)
+        overflow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        overflow.settimeout(2)
+        overflow.connect(os.environ["RUNTRUE_EGRESS_SOCKET"])
+        overflow_response = overflow.recv(4096)
+        overflow.close()
+        for blocker in blockers:
+            blocker.close()
+        assert overflow_response.startswith(b"HTTP/1.1 429")
+
+        denied, denied_response = connect_request("denied.invalid:443")
+        denied.close()
+        metadata, metadata_response = connect_request("169.254.169.254:80")
+        metadata.close()
+        started = time.monotonic()
+        connection, proxy_response = connect_request("example.com:443")
+        assert proxy_response.startswith(b"HTTP/1.1 200")
+        tls = ssl.create_default_context().wrap_socket(
+            connection, server_hostname="example.com"
+        )
+        tls.sendall(
+            b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        )
+        external = b""
+        while True:
+            chunk = tls.recv(16384)
+            if not chunk:
+                break
+            external += chunk
+        tls.close()
+        approved_https_ms = round((time.monotonic() - started) * 1000, 3)
+
+        assert internal == {"from": "nested-server", "ok": True}
+        assert direct_denied
+        assert dns_denied
+        assert raw_socket_denied
+        assert denied_response.startswith(b"HTTP/1.1 403")
+        assert not metadata_response.startswith(b"HTTP/1.1 200")
+        assert external.startswith(b"HTTP/1.1 200")
+        print(json.dumps({
+            "approved_https": True,
+            "approved_https_ms": approved_https_ms,
+            "connection_limit_enforced": True,
+            "direct_dns_denied": dns_denied,
+            "direct_ip_denied": direct_denied,
+            "internal": internal,
+            "marker": "userspace-egress-passed",
+            "metadata_denied": True,
+            "raw_socket_denied": raw_socket_denied,
+            "unapproved_domain_denied": True
+        }, sort_keys=True))
+    depends_on:
+      server:
+        condition: service_healthy
+    networks: [application]
+    read_only: true

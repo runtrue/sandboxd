@@ -47,9 +47,28 @@ build.
 ## Run the worker container
 
 Run the container as UID 0 with `privileged: false`. The worker needs a bounded
-set of kernel capabilities because it creates mount and network namespaces,
-bridges, veth pairs, routes, nftables rules, and filesystem mounts. The
-following reduced set passes the lifecycle and writable-root snapshot suites:
+set of kernel capabilities selected by feature. The recommended fixed and
+userspace-egress profiles use only `SETGID`, `SETUID`, `SYS_CHROOT`, and
+`SYS_ADMIN` inside a Kubernetes-created user namespace:
+
+```yaml
+securityContext:
+  runAsUser: 0
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+    add: [SETGID, SETUID, SYS_ADMIN, SYS_CHROOT]
+```
+
+The userspace-egress profile adds no Linux capability and no host networking
+setting. It uses `--network-mode userspace`, runsc `network=none`, and a single
+read-only Unix-socket directory. It supports policy-approved HTTP CONNECT;
+direct guest DNS, raw TCP/UDP, transparent networking, and ingress remain
+disabled.
+
+The following larger set is only for the host-integrated compatibility
+profile that exercises lifecycle, kernel networking, and writable-root
+snapshot suites:
 
 ```yaml
 securityContext:
@@ -72,11 +91,11 @@ securityContext:
       - MKNOD
 ```
 
-This is a validated deployment set, not a claim that every capability is
-required by every configuration. `SYS_ADMIN` is required for namespaces and
-mounts, `NET_ADMIN` for worker networking, and `NET_RAW` by the current runsc
-network setup. `MKNOD` is needed when writable-root snapshot restore recreates
-OCI whiteouts and may be omitted when that feature is disabled.
+`SYS_ADMIN` is required for the current normal runsc namespace/mount setup.
+`NET_ADMIN` and `NET_RAW` are required only by `--network-mode private`.
+`MKNOD` is required only when writable-root snapshot restore recreates OCI
+whiteouts. Do not grant the compatibility set to fixed or userspace-egress
+workers.
 
 The container also needs:
 

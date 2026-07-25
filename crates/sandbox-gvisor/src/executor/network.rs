@@ -6,7 +6,7 @@ use std::{
     fs,
     io::Write as _,
     net::IpAddr,
-    os::unix::fs::PermissionsExt as _,
+    os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -28,6 +28,7 @@ pub(super) struct ServiceNetwork {
     pub(super) resolv_path: PathBuf,
     pub(super) http_proxy: Option<String>,
     pub(super) no_proxy: Option<String>,
+    pub(super) userspace_socket: Option<PathBuf>,
 }
 
 impl ProjectNetwork {
@@ -49,29 +50,56 @@ impl ProjectNetwork {
                 "the gVisor backend supports one private logical network".to_owned(),
             ));
         }
-        if configuration.network_mode == NetworkMode::Loopback {
-            if lock.policy.network.profile != NetworkProfile::None
-                || !lock.policy.network.ingress.is_empty()
-            {
-                return Err(SandboxError::Unsupported(
-                    "loopback network mode requires the none network profile".to_owned(),
-                ));
+        if configuration.network_mode != NetworkMode::Private {
+            match configuration.network_mode {
+                NetworkMode::Loopback
+                    if lock.policy.network.profile == NetworkProfile::None
+                        && lock.policy.network.ingress.is_empty() => {}
+                NetworkMode::Userspace
+                    if lock.policy.network.profile == NetworkProfile::HttpConnect
+                        && lock.policy.network.ingress.is_empty() => {}
+                NetworkMode::Loopback => {
+                    return Err(SandboxError::Unsupported(
+                        "loopback network mode requires the none network profile".to_owned(),
+                    ))
+                }
+                NetworkMode::Userspace => {
+                    return Err(SandboxError::Unsupported(
+                        "userspace network mode requires HTTP egress without ingress".to_owned(),
+                    ))
+                }
+                NetworkMode::Private => unreachable!("private network handled below"),
             }
+            let userspace_socket = if configuration.network_mode == NetworkMode::Userspace {
+                let directory = state.join("userspace-network");
+                fs::DirBuilder::new()
+                    .mode(0o755)
+                    .create(&directory)
+                    .map_err(|source| crate::error::io_error(&directory, source))?;
+                Some(directory.join("egress.sock"))
+            } else {
+                None
+            };
             let sandbox = ServiceNetwork {
                 namespace: String::new(),
                 hosts_path: state.join("hosts"),
                 resolv_path: state.join("resolv.conf"),
                 http_proxy: None,
                 no_proxy: None,
+                userspace_socket: userspace_socket.clone(),
             };
             write_guest_files(&sandbox, lock, None)?;
+            let policy_services = userspace_socket
+                .as_deref()
+                .map(|socket| PolicyServices::start_userspace(socket, &lock.policy.network))
+                .transpose()?;
             return Ok(Self {
                 ip: ip_program.to_path_buf(),
                 nft: nft_program.to_path_buf(),
                 bridge: String::new(),
                 nft_table: String::new(),
                 sandbox,
-                policy_services: None,
+                policy_services,
             });
         }
         let ip = validate_ip(ip_program)?;
@@ -100,6 +128,7 @@ impl ProjectNetwork {
                 resolv_path: state.join("resolv.conf"),
                 http_proxy: None,
                 no_proxy: None,
+                userspace_socket: None,
             },
             policy_services: None,
         };
@@ -127,11 +156,11 @@ impl ProjectNetwork {
     }
 
     pub(super) fn cleanup(&mut self) -> Result<(), SandboxError> {
+        self.policy_services = None;
         if self.bridge.is_empty() {
             return Ok(());
         }
         let mut first_error = None;
-        self.policy_services = None;
         if let Err(error) = delete_nft_table(&self.nft, &self.nft_table) {
             first_error.get_or_insert(error);
         }
@@ -284,7 +313,7 @@ pub(super) fn planned_resources(
     lock: &TopologyLock,
     network_mode: NetworkMode,
 ) -> (String, Vec<String>, String) {
-    if network_mode == NetworkMode::Loopback {
+    if network_mode != NetworkMode::Private {
         return (String::new(), Vec::new(), String::new());
     }
     let bridge = bridge_name(project);

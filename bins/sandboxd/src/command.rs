@@ -95,6 +95,9 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                     crate::cli::NetworkMode::Loopback => {
                         runtrue_sandbox_gvisor::executor::NetworkMode::Loopback
                     }
+                    crate::cli::NetworkMode::Userspace => {
+                        runtrue_sandbox_gvisor::executor::NetworkMode::Userspace
+                    }
                 },
                 cgroup_mode: match cgroup_mode {
                     crate::cli::CgroupMode::Managed => {
