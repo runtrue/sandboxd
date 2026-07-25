@@ -14,6 +14,9 @@ x-runtrue-network:
     maximum_response_bytes: 262144
     connect_timeout_ms: 5000
     idle_timeout_ms: 5000
+  ingress:
+    - service: server
+      container_port: 8080
 
 networks:
   application:
@@ -26,10 +29,76 @@ services:
     entrypoint: [/usr/local/bin/python3, -c]
     command:
       - |
-        import http.server, json
+        import http.server, json, socket, threading, time
+
+        def read_header(connection):
+            response = b""
+            while not response.endswith(b"\r\n\r\n"):
+                chunk = connection.recv(1)
+                if not chunk:
+                    raise RuntimeError("tunnel closed before header")
+                response += chunk
+                if len(response) > 16384:
+                    raise RuntimeError("tunnel header exceeded limit")
+            return response
+
+        def copy_stream(source, destination):
+            try:
+                while True:
+                    chunk = source.recv(16384)
+                    if not chunk:
+                        break
+                    destination.sendall(chunk)
+            finally:
+                try:
+                    destination.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+
+        def serve_tunnels(route):
+            while True:
+                tunnel = None
+                upstream = None
+                try:
+                    tunnel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    tunnel.settimeout(5)
+                    tunnel.connect(route["socket"])
+                    tunnel.sendall(
+                        f"RUNTRUE-TUNNEL/1 {route['credential']}\r\n\r\n".encode()
+                    )
+                    assert read_header(tunnel).startswith(
+                        b"RUNTRUE-TUNNEL/1 200 READY"
+                    )
+                    upstream = socket.create_connection(
+                        ("127.0.0.1", route["container_port"]), timeout=5
+                    )
+                    tunnel.settimeout(None)
+                    upstream.settimeout(None)
+                    outgoing = threading.Thread(
+                        target=copy_stream, args=(tunnel, upstream), daemon=True
+                    )
+                    incoming = threading.Thread(
+                        target=copy_stream, args=(upstream, tunnel), daemon=True
+                    )
+                    outgoing.start()
+                    incoming.start()
+                    outgoing.join()
+                    incoming.join()
+                except (AssertionError, OSError, RuntimeError):
+                    time.sleep(0.05)
+                finally:
+                    if tunnel is not None:
+                        tunnel.close()
+                    if upstream is not None:
+                        upstream.close()
+
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                body = json.dumps({"from": "nested-server", "ok": True}).encode()
+                body = (
+                    b"x" * 131072
+                    if self.path == "/bulk"
+                    else json.dumps({"from": "nested-server", "ok": True}).encode()
+                )
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(body)))
@@ -37,7 +106,15 @@ services:
                 self.wfile.write(body)
             def log_message(self, *_):
                 pass
-        http.server.ThreadingHTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 8080), Handler)
+        with open("/run/lock/ingress.json", encoding="utf-8") as source:
+            ingress = json.load(source)
+        assert ingress["schema_version"] == 1
+        routes = [route for route in ingress["routes"] if route["service"] == "server"]
+        assert len(routes) == 1
+        threading.Thread(target=serve_tunnels, args=(routes[0],), daemon=True).start()
+        server.serve_forever()
     networks: [application]
     healthcheck:
       test: [CMD, /usr/local/bin/python3, -c, 'import socket; socket.create_connection(("127.0.0.1", 8080), timeout=0.5).close()']
@@ -55,6 +132,10 @@ services:
 
         with urllib.request.urlopen("http://server:8080/ready", timeout=2) as response:
             internal = json.load(response)
+        direct_started = time.monotonic()
+        with urllib.request.urlopen("http://server:8080/bulk", timeout=2) as response:
+            assert len(response.read()) == 131072
+        direct_bulk_ms = round((time.monotonic() - direct_started) * 1000, 3)
 
         direct_denied = False
         try:
@@ -139,6 +220,7 @@ services:
             "approved_https_ms": approved_https_ms,
             "connection_limit_enforced": True,
             "direct_dns_denied": dns_denied,
+            "direct_bulk_ms": direct_bulk_ms,
             "direct_ip_denied": direct_denied,
             "internal": internal,
             "marker": "userspace-egress-passed",

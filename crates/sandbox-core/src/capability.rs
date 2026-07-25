@@ -18,6 +18,48 @@ impl SnapshotPortability {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkCapabilities {
+    pub http_connect_proxy: bool,
+    pub reverse_http_ingress: bool,
+    pub restricted_tcp: bool,
+    pub transparent_tcp: bool,
+    pub udp: bool,
+}
+
+impl NetworkCapabilities {
+    pub const LOOPBACK: Self = Self {
+        http_connect_proxy: false,
+        reverse_http_ingress: false,
+        restricted_tcp: false,
+        transparent_tcp: false,
+        udp: false,
+    };
+
+    pub const USERSPACE: Self = Self {
+        http_connect_proxy: true,
+        reverse_http_ingress: true,
+        restricted_tcp: false,
+        transparent_tcp: false,
+        udp: false,
+    };
+
+    pub const PRIVATE: Self = Self {
+        http_connect_proxy: true,
+        reverse_http_ingress: true,
+        restricted_tcp: true,
+        transparent_tcp: false,
+        udp: false,
+    };
+}
+
+impl Default for NetworkCapabilities {
+    fn default() -> Self {
+        Self::LOOPBACK
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendCapabilities {
@@ -37,6 +79,8 @@ pub struct BackendCapabilities {
     pub maximum_containers: u16,
     pub maximum_writable_root_bytes: u64,
     pub guest_profiles: Vec<GuestProfile>,
+    #[serde(default)]
+    pub network: NetworkCapabilities,
 }
 
 impl BackendCapabilities {
@@ -64,7 +108,14 @@ impl BackendCapabilities {
             maximum_containers,
             maximum_writable_root_bytes,
             guest_profiles,
+            network: NetworkCapabilities::LOOPBACK,
         }
+    }
+
+    #[must_use]
+    pub const fn with_network(mut self, network: NetworkCapabilities) -> Self {
+        self.network = network;
+        self
     }
 }
 
@@ -88,5 +139,14 @@ mod tests {
         assert!(capabilities.stop_and_snapshot);
         assert!(capabilities.writable_root_filesystems);
         assert!(capabilities.writable_root_snapshots);
+        assert_eq!(capabilities.network, NetworkCapabilities::LOOPBACK);
+        let mut legacy = serde_json::to_value(&capabilities).expect("serialize capabilities");
+        legacy
+            .as_object_mut()
+            .expect("capability object")
+            .remove("network");
+        let decoded: BackendCapabilities =
+            serde_json::from_value(legacy).expect("decode legacy capabilities");
+        assert_eq!(decoded.network, NetworkCapabilities::LOOPBACK);
     }
 }

@@ -26,7 +26,7 @@ pub use autoscale::{
     WorkerPoolKey, WorkerPoolRequest, MAXIMUM_WORKER_POOLS, WORKER_POOL_CATALOG_VERSION,
 };
 pub use backend::{BackendDescriptor, BackendKind};
-pub use capability::{BackendCapabilities, SnapshotPortability};
+pub use capability::{BackendCapabilities, NetworkCapabilities, SnapshotPortability};
 pub use error::CoreError;
 pub use guest_profile::{
     GuestProfile, GuestProfileIdentity, GuestProfileRestrictions, OCI_COMPAT_GUEST_PROFILE,

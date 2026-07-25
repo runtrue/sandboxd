@@ -37,7 +37,7 @@ live snapshot/restore of a read-only topology.
 | --- | --- | --- | --- | --- |
 | A. Rootless direct run | Non-root UID; all capabilities dropped; `allowPrivilegeEscalation: false` | One direct `runsc --rootless=true --network=none run` | Normal daemon create, save/restore, Netstack, managed cgroups | The node's AppArmor user-namespace restriction had to be disabled for this test. gVisor rootless documents the remaining runtime limits. This is not a viable full daemon profile. |
 | B. Fixed runtime | User namespace plus `SETGID`, `SETUID`, `SYS_CHROOT`, `SYS_ADMIN` | Fixed read-only images, multi-container Sentry, loopback, lifecycle APIs, local read-only snapshot/restore | Dynamic images, ingress/egress, writable roots/volumes, managed cgroups | Signed rootfs attestation, custom AppArmor/seccomp, durable-state qualification, cleanup-race fix |
-| B-E. Userspace HTTPS egress | Level B; no networking capability or host-network setting; `network-mode=userspace`; gVisor `network=none` and `host-uds=open` | Policy-approved HTTP CONNECT over one read-only mounted Unix-socket directory; connection, aggregate-byte, and bandwidth ceilings | Raw TCP/UDP, guest DNS, transparent proxying, standard proxy environment support, ingress | Ship a narrow client/agent, restrict outer Pod egress with an FQDN-aware CNI or egress gateway, qualify custom MAC/seccomp profiles |
+| B-N. Userspace policy network | Level B; no networking capability or host-network setting; `network-mode=userspace`; gVisor `network=none` and `host-uds=open` | Policy-approved HTTP CONNECT and declared reverse HTTP ingress over one read-only mounted Unix-socket directory; connection, directional-byte, aggregate-byte, bandwidth, and deadline ceilings | Raw TCP/UDP, guest DNS, transparent proxying, standard proxy environment support | Ship the reviewed guest agent and gateway-to-broker route adapter, restrict outer Pod egress with an FQDN-aware CNI or egress gateway, qualify custom MAC/seccomp profiles |
 | B+ measured runtime | Level B plus `DAC_READ_SEARCH` | Recomputes full root digest, entry count, and byte count at admission | Same feature limits as B | Use only when runtime measurement is worth pod-wide read/search bypass authority |
 | C. Dynamic runtime | One user-namespaced worker container with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, `SYS_ADMIN`, `SYS_CHROOT` and a private containerd process | Arbitrary pinned OCI pull, validation, unpack, and loopback execution | Kernel policy networking, current loop/ext4 storage, managed cgroups | Registry trust, credential delivery/rotation, image GC, egress policy, supervisor qualification, and a future safe privilege split |
 | D. Kernel networking | Level B or C plus `NET_ADMIN`, `NET_RAW`; `network-mode=private`; namespaced `net.ipv4.ip_forward=1` | Bridge/veth network, nftables policy, policy proxies, HTTP/TCP egress, ingress plumbing | Still no current writable storage or managed cgroups | Kubelet unsafe-sysctl allowlist, pod sysctl, dedicated nodes, custom network security profiles |
@@ -101,9 +101,9 @@ the node rejected the unsafe sysctl. The fully privileged compatibility
 profile passed HTTPS access through the policy network. Therefore Level D is
 specified but not release-qualified under the no-host-change constraint.
 
-### Userspace HTTPS egress
+### Userspace policy networking
 
-The B-E profile keeps runsc at `--network=none`, so the guest has loopback but
+The B-N profile keeps runsc at `--network=none`, so the guest has loopback but
 no route or DNS server. sandboxd owns an `AF_UNIX` CONNECT endpoint and mounts
 only its dedicated read-only directory at `/run/lock` in the guest. The proxy
 checks the signed domain, scheme, and port policy before host resolution and
@@ -115,6 +115,20 @@ bytes, per-connection guest-to-upstream bytes, per-connection
 upstream-to-guest bytes, bandwidth, connect/header time, and idle time. Because
 HTTPS payloads are opaque after CONNECT, the directional limits bound encrypted
 tunnel bytes; they are not semantic HTTP body-size enforcement.
+
+For each declared ingress rule, sandboxd creates a caller-inaccessible
+loopback endpoint with a random gateway bearer credential and a separate
+reverse-tunnel Unix socket with a random guest credential. The guest
+configuration is mounted from runtime state and is not part of the guest
+rootfs or runsc checkpoint. Route activation happens only after all services
+start and the durable assignment becomes active. Pause, stop, transfer, and
+reassignment fence the route; a generation change rejects pre-fence queued
+tunnels. Restore constructs a new policy service and fresh credentials.
+
+The checked-in conformance agent demonstrates the narrow protocol. A production
+guest-agent binary and the broker/gateway route adapter remain required before
+tenant-facing ingress deployment. No Kubernetes Service, Ingress, `hostPort`,
+or caller-selected listener is created for the worker.
 
 `--host-uds=open` is broader than one socket at the runsc flag level. The
 boundary therefore also depends on rootfs and volume admission rejecting Unix
@@ -137,9 +151,10 @@ signed per-topology policy remains mandatory.
 | Health, inspect, logs, pause/resume | B | Passed | Continuous conformance and crash recovery |
 | Local live snapshot/restore, read-only root | B | Passed, with one cleanup race observed | Fix idempotent stop/reconcile race; repeated fault injection |
 | Dynamic pinned OCI images | C | Passed with private containerd | Registry credentials, trust policy, controlled registry egress, GC |
-| Policy-approved HTTPS CONNECT egress | B-E | Passed in local k3s without host network mutation | Narrow client/agent and FQDN-aware outer Pod egress; no transparent compatibility |
+| Policy-approved HTTPS CONNECT egress | B-N | Passed in local k3s without host network mutation | Narrow client/agent and FQDN-aware outer Pod egress; no transparent compatibility |
+| Declared reverse HTTP ingress | B-N | Passed in local k3s, including authorization stripping and pause/resume tunnel fencing | Production guest agent and gateway-to-broker route adapter |
 | Restricted raw TCP/UDP egress | D | Passed only in host-integrated profile | Keep disabled or qualify the kernel-network profile |
-| Ingress | D | Plumbing exists; public exposure intentionally not tested | Authenticated local/ClusterIP endpoint, policy tests; never host networking |
+| Kernel-network ingress | D | Plumbing exists; public exposure intentionally not tested | Prefer B-N reverse ingress; otherwise authenticated local/ClusterIP endpoint and policy tests, never host networking |
 | Writable OCI root | E or F | Failed at B; passed at F | Replace loop/ext4/overlay provider or add a storage broker |
 | Persistent named writable volume | E or F | Failed at B; passed at F | Broker/userspace provider and explicit ownership/idmapping |
 | Artifact read-only volume | B expected | Not release-qualified | Integrity, mount-permission, quota, and recovery conformance |
