@@ -9,6 +9,14 @@ client -> identity and policy -> work-order signer -> local broker
        -> workload socket -> sandboxd -> gVisor sandbox
 
 operator ---------------------> operator socket
+
+HTTP ingress follows the same authority chain:
+
+```text
+tenant HTTP -> authenticated gateway -> assigned worker broker
+            -> signed current-epoch inspect -> sandboxd loopback endpoint
+            -> authenticated reverse tunnel -> declared guest service
+```
 ```
 
 ## Request path
@@ -95,6 +103,34 @@ ceilings; it contains no work-order signing key. Broker readiness stays false
 until both the Unix socket and registration are live. Kubernetes injects the
 Pod IP through `POD_IP` and the gateway host through
 `SANDBOX_GATEWAY_ADDRESS`.
+
+## Reverse HTTP ingress
+
+An authenticated tenant may send HTTP to:
+
+```text
+/v1/placements/{idempotency_key}/ingress/{service}/{container_port}/{path}
+```
+
+`container_port` is the declared guest port, never a host port. The gateway
+resolves only an assigned, unexpired placement belonging to the authenticated
+tenant and subject. It creates a fresh short-lived `inspect` work order for
+each HTTP request. The worker broker submits that order over the workload Unix
+socket, accepts only one exact matching loopback endpoint returned by
+sandboxd, and injects its epoch-scoped bearer locally. Tenant authorization and
+all internal routing headers are removed before the request reaches the guest.
+
+The gateway cannot supply an endpoint address, bearer, worker identity, or
+assignment epoch. Pause, fencing, quarantine, lease expiration, and
+reassignment therefore fail closed in sandboxd or the durable placement
+lookup. Gateway and broker each cap headers at 16 KiB and request/response
+bodies at 1 MiB; their existing concurrency and I/O deadlines also apply.
+Chunked and connection-close responses are decoded within that bound.
+
+The public route currently exists only while the placement row is actively
+assigned. A completed `create` placement is not a durable service lease, so
+long-lived service exposure still requires the persistent assignment lifecycle
+described in the deployment security profile.
 
 ## Protocol
 

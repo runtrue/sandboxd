@@ -1,5 +1,6 @@
 mod broker;
 mod cli;
+mod ingress;
 mod protocol;
 mod registration;
 

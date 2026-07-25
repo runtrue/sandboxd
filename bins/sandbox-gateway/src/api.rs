@@ -1,5 +1,8 @@
-use crate::auth::{AuthPolicy, Principal};
 use crate::worker_auth::WorkerAuthPolicy;
+use crate::{
+    auth::{AuthPolicy, Principal},
+    signer::WorkOrderSigner,
+};
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
@@ -7,7 +10,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use futures_util::{stream, Stream};
@@ -23,6 +26,7 @@ use runtrue_sandbox_protocol::{Operation, WorkerAdvertisement, WorkloadResponse}
 use serde::{Deserialize, Serialize};
 use std::{
     convert::Infallible,
+    sync::atomic::AtomicU64,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -43,6 +47,8 @@ pub(crate) struct AppState {
     pub(crate) worker_pools: Arc<WorkerPoolCatalog>,
     pub(crate) result_streams: Arc<Semaphore>,
     pub(crate) result_stream_poll_interval: Duration,
+    pub(crate) route_signer: Option<Arc<WorkOrderSigner>>,
+    pub(crate) route_sequence: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -59,7 +65,14 @@ impl AppState {
             worker_pools,
             result_streams: Arc::new(Semaphore::new(MAXIMUM_RESULT_STREAMS)),
             result_stream_poll_interval: RESULT_STREAM_POLL_INTERVAL,
+            route_signer: None,
+            route_sequence: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub(crate) fn with_route_signer(mut self, signer: Arc<WorkOrderSigner>) -> Self {
+        self.route_signer = Some(signer);
+        self
     }
 }
 
@@ -108,6 +121,14 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/v1/placements/{idempotency_key}/events",
             get(stream_placement),
+        )
+        .route(
+            "/v1/placements/{idempotency_key}/ingress/{service}/{container_port}",
+            any(crate::ingress::forward_root),
+        )
+        .route(
+            "/v1/placements/{idempotency_key}/ingress/{service}/{container_port}/{*path}",
+            any(crate::ingress::forward_path),
         )
         .route("/internal/v1/workers/register", post(register_worker))
         .route(
@@ -530,13 +551,14 @@ impl From<PlacementRecord> for PlacementResponse {
 }
 
 #[derive(Debug)]
-enum ApiError {
+pub(crate) enum ApiError {
     Unauthorized,
     Forbidden,
     Invalid,
     NotFound,
     Conflict,
     Exhausted,
+    TooLarge,
     Unavailable,
 }
 
@@ -566,6 +588,7 @@ impl IntoResponse for ApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict => (StatusCode::CONFLICT, "conflict"),
             Self::Exhausted => (StatusCode::TOO_MANY_REQUESTS, "resource_exhausted"),
+            Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
         };
         (status, Json(ErrorResponse { error })).into_response()

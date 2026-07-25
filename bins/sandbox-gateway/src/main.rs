@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod config;
 mod dispatcher;
+mod ingress;
 mod signer;
 mod worker_auth;
 

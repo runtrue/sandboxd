@@ -135,7 +135,7 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
     )?);
     let dispatcher = Dispatcher::new(
         Arc::clone(&store),
-        signer,
+        Arc::clone(&signer),
         Duration::from_millis(args.dispatch_interval_milliseconds),
         Duration::from_secs(args.dispatch_timeout_seconds),
         args.dispatch_worker_scan_limit,
@@ -145,7 +145,8 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         Arc::new(AuthPolicy::load(&args.auth_policy)?),
         Arc::new(WorkerAuthPolicy::load(&args.worker_auth_policy)?),
         Arc::new(read_worker_pool_catalog(&args.worker_pool_catalog)?),
-    );
+    )
+    .with_route_signer(signer);
     tokio::spawn(dispatcher.run());
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
