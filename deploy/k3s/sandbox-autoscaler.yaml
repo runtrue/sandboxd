@@ -32,6 +32,38 @@ subjects:
     name: sandbox-autoscaler
     namespace: sandboxd-system
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-autoscaler
+  namespace: sandboxd-system
+spec:
+  selector:
+    app.kubernetes.io/name: sandbox-autoscaler
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-autoscaler-metrics
+  namespace: sandboxd-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-autoscaler
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              runtrue.io/metrics-scraper: "true"
+      ports:
+        - protocol: TCP
+          port: 9090
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -78,7 +110,14 @@ spec:
             - --namespace
             - sandboxd-system
             - --maximum-total-workers
-            - "1000"
+            - "100"
+            - --metrics-listen
+            - 0.0.0.0:9090
+            - --allow-non-loopback-metrics
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
           securityContext:
             allowPrivilegeEscalation: false
             privileged: false
@@ -96,6 +135,24 @@ spec:
             limits:
               cpu: 500m
               memory: 128Mi
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 3
           volumeMounts:
             - name: database-identity
               mountPath: /run/secrets/database/url

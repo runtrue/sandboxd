@@ -40,10 +40,15 @@ TO sandboxd_placement_runtime;
 GRANT USAGE, SELECT
 ON ALL SEQUENCES IN SCHEMA sandboxd_placement
 TO sandboxd_placement_runtime;
+GRANT DELETE
+ON sandboxd_placement.pool_activations
+TO sandboxd_placement_runtime;
 ```
 
-Do not grant the runtime role database ownership, schema creation, table
-deletion, role administration, replication, or superuser privileges.
+The narrow row-delete grant only bounds completed activation measurements; no
+request, worker, assignment, audit, or tenant-policy row is deletable by this
+role. Do not grant database ownership, schema creation, table DDL, role
+administration, replication, or superuser privileges.
 
 The repository is intentionally not a tenant-facing API.
 
@@ -81,7 +86,7 @@ DDL-capable identity and the same key names. Create `sandbox-gateway-auth` with
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "credentials": {
     "key-id": {
       "token_sha256": "64-lowercase-hex-characters",
@@ -92,11 +97,23 @@ DDL-capable identity and the same key names. Create `sandbox-gateway-auth` with
       "pools": ["fixed-standard-warm"],
       "topologies": ["topology-v1"],
       "resource_shapes": ["standard-v1"],
-      "compatibility_cohorts": ["runsc-v1"]
+      "compatibility_cohorts": ["runsc-v1"],
+      "service_levels": {
+        "fixed-standard-warm": {
+          "mode": "retained_warm",
+          "clean_workers": 2
+        }
+      }
     }
   }
 }
 ```
+
+Every authorized pool must have exactly one service-level entry. A
+`scale_to_zero` entry is accepted only for a reviewed pool whose minimum and
+warm headroom are both zero. `retained_warm` is accepted only when the reviewed
+pool retains at least the requested clean slots. The client cannot override
+this credential-bound choice in a placement body.
 
 Clients send `Authorization: Bearer key-id.<high-entropy-secret>` and
 `Idempotency-Key: <bounded-key>`. Store only the SHA-256 digest of a randomly

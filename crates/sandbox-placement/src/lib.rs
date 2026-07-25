@@ -1,7 +1,8 @@
 mod postgres;
 
 pub use postgres::{
-    Assignment, CompletionOutcome, DurablePoolDecision, EnqueueOutcome, PlacementDatabaseTls,
-    PlacementRecord, PlacementState, PlacementStoreConfig, PlacementStoreError,
-    PlacementSubmission, PlacementWorkerState, PostgresPlacementStore, WorkerRegistration,
+    Assignment, AutoscaleMetrics, CompletionOutcome, DurablePoolDecision, EnqueueOutcome,
+    PlacementDatabaseTls, PlacementRecord, PlacementState, PlacementStoreConfig,
+    PlacementStoreError, PlacementSubmission, PlacementWorkerState, PoolAutoscaleMetrics,
+    PoolLatencyMetrics, PostgresPlacementStore, WorkerRegistration,
 };

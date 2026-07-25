@@ -255,6 +255,9 @@ async fn submit(
         .worker_pools
         .pool(&request.pool_name)
         .map_err(|_| ApiError::Forbidden)?;
+    principal
+        .authorize_service_level(pool)
+        .map_err(|()| ApiError::Forbidden)?;
     if !pool_accepts_request(
         pool,
         &request.resource_shape,

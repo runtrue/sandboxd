@@ -110,6 +110,13 @@ impl Controller {
             let pool_pods = self.ready_pool_pods(pool, stateful_set).await?;
             self.refresh_workers(pool, &pool_pods).await?;
             let now = now_unix_ms()?;
+            let ready_workers =
+                u32::try_from(pool_pods.iter().filter(|pod| pod_ready(pod)).count())
+                    .map_err(|_| format!("Ready Pod count exceeds u32 for pool `{}`", pool.name))?;
+            self.store
+                .observe_pool_activation(&pool.name, current, ready_workers, now)
+                .await
+                .map_err(|error| format!("observe activation for pool `{}`: {error}", pool.name))?;
             let durable = self
                 .store
                 .reconcile_pool(&pool.name, current, quota, pool.policy, now)
@@ -128,11 +135,14 @@ impl Controller {
                 );
             }
             if durable.decision.create_workers > 0 {
-                self.patch_replicas(
-                    stateful_set,
-                    current.saturating_add(durable.decision.create_workers),
-                )
-                .await?;
+                let desired = current.saturating_add(durable.decision.create_workers);
+                self.store
+                    .record_scale_up(&pool.name, desired, now)
+                    .await
+                    .map_err(|error| {
+                        format!("record scale-up for pool `{}`: {error}", pool.name)
+                    })?;
+                self.patch_replicas(stateful_set, desired).await?;
                 total_workers = total_workers.saturating_add(durable.decision.create_workers);
             } else if durable.decision.drain_clean_workers > 0 {
                 let drained = self

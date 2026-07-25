@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -z "${KUBECONFIG:-}" && -r /etc/rancher/k3s/k3s.yaml ]]; then
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+fi
+
 namespace=sandboxd-system
 gateway_port=18082
 database_port=15436
@@ -11,6 +15,8 @@ gateway_forward=
 database_forward=
 autoscalers=()
 events_client=
+next_metrics_port=19090
+active_metrics_port=
 
 cleanup() {
   if [[ -n "$diagnostics_dir" ]]; then
@@ -62,6 +68,8 @@ done
 
 start_autoscaler() {
   local log=$1
+  active_metrics_port=$next_metrics_port
+  next_metrics_port=$((next_metrics_port + 1))
   target/release/runtrue-sandbox-autoscaler \
     --database-url-file "$temporary/database-url" \
     --database-insecure-local \
@@ -69,6 +77,7 @@ start_autoscaler() {
     --namespace "$namespace" \
     --maximum-total-workers 4 \
     --reconcile-interval-milliseconds 250 \
+    --metrics-listen "127.0.0.1:${active_metrics_port}" \
     >"$log" 2>&1 &
   autoscalers+=("$!")
 }
@@ -218,6 +227,85 @@ for _ in $(seq 1 100); do
 done
 test "$(kubectl get statefulset -n "$namespace" sandboxd-fixed-standard-warm \
   -o jsonpath='{.spec.replicas}')" = 2
+
+curl -fsS "http://127.0.0.1:${active_metrics_port}/metrics" \
+  >"$temporary/autoscaler-metrics.txt"
+grep -F 'phase="cold_wait",quantile="0.99"' \
+  "$temporary/autoscaler-metrics.txt" >/dev/null
+grep -F 'phase="warm_wait",quantile="0.99"' \
+  "$temporary/autoscaler-metrics.txt" >/dev/null
+grep -F 'phase="create_to_ready",quantile="0.99"' \
+  "$temporary/autoscaler-metrics.txt" >/dev/null
+grep -F 'sandboxd_pool_utilization_ratio{pool="fixed-standard-warm"}' \
+  "$temporary/autoscaler-metrics.txt" >/dev/null
+
+jq '
+  .deadline_ms = 120000
+  | .pool_name = "reviewed-cold-fallback"
+  | .resource_shape = "cold-standard-v1"
+  | .operation = {
+      "kind": "inspect",
+      "parameters": {"sandbox": "burst-placeholder"}
+    }
+' "$temporary/cold-request.json" >"$temporary/burst-template.json"
+burst_processes=()
+for index in $(seq 1 100); do
+  (
+    jq --arg sandbox "burst-${index}" \
+      '.sandbox_id = $sandbox | .operation.parameters.sandbox = $sandbox' \
+      "$temporary/burst-template.json" >"$temporary/burst-${index}.json"
+    curl -sS -o "$temporary/burst-${index}-submitted.json" -w '%{http_code}' \
+      -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+      -H "Idempotency-Key: autoscale-burst-${index}" \
+      -H "Content-Type: application/json" \
+      --data-binary @"$temporary/burst-${index}.json" \
+      "http://127.0.0.1:${gateway_port}/v1/placements" \
+      >"$temporary/burst-${index}.status"
+  ) &
+  burst_processes+=("$!")
+  if (( index % 20 == 0 )); then
+    for process in "${burst_processes[@]}"; do
+      wait "$process"
+    done
+    burst_processes=()
+  fi
+done
+test "$(grep -l '^202$' "$temporary"/burst-*.status | wc -l)" = 100
+sleep 2
+cold_desired=$(kubectl get statefulset -n "$namespace" sandboxd-reviewed-cold \
+  -o jsonpath='{.spec.replicas}')
+warm_desired=$(kubectl get statefulset -n "$namespace" sandboxd-fixed-standard-warm \
+  -o jsonpath='{.spec.replicas}')
+test "$cold_desired" -le 2
+test "$((cold_desired + warm_desired))" -le 4
+curl -fsS "http://127.0.0.1:${active_metrics_port}/metrics" \
+  >"$temporary/burst-metrics.txt"
+queued=$(awk '
+  $1 == "sandboxd_pool_queued_assignments{pool=\"reviewed-cold-fallback\"}" {
+    print $2
+  }
+' "$temporary/burst-metrics.txt")
+test "$queued" -gt 0
+test "$queued" -le 100
+grep -F 'sandboxd_pool_saturated{pool="reviewed-cold-fallback"} 1' \
+  "$temporary/burst-metrics.txt" >/dev/null
+cancel_processes=()
+for index in $(seq 1 100); do
+  (
+    curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+      -H "Authorization: Bearer tenant-key.${tenant_secret}" \
+      "http://127.0.0.1:${gateway_port}/v1/placements/autoscale-burst-${index}" \
+      >"$temporary/burst-${index}.cancel-status"
+  ) &
+  cancel_processes+=("$!")
+  if (( index % 20 == 0 )); then
+    for process in "${cancel_processes[@]}"; do
+      wait "$process"
+    done
+    cancel_processes=()
+  fi
+done
+test "$(grep -l '^200$' "$temporary"/burst-*.cancel-status | wc -l)" = 100
 
 kubectl get pod -n "$namespace" -l runtrue.io/autoscaled-worker=true -o json |
   jq -e '
