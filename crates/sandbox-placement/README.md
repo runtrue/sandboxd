@@ -57,11 +57,23 @@ subject, workspace, deadline, topology, shape, and cohort authorization come
 from an owner-only hashed-token policy. Pool selection is restricted by that
 policy and resolved against the bounded operator catalog; tenant identity is
 never accepted from the request body. The gateway can submit, inspect, cancel,
-and stream placement records only. It has no Kubernetes client, service-account token,
-tenant-selected worker address, or sandboxd operator operation. Every replica
-also runs the same bounded reconciliation loop: it claims durable work, signs
-the typed operation, delivers it to the assigned broker, and publishes a
+stream placement records, and forward bounded HTTP to a declared ingress
+service on an active assignment. It has no Kubernetes client, service-account
+token, tenant-selected worker address, or sandboxd operator operation. Every
+replica also runs the same bounded reconciliation loop: it claims durable work,
+signs the typed operation, delivers it to the assigned broker, and publishes a
 terminal response only while that lease epoch still wins.
+
+Ingress forwarding uses
+`/v1/placements/{idempotency_key}/ingress/{service}/{container_port}/{path}`.
+The tenant selects only a service identity and declared guest port. For each
+request the gateway reloads the active durable assignment and signs a fresh
+`inspect` operation. The broker obtains the current loopback endpoint and
+bearer from sandboxd, strips tenant/internal authorization, and relays through
+the authenticated reverse tunnel. The route disappears when the lease is
+expired, fenced, quarantined, or reassigned. Headers are capped at 16 KiB,
+bodies in each adapter hop at 1 MiB, and the normal concurrency/deadline bounds
+remain in force. Completed placements are not yet durable service leases.
 
 `GET /v1/placements/{idempotency_key}/events` returns authenticated
 `text/event-stream` placement snapshots. It emits only when the durable record

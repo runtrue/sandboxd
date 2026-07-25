@@ -29,8 +29,8 @@ const MAXIMUM_CONCURRENT_REQUESTS: usize = 32;
 
 #[derive(Clone)]
 pub(crate) struct BrokerState {
-    socket: Arc<PathBuf>,
-    io_timeout: Duration,
+    pub(crate) socket: Arc<PathBuf>,
+    pub(crate) io_timeout: Duration,
     registration_ready: Option<Arc<AtomicBool>>,
 }
 
@@ -57,6 +57,7 @@ pub(crate) fn router(state: BrokerState) -> Router {
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/v1/dispatch", post(dispatch))
+        .route("/v1/ingress", post(crate::ingress::route))
         .layer(DefaultBodyLimit::max(MAXIMUM_MESSAGE_BYTES))
         .layer(ConcurrencyLimitLayer::new(MAXIMUM_CONCURRENT_REQUESTS))
         .with_state(state)
@@ -101,7 +102,10 @@ async fn dispatch(
     Ok(Json(response))
 }
 
-async fn exchange(socket: &Path, request: &[u8]) -> Result<WorkloadResponse, BrokerError> {
+pub(crate) async fn exchange(
+    socket: &Path,
+    request: &[u8],
+) -> Result<WorkloadResponse, BrokerError> {
     let mut stream = UnixStream::connect(socket)
         .await
         .map_err(|_| BrokerError::Unavailable)?;
@@ -133,8 +137,9 @@ async fn exchange(socket: &Path, request: &[u8]) -> Result<WorkloadResponse, Bro
 }
 
 #[derive(Debug)]
-enum BrokerError {
+pub(crate) enum BrokerError {
     Invalid,
+    TooLarge,
     Unavailable,
     Timeout,
 }
@@ -148,6 +153,7 @@ impl IntoResponse for BrokerError {
     fn into_response(self) -> Response {
         let (status, error) = match self {
             Self::Invalid => (StatusCode::BAD_REQUEST, "invalid_work_order"),
+            Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "worker_unavailable"),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "worker_timeout"),
         };

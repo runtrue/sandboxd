@@ -190,6 +190,28 @@ async fn exercise(url: &str) {
         .await
         .expect("second assignment")
         .expect("queued work");
+    let active_route = replica_b
+        .active_assignment_by_idempotency(
+            &expired_source.identity.tenant_id,
+            &expired_source.subject_id,
+            &expired_source.idempotency_key,
+            130,
+        )
+        .await
+        .expect("active route lookup")
+        .expect("active route");
+    assert_eq!(active_route.worker_id, expired_source.worker_id);
+    assert_eq!(active_route.epoch, expired_source.epoch);
+    assert!(replica_b
+        .active_assignment_by_idempotency(
+            &expired_source.identity.tenant_id,
+            &expired_source.subject_id,
+            &expired_source.idempotency_key,
+            181,
+        )
+        .await
+        .expect("expired route lookup")
+        .is_none());
     let fenced = replica_b
         .fence_expired(181)
         .await

@@ -142,6 +142,14 @@ impl AuthPolicy {
 }
 
 impl Principal {
+    pub(crate) fn authorize_workspace(&self, workspace_id: &WorkspaceId) -> Result<(), ()> {
+        self.policy
+            .workspaces
+            .contains(workspace_id)
+            .then_some(())
+            .ok_or(())
+    }
+
     pub(crate) fn authorize(
         &self,
         workspace_id: &WorkspaceId,

@@ -1747,6 +1747,7 @@ name = "runtrue-sandbox-broker"
 version = "0.1.0-alpha.1"
 dependencies = [
  "axum",
+ "base64 0.23.0",
  "clap",
  "libc",
  "nix",
@@ -1776,6 +1777,7 @@ name = "runtrue-sandbox-gateway"
 version = "0.1.0-alpha.1"
 dependencies = [
  "axum",
+ "base64 0.23.0",
  "clap",
  "futures-util",
  "hex",

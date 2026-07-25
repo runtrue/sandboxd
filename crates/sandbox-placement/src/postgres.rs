@@ -1811,6 +1811,53 @@ impl PostgresPlacementStore {
             .map(record_from_row)
             .transpose()
     }
+
+    pub async fn active_assignment_by_idempotency(
+        &self,
+        tenant_id: &TenantId,
+        subject_id: &SubjectId,
+        idempotency_key: &str,
+        now_unix_ms: u64,
+    ) -> Result<Option<Assignment>, PlacementStoreError> {
+        let now = to_i64(now_unix_ms)?;
+        let row = self
+            .client
+            .lock()
+            .await
+            .query_opt(
+                "SELECT r.*, w.broker_address, w.resource_ceilings
+                 FROM sandboxd_placement.requests r
+                 JOIN sandboxd_placement.workers w ON w.worker_id = r.worker_id
+                 WHERE r.tenant_id = $1 AND r.subject_id = $2
+                 AND r.idempotency_key = $3 AND r.state = 'assigned'
+                 AND r.lease_expires_unix_ms > $4 AND w.state = 'leased'
+                 AND w.broker_address IS NOT NULL AND w.resource_ceilings IS NOT NULL",
+                &[
+                    &tenant_id.as_str(),
+                    &subject_id.as_str(),
+                    &idempotency_key,
+                    &now,
+                ],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let record = record_from_row(&row)?;
+        let broker_address = row
+            .get::<_, String>("broker_address")
+            .parse::<SocketAddr>()
+            .map_err(|_| PlacementStoreError::Invalid("invalid broker address".to_owned()))?;
+        let resource_ceilings: ResourceCeilings =
+            serde_json::from_str(row.get::<_, &str>("resource_ceilings"))
+                .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+        resource_ceilings
+            .validate()
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+        let operation: Operation = serde_json::from_str(row.get::<_, &str>("operation"))
+            .map_err(|error| PlacementStoreError::Invalid(error.to_string()))?;
+        assignment_from_record(record, broker_address, resource_ceilings, operation).map(Some)
+    }
 }
 
 async fn ensure_tenant(
