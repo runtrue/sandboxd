@@ -1814,6 +1814,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtrue-sandbox-net-agent"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "runtrue-sandbox-oci"
 version = "0.1.0-alpha.1"
 dependencies = [

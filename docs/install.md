@@ -20,6 +20,12 @@ sudo install -m 0755 \
   /usr/local/bin/
 ```
 
+The archive also contains a static x86-64 musl
+`runtrue-sandbox-net-agent`. Copy that binary into application images that use
+`--network-mode userspace`; it has no guest shared-library dependency. It is
+guest software, not a worker daemon, and must be part of the application's
+measured, digest-pinned OCI root.
+
 Install compatible `runsc`, containerd, and system dependencies in the worker
 image. Run containerd privately in the same container and mount namespace as
 `sandboxd`; do not mount the Kubernetes node's containerd socket or snapshotter
@@ -65,6 +71,21 @@ setting. It uses `--network-mode userspace`, runsc `network=none`, and a single
 read-only Unix-socket directory. It supports policy-approved HTTP CONNECT;
 declared reverse HTTP ingress uses separate epoch-scoped tunnel credentials.
 Direct guest DNS, raw TCP/UDP, and transparent networking remain disabled.
+
+Run exactly one `runtrue-sandbox-net-agent` service in a userspace-network
+sandbox. It binds a conventional HTTP proxy only on shared guest loopback,
+relays it to `/run/lock/egress.sock`, and registers only ingress services named
+with repeated `--ingress-service` arguments. Configure application services
+with `HTTP_PROXY=http://127.0.0.1:3128` and
+`HTTPS_PROXY=http://127.0.0.1:3128`. The agent runs as the same unprivileged
+guest identity as application code and needs no capability, device, host
+mount, Kubernetes API access, or cluster-network access.
+
+The agent does not make transparent sockets work. Software that ignores proxy
+environment variables needs explicit proxy configuration or application
+changes. UDP, QUIC, arbitrary TCP, inbound UDP, caller-selected host ports, and
+protocols other than HTTP proxy egress and reverse TCP transport for declared
+HTTP routes remain unsupported.
 
 The following larger set is only for the host-integrated compatibility
 profile that exercises lifecycle, kernel networking, and writable-root

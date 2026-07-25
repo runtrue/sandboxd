@@ -164,6 +164,16 @@ throughput; checks runsc uses `network=none` and `host-uds=open`; and compares
 host links, network namespaces, nftables, and forwarding sysctls before and
 after the nested run.
 
+Production application images for this profile include the released
+`runtrue-sandbox-net-agent` in their measured OCI root and declare one ordinary
+guest service that runs it. The agent requires no capability: it presents a
+loopback HTTP proxy to applications, consumes only the read-only policy
+transports under `/run/lock`, and opens reverse tunnels only for services
+selected with `--ingress-service`. The conformance image retains its compact
+Python protocol fixture so the fixed upstream rootfs measurement remains
+independently reproducible; the Rust agent has unit-level end-to-end tests for
+both transport directions and is included in release reproducibility checks.
+
 [`tools/test-k3s-resource-limits.sh`](../../tools/test-k3s-resource-limits.sh)
 separately drives CPU saturation, fork exhaustion, bounded temporary-storage
 exhaustion, and memory pressure through real nested gVisor workloads. It
@@ -267,9 +277,10 @@ Production behavior is selected by typed command-line options:
 - `--network-mode userspace` accepts HTTP CONNECT egress and declared reverse
   HTTP ingress policies, keeps gVisor networking disabled, exposes egress at
   `RUNTRUE_EGRESS_SOCKET`, and writes epoch-scoped ingress registration data to
-  `/run/lock/ingress.json`. Applications must use those narrow protocols;
-  transparent sockets and conventional `HTTP_PROXY` support are not enabled
-  in this tier.
+  `/run/lock/ingress.json`. The unprivileged `runtrue-sandbox-net-agent`
+  translates conventional loopback `HTTP_PROXY` and `HTTPS_PROXY` traffic and
+  declared ingress services to those narrow protocols. Transparent sockets,
+  UDP, QUIC, and arbitrary TCP are not enabled in this tier.
 - `--network-mode private` enables the kernel networking provider.
 - `--cgroup-mode external` delegates aggregate enforcement to the enclosing
   Kubernetes pod.

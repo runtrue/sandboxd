@@ -224,6 +224,17 @@ redirect causes a new request. Loopback, link-local, private, carrier-grade NAT,
 metadata, multicast, reserved, and documentation destinations are never valid
 HTTP proxy targets.
 
+The reduced userspace-network deployment keeps gVisor networking disabled and
+mounts only a read-only Unix-socket transport directory into the guest. One
+unprivileged `runtrue-sandbox-net-agent` service exposes an HTTP proxy on shared
+guest loopback and registers reverse tunnels for explicitly selected ingress
+services. It re-reads the read-only route configuration before each tunnel so
+pause, resume, restore, and reassignment use only the current epoch credential.
+The agent is a static executable baked into the measured application image; it
+needs no capability, device, host path, cluster network, or shared library.
+This mode intentionally cannot provide transparent TCP, guest DNS, UDP, or
+QUIC.
+
 `restricted_tcp` is intended only for a signer-approved topology. Its canonical
 destination CIDR and port rules are rendered into the sandbox nftables table;
 all unmatched forwarding is dropped. DNS and DNS-over-TLS ports cannot be added

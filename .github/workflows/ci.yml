@@ -94,15 +94,37 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup toolchain install 1.97.1 --profile minimal --target x86_64-unknown-linux-musl --no-self-update
           rustup default 1.97.1
       - name: Build release binaries
         run: |
           cargo build --workspace --release --locked
-          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway target/release/runtrue-sandbox-broker > /tmp/sandboxd-first-build.sha256
+          cargo build \
+            --release \
+            --locked \
+            --package runtrue-sandbox-net-agent \
+            --target x86_64-unknown-linux-musl
+          sha256sum \
+            target/release/runtrue-sandboxctl \
+            target/release/runtrue-sandboxd \
+            target/release/runtrue-sandbox-gateway \
+            target/release/runtrue-sandbox-broker \
+            target/x86_64-unknown-linux-musl/release/runtrue-sandbox-net-agent \
+            > /tmp/sandboxd-first-build.sha256
       - name: Rebuild from clean outputs
         run: |
           cargo clean
           cargo build --workspace --release --locked
-          sha256sum target/release/runtrue-sandboxctl target/release/runtrue-sandboxd target/release/runtrue-sandbox-gateway target/release/runtrue-sandbox-broker > /tmp/sandboxd-second-build.sha256
+          cargo build \
+            --release \
+            --locked \
+            --package runtrue-sandbox-net-agent \
+            --target x86_64-unknown-linux-musl
+          sha256sum \
+            target/release/runtrue-sandboxctl \
+            target/release/runtrue-sandboxd \
+            target/release/runtrue-sandbox-gateway \
+            target/release/runtrue-sandbox-broker \
+            target/x86_64-unknown-linux-musl/release/runtrue-sandbox-net-agent \
+            > /tmp/sandboxd-second-build.sha256
           diff --unified /tmp/sandboxd-first-build.sha256 /tmp/sandboxd-second-build.sha256
