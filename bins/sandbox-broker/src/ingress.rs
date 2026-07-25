@@ -157,10 +157,6 @@ async fn exchange_ingress(
         .write_all(body)
         .await
         .map_err(|_| BrokerError::Unavailable)?;
-    stream
-        .shutdown()
-        .await
-        .map_err(|_| BrokerError::Unavailable)?;
     let mut response = Vec::new();
     stream
         .take((MAXIMUM_HEADER_BYTES + MAXIMUM_BODY_BYTES + 1) as u64)
@@ -443,10 +439,32 @@ mod tests {
         let application = tokio::spawn(async move {
             let (mut stream, _) = guest.accept().await.expect("guest connection");
             let mut request = Vec::new();
-            stream
-                .read_to_end(&mut request)
-                .await
-                .expect("guest request");
+            let expected_length = loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).await.expect("guest request");
+                assert_ne!(read, 0, "broker half-closed before sending the request");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).expect("headers");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .expect("content length");
+                if request.len() >= header_end + content_length {
+                    break header_end + content_length;
+                }
+            };
+            assert_eq!(request.len(), expected_length);
             let request = String::from_utf8(request).expect("UTF-8 request");
             let lowercase = request.to_ascii_lowercase();
             assert!(request.starts_with("POST /ready?full=1 HTTP/1.1\r\n"));
@@ -456,6 +474,13 @@ mod tests {
             assert!(!request.contains("tenant-secret"));
             assert!(!request.contains("x-runtrue-work-order"));
             assert!(request.ends_with("\r\n\r\nping"));
+            let mut extra = [0_u8; 1];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), stream.read(&mut extra))
+                    .await
+                    .is_err(),
+                "broker half-closed before the application response"
+            );
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\npong\r\n0\r\n\r\n",

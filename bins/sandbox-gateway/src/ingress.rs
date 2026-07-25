@@ -197,7 +197,6 @@ async fn exchange(
         .write_all(body)
         .await
         .map_err(|_| ApiError::Unavailable)?;
-    stream.shutdown().await.map_err(|_| ApiError::Unavailable)?;
     let mut response = Vec::new();
     stream
         .take((MAXIMUM_HEADER_BYTES + MAXIMUM_RESPONSE_BYTES + 1) as u64)
@@ -397,6 +396,72 @@ mod tests {
     use std::{env, sync::Arc, time::SystemTime};
     use tokio::net::TcpListener;
     use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn exchange_keeps_request_connection_open_until_the_broker_responds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("broker");
+        let address = listener.local_addr().expect("broker address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("gateway connection");
+            let mut encoded = Vec::new();
+            let expected_length = loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).await.expect("gateway request");
+                assert_ne!(read, 0, "gateway half-closed before sending the request");
+                encoded.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = encoded
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&encoded[..header_end]).expect("headers");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .expect("content length");
+                if encoded.len() >= header_end + content_length {
+                    break header_end + content_length;
+                }
+            };
+            assert_eq!(encoded.len(), expected_length);
+            let mut extra = [0_u8; 1];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), stream.read(&mut extra))
+                    .await
+                    .is_err(),
+                "gateway half-closed before the broker response"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("broker response");
+        });
+
+        let response = exchange(
+            address,
+            "GET",
+            "/",
+            &HeaderMap::new(),
+            &Bytes::new(),
+            "api",
+            8080,
+            "signed-order",
+        )
+        .await
+        .expect("gateway response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 16).await.expect("body"),
+            "ok"
+        );
+        server.await.expect("broker task");
+    }
 
     #[test]
     fn tenant_route_is_signed_and_fails_after_worker_fencing() {

@@ -797,6 +797,8 @@ fn relay_ingress(
         let first =
             scope.spawn(|| copy_ingress(&mut client_reader, &mut upstream_writer, active, stop));
         let second = copy_ingress(upstream, client, active, stop);
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = upstream.shutdown(Shutdown::Both);
         let first = first
             .join()
             .unwrap_or_else(|_| Err(io::Error::other("ingress relay panicked")));
@@ -835,11 +837,11 @@ fn relay_userspace_ingress(
             0,
             idle_timeout,
         );
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = tunnel.shutdown(Shutdown::Both);
         let first = first
             .join()
             .unwrap_or_else(|_| Err(io::Error::other("userspace ingress relay panicked")));
-        let _ = client.shutdown(Shutdown::Both);
-        let _ = tunnel.shutdown(Shutdown::Both);
         first.and(second).map(|_| ())
     })
 }
