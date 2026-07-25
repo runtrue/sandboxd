@@ -39,7 +39,7 @@ live snapshot/restore of a read-only topology.
 | B. Fixed runtime | User namespace plus `SETGID`, `SETUID`, `SYS_CHROOT`, `SYS_ADMIN` | Fixed or signed pre-expanded read-only images, multi-container Sentry, loopback, lifecycle APIs, local read-only snapshot/restore | In-worker pulls, ingress/egress, writable roots/volumes, managed cgroups | Custom AppArmor/seccomp, durable-state qualification, cleanup-race fix |
 | B-N. Userspace policy network | Level B; no networking capability or host-network setting; `network-mode=userspace`; gVisor `network=none` and `host-uds=open` | Policy-approved HTTP CONNECT and declared reverse HTTP ingress over one read-only mounted Unix-socket directory; static unprivileged guest agent; heartbeat-renewed serving leases; gateway/broker adapter; connection, byte, bandwidth, and deadline ceilings | Raw TCP/UDP, guest DNS, transparent proxying, software without explicit HTTP proxy support | Bake the released agent into each measured application image, restrict outer Pod egress with an FQDN-aware CNI or egress gateway, qualify custom MAC/seccomp profiles |
 | B+ measured runtime | Level B plus `DAC_READ_SEARCH` | Recomputes full root digest, entry count, and byte count at admission | Same feature limits as B | Use only when runtime measurement is worth pod-wide read/search bypass authority |
-| P. Isolated image preparation | Separate user-namespaced Job with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SYS_ADMIN`; no privilege escalation; default seccomp; private containerd | Resolve a mutable reference once, verify and unpack OCI content, attach evidence, sign, and atomically publish an immutable root | Sandbox execution, host-runtime access, worker credential access | FQDN-aware registry egress, external key service or short-lived signing key, CSI cache quotas/GC, custom AppArmor profile permitting only required mounts/signals |
+| P. Isolated image preparation | Separate user-namespaced Job with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SYS_ADMIN`; no privilege escalation; default seccomp; private containerd | Resolve a mutable reference once, verify and unpack OCI content, attach evidence, sign, atomically publish an immutable root, audit revocation/pool impact, and lock-aware GC | Sandbox execution, host-runtime access, worker credential access | FQDN-aware registry egress, external key service or short-lived signing key, CSI physical quota, custom AppArmor profile permitting only required mounts/signals |
 | C. Dynamic runtime | One user-namespaced worker container with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, `SYS_ADMIN`, `SYS_CHROOT` and a private containerd process | Arbitrary pinned OCI pull, validation, unpack, and loopback execution | Kernel policy networking, current loop/ext4 storage, managed cgroups | Registry trust, credential delivery/rotation, image GC, egress policy, supervisor qualification, and a future safe privilege split |
 | D. Kernel networking | Level B or C plus `NET_ADMIN`, `NET_RAW`; `network-mode=private`; namespaced `net.ipv4.ip_forward=1` | Bridge/veth network, nftables policy, policy proxies, HTTP/TCP egress, ingress plumbing | Still no current writable storage or managed cgroups | Kubelet unsafe-sysctl allowlist, pod sysctl, dedicated nodes, custom network security profiles |
 | E. Brokered storage/cgroups | Trusted node brokers, CSI/device integration, or redesigned userspace providers | Quota-backed writable roots, named writable volumes, per-sandbox resources | Depends on broker implementation | Narrow authenticated APIs, tenant/path binding, transactional cleanup, quotas, recovery, dedicated threat model |
@@ -169,8 +169,8 @@ signed per-topology policy remains mandatory.
 
 | Feature | Minimum level | Validation result | Missing or required addition |
 | --- | --- | --- | --- |
-| Fixed immutable image | B | Signed descriptor/root/worker binding passed before readiness | Key rotation, cache-wide revocation audit, and custom MAC qualification |
-| Approved OCI image through isolated preparation | P then B | Cold publish, duplicate cache hit, reduced-worker activation, revocation rejection, and gVisor child execution passed | Cache quota/GC controller, pool-impact inventory, FQDN-aware registry egress |
+| Fixed immutable image | B | Signed descriptor/root/worker binding passed before readiness | Key rotation and custom MAC qualification |
+| Approved OCI image through isolated preparation | P then B | Cold publish, duplicate cache hit, reduced-worker activation, cache pressure, lock-aware GC, revocation-to-pool inventory, and gVisor child execution passed | CSI physical quota, placement quarantine integration, FQDN-aware registry egress |
 | Multiple services in one Sentry | B | Passed | Reject port collisions; select a durable sandbox anchor independent of startup order |
 | Health, inspect, logs, pause/resume | B | Passed | Continuous conformance and crash recovery |
 | Local live snapshot/restore, read-only root | B | Passed, with one cleanup race observed | Fix idempotent stop/reconcile race; repeated fault injection |
@@ -234,10 +234,10 @@ Also require:
 5. The first Compose service currently becomes the Sentry anchor. If it exits
    before dependents join, `service_completed_successfully` topologies fail.
    Select and manage an independent durable anchor.
-6. Cache quota/GC and revocation-to-pool inventory, durable PVC recovery,
-   secret-volume lifecycle, cross-worker restore, and CSI-specific artifact
-   delivery still require release conformance. The isolated private-containerd
-   supervisor and read-only attested-root path now have local-k3s conformance.
+6. Durable PVC recovery, secret-volume lifecycle, cross-worker restore, and
+   CSI-specific artifact delivery still require release conformance. The
+   isolated private-containerd supervisor, bounded cache audit/GC, pool-impact
+   inventory, and read-only attested-root path have local-k3s conformance.
 7. Custom AppArmor and seccomp profiles are mandatory before mutually
    untrusted workloads.
 

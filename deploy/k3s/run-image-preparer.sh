@@ -3,6 +3,8 @@ set -euo pipefail
 
 containerd_address=/run/containerd/containerd.sock
 result_path="/cache/.latest-result.$$"
+maximum_cache_artifacts=${RUNTRUE_MAXIMUM_CACHE_ARTIFACTS:-1024}
+maximum_cache_bytes=${RUNTRUE_MAXIMUM_CACHE_BYTES:-68719476736}
 install -d -m 0700 /run/containerd/state /workspace/containerd /workspace/images
 
 /usr/local/bin/containerd \
@@ -63,6 +65,8 @@ result=$(
     --sbom /run/evidence/sbom.json \
     --provenance /run/evidence/provenance.json \
     --vulnerability-policy "$RUNTRUE_VULNERABILITY_POLICY" \
+    --maximum-cache-artifacts "$maximum_cache_artifacts" \
+    --maximum-cache-bytes "$maximum_cache_bytes" \
     "${credential_arguments[@]}"
 )
 printf '%s\n' "$result" >&3

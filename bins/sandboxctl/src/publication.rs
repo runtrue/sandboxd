@@ -18,9 +18,11 @@ use std::{
 };
 use tempfile::Builder;
 
-const MAXIMUM_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAXIMUM_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAXIMUM_CREDENTIAL_BYTES: u64 = 128 * 1024;
 const PUBLICATION_WAIT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const MAXIMUM_CACHE_ARTIFACTS: usize = 4_096;
+pub(crate) const MAXIMUM_CACHE_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 
 #[derive(serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -71,7 +73,10 @@ pub(crate) fn publish(
     sbom: &Path,
     provenance: &Path,
     vulnerability_policy: &str,
+    maximum_cache_artifacts: usize,
+    maximum_cache_bytes: u64,
 ) -> Result<(), SandboxError> {
+    validate_cache_limits(maximum_cache_artifacts, maximum_cache_bytes)?;
     let started = Instant::now();
     let image = provider.resolve(reference, credential)?;
     let exact_reference = image.exact_reference.clone();
@@ -110,6 +115,8 @@ pub(crate) fn publish(
         &provenance_digest,
         vulnerability_policy,
         &artifact_digest,
+        maximum_cache_artifacts,
+        maximum_cache_bytes,
     );
     let release = provider.release(&rootfs);
     let report = publication?;
@@ -156,6 +163,8 @@ fn publish_inner(
     provenance_digest: &str,
     vulnerability_policy: &str,
     artifact_digest: &str,
+    maximum_cache_artifacts: usize,
+    maximum_cache_bytes: u64,
 ) -> Result<PublicationReport, SandboxError> {
     fs::create_dir_all(cache).map_err(|source| io_error(cache, source))?;
     let cache = fs::canonicalize(cache).map_err(|source| io_error(cache, source))?;
@@ -213,8 +222,25 @@ fn publish_inner(
             });
         }
     };
+    let capacity_lock = wait_for_cache_lock(&cache.join(".capacity.lock"))?;
+    crate::cache::enforce_publication_capacity(
+        &cache,
+        maximum_cache_artifacts,
+        maximum_cache_bytes,
+        rootfs_bytes
+            .saturating_add(
+                fs::metadata(sbom)
+                    .map_err(|source| io_error(sbom, source))?
+                    .len(),
+            )
+            .saturating_add(
+                fs::metadata(provenance)
+                    .map_err(|source| io_error(provenance, source))?
+                    .len(),
+            ),
+    )?;
     let staging = Builder::new()
-        .prefix(".publication-")
+        .prefix(&format!(".publication-{key}-"))
         .tempdir_in(&cache)
         .map_err(|source| io_error(&cache, source))?;
     let staged_rootfs = staging.path().join("rootfs");
@@ -247,6 +273,7 @@ fn publish_inner(
     File::open(&cache)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| io_error(&cache, source))?;
+    drop(capacity_lock);
     drop(lock);
     Ok(PublicationReport {
         status: "published",
@@ -272,10 +299,10 @@ fn verify_cached(
     provenance_digest: &str,
     vulnerability_policy: &str,
 ) -> Result<(), SandboxError> {
-    let signed: SignedImageAttestation = serde_json::from_slice(
-        &fs::read(directory.join("attestation.json"))
-            .map_err(|source| io_error(directory.join("attestation.json"), source))?,
-    )
+    let signed: SignedImageAttestation = serde_json::from_slice(&read_retained_bounded(
+        &directory.join("attestation.json"),
+        2 * 1024 * 1024,
+    )?)
     .map_err(|error| SandboxError::Lock(format!("decode cached attestation: {error}")))?;
     let public_key = ed25519_dalek::SigningKey::from_bytes(private_key)
         .verifying_key()
@@ -301,8 +328,9 @@ fn verify_cached(
         || signed.attestation.provenance_digest != provenance_digest
         || signed.attestation.vulnerability_policy != vulnerability_policy
         || signed.attestation.worker_artifact_digest != artifact_digest
-        || file_digest(&directory.join("sbom.json"), MAXIMUM_EVIDENCE_BYTES)? != sbom_digest
-        || file_digest(&directory.join("provenance.json"), MAXIMUM_EVIDENCE_BYTES)?
+        || retained_file_digest(&directory.join("sbom.json"), MAXIMUM_EVIDENCE_BYTES)?
+            != sbom_digest
+        || retained_file_digest(&directory.join("provenance.json"), MAXIMUM_EVIDENCE_BYTES)?
             != provenance_digest
     {
         return Err(SandboxError::Lock(
@@ -390,11 +418,37 @@ fn copy_evidence(source: &Path, destination: &Path) -> Result<(), SandboxError> 
         .map_err(|error| io_error(destination, error))
 }
 
-fn file_digest(path: &Path, maximum: u64) -> Result<String, SandboxError> {
+pub(crate) fn file_digest(path: &Path, maximum: u64) -> Result<String, SandboxError> {
     Ok(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(read_bounded(path, maximum)?))
     ))
+}
+
+pub(crate) fn retained_file_digest(path: &Path, maximum: u64) -> Result<String, SandboxError> {
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(read_retained_bounded(path, maximum)?))
+    ))
+}
+
+pub(crate) fn read_retained_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, SandboxError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| io_error(path, error))?;
+    let metadata = file.metadata().map_err(|error| io_error(path, error))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum {
+        return Err(SandboxError::Lock(format!(
+            "retained file `{}` is not a bounded regular file",
+            path.display()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| io_error(path, error))?;
+    Ok(bytes)
 }
 
 fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, SandboxError> {
@@ -534,6 +588,19 @@ fn wait_for_publication_lock(
     ))
 }
 
+fn wait_for_cache_lock(path: &Path) -> Result<PublicationLock, SandboxError> {
+    let deadline = Instant::now() + PUBLICATION_WAIT;
+    while Instant::now() < deadline {
+        if let Some(lock) = PublicationLock::acquire(path)? {
+            return Ok(lock);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(SandboxError::Timeout(
+        "wait for attested-cache capacity lock".to_owned(),
+    ))
+}
+
 fn now_unix_ms() -> Result<u64, SandboxError> {
     u64::try_from(
         SystemTime::now()
@@ -544,12 +611,12 @@ fn now_unix_ms() -> Result<u64, SandboxError> {
     .map_err(|_| SandboxError::Lock("system time exceeds u64".to_owned()))
 }
 
-struct PublicationLock {
+pub(crate) struct PublicationLock {
     _file: nix::fcntl::Flock<File>,
 }
 
 impl PublicationLock {
-    fn acquire(path: &Path) -> Result<Option<Self>, SandboxError> {
+    pub(crate) fn acquire(path: &Path) -> Result<Option<Self>, SandboxError> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -573,6 +640,22 @@ impl PublicationLock {
             ))),
         }
     }
+}
+
+pub(crate) fn validate_cache_limits(
+    maximum_cache_artifacts: usize,
+    maximum_cache_bytes: u64,
+) -> Result<(), SandboxError> {
+    if maximum_cache_artifacts == 0
+        || maximum_cache_artifacts > MAXIMUM_CACHE_ARTIFACTS
+        || maximum_cache_bytes == 0
+        || maximum_cache_bytes > MAXIMUM_CACHE_BYTES
+    {
+        return Err(SandboxError::Lock(
+            "cache limits exceed the bounded operator contract".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -699,6 +782,8 @@ mod tests {
             &provenance_digest,
             "release-v1",
             &fixture.artifact_digest,
+            16,
+            1024 * 1024,
         )
     }
 
@@ -798,6 +883,22 @@ mod tests {
         fs::set_permissions(&cached_sbom, fs::Permissions::from_mode(0o644))
             .expect("simulate cache-writer authority");
         fs::write(cached_sbom, b"{\"tampered\":true}").expect("tamper retained evidence");
+        assert!(publish_fixture(&fixture).is_err());
+    }
+
+    #[test]
+    fn cache_rejects_retained_evidence_symlink_substitution() {
+        let fixture = fixture();
+        publish_fixture(&fixture).expect("publish");
+        let destination = fixture.cache.join(
+            fixture
+                .artifact_digest
+                .strip_prefix("sha256:")
+                .expect("digest"),
+        );
+        let cached_sbom = destination.join("sbom.json");
+        fs::remove_file(&cached_sbom).expect("remove retained SBOM");
+        symlink(&fixture.sbom, &cached_sbom).expect("substitute retained SBOM");
         assert!(publish_fixture(&fixture).is_err());
     }
 

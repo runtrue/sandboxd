@@ -98,6 +98,9 @@ that supports FQDN policy. Their control socket exists only inside the pod.
 - A bounded RWO CSI StorageClass for the preparation cache. The local
   conformance harness creates one static local PV only because the local-only
   k3s profile deliberately disables its host-path provisioner.
+- A PVC storage quota and a namespace `ResourceQuota` that bounds concurrent
+  preparation Jobs. The CLI limits logical cache bytes and artifact count, but
+  the CSI quota is the final physical-storage backstop.
 - An operator signing identity delivered only to the isolated preparer. Use an
   external signing service or a short-lived projected Secret in production;
   never mount it into a worker.
@@ -290,7 +293,15 @@ release deployment pipeline:
 - `RUNTRUE_PREPARATION_TOOLCHAIN_DIGEST`: digest of the reviewed preparer
   toolchain; and
 - `RUNTRUE_VULNERABILITY_POLICY`: the vulnerability gate that produced the
-  mounted evidence.
+  mounted evidence;
+- `RUNTRUE_MAXIMUM_CACHE_ARTIFACTS`: reviewed count ceiling, at most 4096; and
+- `RUNTRUE_MAXIMUM_CACHE_BYTES`: reviewed logical-byte ceiling, at most 16 TiB.
+
+A new publication is rejected before copying when either cache ceiling would
+be exceeded. A cache hit remains usable so capacity pressure cannot disable an
+already-reviewed root. Admission must separately allowlist image requests and
+bound concurrent preparation Jobs; tenants must never create preparer Jobs or
+worker-pool catalog entries directly.
 
 Each successful cache directory is named by
 `worker_artifact_digest` and contains only `rootfs/`, `attestation.json`,
@@ -318,9 +329,77 @@ toolchain, and vulnerability policies, a maximum age, and both root and worker
 artifact revocation sets. Any mismatch or revocation exits before the worker
 becomes Ready. A deployment controller must select only a prepared artifact;
 unseen `cold-build` requests remain queued until publication completes, while
-`preapproved` requests bind directly to an existing digest directory. Cache
-quota/GC and the revocation-to-pool inventory require a preparation-cache
-controller; do not enable unbounded tenant-triggered preparation without it.
+`preapproved` requests bind directly to an existing digest directory.
+
+The release pipeline also owns a canonical prepared-root catalog. Every
+reviewed worker artifact appears in exactly one bounded cohort:
+
+```json
+{
+  "schema_version": 1,
+  "cohorts": [{
+    "name": "fixed-rootset-20260724",
+    "artifacts": [{
+      "worker_artifact_digest": "sha256:<64 lowercase hex>",
+      "expanded_root_digest": "sha256:<64 lowercase hex>"
+    }]
+  }]
+}
+```
+
+Audit the cache after every trust-policy or catalog update and periodically
+while it is mounted read-only by workers:
+
+```bash
+runtrue-sandboxctl audit-attested-cache \
+  --cache /cache \
+  --trust-policy /run/secrets/trust/policy.json \
+  --prepared-root-catalog /run/config/prepared-roots/catalog.json \
+  --worker-pool-catalog /run/config/worker-pools/catalog.json \
+  --maximum-cache-artifacts 1024 \
+  --maximum-cache-bytes 68719476736 \
+  --require-healthy
+```
+
+The audit remeasures every root and retained SBOM/provenance file, verifies the
+signature and policy, reports count/byte pressure, detects missing reviewed
+roots, and maps every missing, rejected, corrupt, or revoked artifact to the
+exact worker-pool and StatefulSet names that consume its cohort. Persist the
+JSON result in the operator audit stream. On a non-healthy result, the
+placement reconciler must stop new assignments to every listed pool before it
+acknowledges policy propagation. New worker Pods independently fail their
+attestation gate before Ready.
+
+Garbage collection is dry-run by default:
+
+```bash
+runtrue-sandboxctl garbage-collect-attested-cache \
+  --cache /cache \
+  --prepared-root-catalog /run/config/prepared-roots/catalog.json \
+  --maximum-cache-artifacts 1024 \
+  --maximum-cache-bytes 68719476736 \
+  --minimum-age-seconds 86400
+
+# Execute the reviewed plan.
+runtrue-sandboxctl garbage-collect-attested-cache \
+  --cache /cache \
+  --prepared-root-catalog /run/config/prepared-roots/catalog.json \
+  --maximum-cache-artifacts 1024 \
+  --maximum-cache-bytes 68719476736 \
+  --minimum-age-seconds 86400 \
+  --delete
+```
+
+Only old artifacts absent from every reviewed cohort are candidates. The
+collector never evicts a referenced artifact, takes the publication lock
+without waiting, atomically renames each selected directory, and reports busy
+writers instead of racing them. It also recognizes interrupted internal
+publication/tombstone directories, accounts for their bytes, and removes them
+only after the minimum age and the corresponding artifact lock permit it. If
+protected content alone exceeds a ceiling, `limit_satisfied` is false and the
+operator must publish a smaller reviewed catalog or increase both the reviewed
+limit and CSI quota. Run audit before GC; GC deliberately refuses malformed
+cache structure instead of guessing.
 
 ## Build and deploy the fixed-runtime profile
 
