@@ -1,9 +1,9 @@
 name: volume-conformance
-x-runtrue-guest-profile: root-in-sandbox-v1
 
 volumes:
   shared:
     persistence_class: persistent
+    snapshot_policy: required
     quota_bytes: 8388608
 
 services:

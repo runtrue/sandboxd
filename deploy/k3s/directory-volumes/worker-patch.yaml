@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-fixed-runtime
+  namespace: sandboxd-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandboxd
+          args:
+            - serve
+            - --worker-id
+            - worker-$(POD_UID)
+            - --resource-shape
+            - standard-v1
+            - --sandbox-cpu-millis
+            - "1000"
+            - --sandbox-memory-bytes
+            - "1073741824"
+            - --sandbox-pids
+            - "256"
+            - --sandbox-ephemeral-storage-bytes
+            - "2147483648"
+            - --maximum-services
+            - "8"
+            - --socket
+            - /run/runtrue-sandboxd/control.sock
+            - --state-root
+            - /var/lib/runtrue-sandboxd/state
+            - --image-store
+            - /var/lib/runtrue-sandboxd/images
+            - --fixed-rootfs
+            - /opt/runtrue-sandboxd/fixed-rootfs
+            - --fixed-topology-lock
+            - /opt/runtrue-sandboxd/fixed-runtime.lock.json
+            - --fixed-rootfs-digest
+            - sha256:c73e49867e5b68681c2222e1e7b60aca9218d5a83ded507226f89438cea40db1
+            - --fixed-rootfs-entries
+            - "5621"
+            - --fixed-rootfs-bytes
+            - "118293769"
+            - --network-mode
+            - loopback
+            - --cgroup-mode
+            - external
+            - --runsc
+            - /usr/local/bin/runsc
+            - --guest-profile
+            - root-in-sandbox-v1
+            - --guest-profile
+            - oci-compat-v1
+          securityContext:
+            capabilities:
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - SETGID
+                - SETUID
+                - SYS_ADMIN
+                - SYS_CHROOT
+              drop:
+                - ALL
+          volumeMounts:
+            - name: sandboxd-directory-volumes
+              mountPath: /var/lib/runtrue-sandboxd/state/directory-volumes
+      volumes:
+        - name: sandboxd-directory-volumes
+          persistentVolumeClaim:
+            claimName: sandboxd-directory-state

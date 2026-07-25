@@ -849,6 +849,35 @@ fn prepare_service_volumes_inner(
     scope: &VolumeScope,
     snapshots: Option<&RestoredVolumes>,
 ) -> Result<(), SandboxError> {
+    let capabilities = volume_provider.capabilities();
+    for specification in lock
+        .services
+        .values()
+        .flat_map(|service| service.volumes.iter())
+    {
+        if !capabilities
+            .persistence_classes
+            .contains(&specification.persistence_class)
+        {
+            return Err(SandboxError::Unsupported(format!(
+                "volume provider does not support {:?} volumes",
+                specification.persistence_class
+            )));
+        }
+        if matches!(
+            specification.persistence_class,
+            runtrue_sandbox_core::VolumePersistenceClass::Ephemeral
+                | runtrue_sandbox_core::VolumePersistenceClass::Persistent
+        ) && specification.snapshot_policy
+            != runtrue_sandbox_core::VolumeSnapshotPolicy::Excluded
+            && !capabilities.snapshot
+        {
+            return Err(SandboxError::Unsupported(
+                "named-volume snapshots require CHOWN and DAC_OVERRIDE or idmapped storage"
+                    .to_owned(),
+            ));
+        }
+    }
     let sandbox_id = SandboxId::parse(project.to_owned())
         .map_err(|error| SandboxError::Runtime(error.to_string()))?;
     let mut handles = BTreeMap::<VolumeId, VolumeHandle>::new();
