@@ -309,6 +309,48 @@ operator-reviewed maximum. The controller integration and drain-first
 StatefulSet reconciliation consume this catalog; the static Deployment below
 remains the single-worker conformance fixture.
 
+`sandboxd-worker-pools.yaml` pre-creates the two reviewed StatefulSets at zero
+replicas. Worker Pods still have `automountServiceAccountToken: false`; they
+carry neither a Kubernetes credential nor a shared worker-registration secret.
+The autoscaler observes only Ready Pods owned by the exact reviewed
+StatefulSet, derives `worker-<pod-uid>`, and registers the catalog-fixed
+topology, shape, cohort, broker address, and resource ceilings in PostgreSQL.
+
+`sandbox-autoscaler.yaml` is the only component in this path with a Kubernetes
+service-account token. Its namespaced Role permits exactly:
+
+- `get` and `patch` on StatefulSets; and
+- `list` on Pods.
+
+It cannot read Secrets, create workloads, delete Pods, mutate Deployments, or
+access cluster-scoped resources. Database access uses a separate runtime
+identity. Apply a site-specific egress policy allowing only the Kubernetes API
+and PostgreSQL endpoints; those addresses cannot be expressed portably in the
+checked-in manifest.
+
+Scale-down is StatefulSet-ordinal-safe. The controller examines the exact
+highest ordinals Kubernetes will remove, atomically changes only clean workers
+to `draining`, and then patches the replica count with the observed resource
+version. A leased, missing, starting, quarantined, or consumed trailing worker
+blocks ordinary scale-down. A failed patch leaves workers draining and
+unroutable for a safe retry. Duplicate controllers serialize their durable
+decision in PostgreSQL.
+
+Build and pin `Dockerfile.autoscaler`, create
+`sandbox-autoscaler-database` with `url`, `ca.crt`, `tls.crt`, and `tls.key`
+for a DML-only placement identity, and install the brokered control-plane
+prerequisites (`sandboxd-system`, `sandboxd-brokered`, `sandbox-work-order`,
+the gateway, and PostgreSQL). Then apply in this order:
+
+```bash
+kubectl apply -f deploy/k3s/sandboxd-worker-pools.yaml
+kubectl apply -f deploy/k3s/sandbox-autoscaler.yaml
+```
+
+The local k3s conformance script runs the same release binary outside the
+cluster against a loopback PostgreSQL port-forward. Production must not enable
+plaintext non-loopback database access.
+
 ## Dynamic-runtime profile
 
 Build `Dockerfile.host-integrated` under the dynamic image name, import its

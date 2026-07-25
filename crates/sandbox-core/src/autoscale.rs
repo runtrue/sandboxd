@@ -1,4 +1,4 @@
-use crate::{CoreError, GuestProfileIdentity};
+use crate::{CoreError, GuestProfileIdentity, ResourceCeilings};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -76,6 +76,8 @@ impl WorkerPoolRequest {
 pub struct WorkerPool {
     pub name: String,
     pub kubernetes_stateful_set: String,
+    pub placement_topology: String,
+    pub resource_ceilings: ResourceCeilings,
     pub key: WorkerPoolKey,
     pub policy: PoolPolicy,
     #[serde(default)]
@@ -106,6 +108,7 @@ impl WorkerPoolCatalog {
         for pool in &self.pools {
             if !valid_operator_name(&pool.name)
                 || !valid_operator_name(&pool.kubernetes_stateful_set)
+                || !valid_operator_name(&pool.placement_topology)
                 || !names.insert(&pool.name)
                 || !stateful_sets.insert(&pool.kubernetes_stateful_set)
                 || !keys.insert(&pool.key)
@@ -115,6 +118,7 @@ impl WorkerPoolCatalog {
                 ));
             }
             pool.key.validate()?;
+            pool.resource_ceilings.validate()?;
             pool.policy.validate()?;
             if pool.cold_fallback {
                 fallback_count += 1;
@@ -226,16 +230,15 @@ pub struct PoolObservation {
 
 impl PoolObservation {
     fn validate(self) -> Result<(), CoreError> {
-        let accounted = self
+        let routable = self
             .clean_workers
             .checked_add(self.leased_or_active_workers)
-            .and_then(|count| count.checked_add(self.draining_workers))
             .ok_or_else(|| {
                 CoreError::InvalidSpecification("worker pool counters overflow".to_owned())
             })?;
-        if accounted > self.current_workers {
+        if routable > self.current_workers {
             return Err(CoreError::InvalidSpecification(
-                "worker pool counters exceed current capacity".to_owned(),
+                "routable worker counters exceed current capacity".to_owned(),
             ));
         }
         Ok(())
@@ -354,6 +357,8 @@ mod tests {
                 WorkerPool {
                     name: "standard-warm".to_owned(),
                     kubernetes_stateful_set: "sandboxd-standard-warm".to_owned(),
+                    placement_topology: "fixed-v1".to_owned(),
+                    resource_ceilings: ceilings(),
                     key: key("standard-v1"),
                     policy: policy(),
                     cold_fallback: false,
@@ -361,6 +366,8 @@ mod tests {
                 WorkerPool {
                     name: "reviewed-cold-fallback".to_owned(),
                     kubernetes_stateful_set: "sandboxd-cold-fallback".to_owned(),
+                    placement_topology: "prepared-v1".to_owned(),
+                    resource_ceilings: ceilings(),
                     key: key("fallback-v1"),
                     policy: PoolPolicy {
                         warm_headroom: 0,
@@ -369,6 +376,22 @@ mod tests {
                     cold_fallback: true,
                 },
             ],
+        }
+    }
+
+    fn ceilings() -> ResourceCeilings {
+        ResourceCeilings {
+            allowed_guest_profiles: vec![GuestProfileIdentity::parse("strict-v1").expect("profile")],
+            maximum_services: 8,
+            maximum_timeout_ms: 30_000,
+            memory_bytes_per_service: 1024 * 1024 * 1024,
+            cpu_per_service_millis: 1_000,
+            pids_per_service: 256,
+            tmpfs_bytes: 64 * 1024 * 1024,
+            writable_root_bytes_per_service: 64 * 1024 * 1024,
+            maximum_volumes: 8,
+            maximum_volume_bytes: 512 * 1024 * 1024,
+            maximum_output_bytes: 1024 * 1024,
         }
     }
 
