@@ -133,6 +133,8 @@ pub enum Operation {
         sandbox: String,
         snapshot: String,
         timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fenced_source_epoch: Option<u64>,
     },
     Inspect {
         sandbox: String,
@@ -351,6 +353,7 @@ mod tests {
             sandbox: "sandbox-a".to_owned(),
             snapshot: "snapshot-a".to_owned(),
             timeout_ms: 1,
+            fenced_source_epoch: None,
         };
         let encoded = serde_json::to_string(&operation).expect("operation");
         assert!(encoded.starts_with(r#"{"kind":"restore","parameters":{"topology":"#));

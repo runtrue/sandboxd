@@ -1018,6 +1018,7 @@ mod tests {
                     assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
                     artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
                     guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
+                    fenced_source_epoch: None,
                 },
             )
             .expect("local transfer claim contract");
@@ -1227,6 +1228,7 @@ mod tests {
                     assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
                     artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
                     guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
+                    fenced_source_epoch: None,
                 },
             )
             .expect("claim transfer");
@@ -1316,6 +1318,7 @@ mod tests {
             assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
             guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
+            fenced_source_epoch: None,
         };
         let claim = repository
             .claim_transfer(
@@ -1393,6 +1396,7 @@ mod tests {
             assignment_epoch: runtrue_sandbox_core::AssignmentEpoch::new(8).expect("epoch"),
             artifact_portability: SnapshotPortability::CrossWorkerSameBackend,
             guest_profile: runtrue_sandbox_core::GuestProfile::strict().identity,
+            fenced_source_epoch: None,
         };
         assert!(repository
             .claim_transfer(

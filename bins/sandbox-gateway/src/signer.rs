@@ -55,8 +55,19 @@ impl WorkOrderSigner {
         assignment: &Assignment,
         now_unix_ms: u64,
     ) -> Result<WorkloadRequest, String> {
-        let operation = assignment
-            .operation
+        self.sign_operation(assignment, &assignment.operation, now_unix_ms)
+    }
+
+    pub(crate) fn sign_operation(
+        &self,
+        assignment: &Assignment,
+        requested_operation: &runtrue_sandbox_protocol::Operation,
+        now_unix_ms: u64,
+    ) -> Result<WorkloadRequest, String> {
+        if requested_operation.sandbox() != Some(assignment.identity.sandbox_id.as_str()) {
+            return Err("requested operation does not match the assignment sandbox".to_owned());
+        }
+        let operation = requested_operation
             .work_order_operation()
             .ok_or_else(|| "assignment operation is not workload-authorized".to_owned())?;
         let maximum_expiry = now_unix_ms
@@ -81,7 +92,7 @@ impl WorkOrderSigner {
             issued_unix_millis: now_unix_ms,
             expires_unix_millis,
             nonce: nonce(assignment, now_unix_ms),
-            operation_digest: assignment.operation.digest()?,
+            operation_digest: requested_operation.digest()?,
             resource_ceilings: assignment.resource_ceilings.clone(),
         };
         claims.validate().map_err(|error| error.to_string())?;
@@ -99,7 +110,7 @@ impl WorkOrderSigner {
                     signature: hex::encode(signer.finalize().into_bytes()),
                 }),
             },
-            operation: assignment.operation.clone(),
+            operation: requested_operation.clone(),
         };
         request.validate().map_err(str::to_owned)?;
         Ok(request)

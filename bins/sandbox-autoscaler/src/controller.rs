@@ -1,6 +1,6 @@
 use k8s_openapi::api::{apps::v1::StatefulSet, core::v1::Pod};
 use kube::{
-    api::{ListParams, Patch, PatchParams},
+    api::{DeleteParams, ListParams, Patch, PatchParams, Preconditions},
     Api, Client,
 };
 use runtrue_sandbox_core::{WorkerId, WorkerPool, WorkerPoolCatalog};
@@ -15,8 +15,15 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::sleep;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::TcpStream,
+    time::timeout,
+};
 
 const POOL_LABEL: &str = "runtrue.io/worker-pool";
+const BROKER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAXIMUM_BROKER_PROBE_BYTES: usize = 1024;
 
 pub(crate) struct Controller {
     stateful_sets: Api<StatefulSet>,
@@ -108,6 +115,7 @@ impl Controller {
                 .saturating_add(available_cluster_slots)
                 .min(pool.policy.maximum_workers);
             let pool_pods = self.ready_pool_pods(pool, stateful_set).await?;
+            self.reconcile_recovery_fences(pool, &pool_pods).await?;
             self.refresh_workers(pool, &pool_pods).await?;
             let now = now_unix_ms()?;
             let ready_workers =
@@ -163,6 +171,35 @@ impl Controller {
         Ok(())
     }
 
+    async fn reconcile_recovery_fences(
+        &self,
+        pool: &WorkerPool,
+        pods: &[Pod],
+    ) -> Result<(), String> {
+        let fences = self
+            .store
+            .recovery_fences(&pool.name, 1_024)
+            .await
+            .map_err(|error| format!("list recovery fences for pool `{}`: {error}", pool.name))?;
+        for worker_id in fences {
+            let mut matching_pod = None;
+            for pod in pods {
+                if pod_worker_id(pod)? == worker_id {
+                    matching_pod = Some(pod);
+                    break;
+                }
+            }
+            if let Some(pod) = matching_pod {
+                self.delete_fenced_pod(pod, &worker_id).await?;
+            }
+            self.store
+                .confirm_recovery_fence(&worker_id, now_unix_ms()?)
+                .await
+                .map_err(|error| format!("confirm recovery fence `{worker_id}`: {error}"))?;
+        }
+        Ok(())
+    }
+
     async fn ready_pool_pods(
         &self,
         pool: &WorkerPool,
@@ -205,6 +242,18 @@ impl Controller {
     async fn refresh_workers(&self, pool: &WorkerPool, pods: &[Pod]) -> Result<(), String> {
         for pod in pods.iter().filter(|pod| workload_running(pod)) {
             let worker_id = pod_worker_id(pod)?;
+            let Some(pod_ip) = pod
+                .status
+                .as_ref()
+                .and_then(|status| status.pod_ip.as_deref())
+                .and_then(|address| address.parse::<IpAddr>().ok())
+            else {
+                continue;
+            };
+            let broker_address = SocketAddr::new(pod_ip, self.broker_port);
+            if !broker_ready(broker_address).await {
+                continue;
+            }
             match self
                 .store
                 .heartbeat_worker(&worker_id, now_unix_ms()?)
@@ -216,25 +265,24 @@ impl Controller {
                     return Err(format!("heartbeat worker `{worker_id}`: {error}"));
                 }
             }
-            if !pod_ready(pod) {
-                continue;
-            }
-            if !self
+            let states = self
                 .store
                 .worker_states(std::slice::from_ref(&worker_id))
                 .await
-                .map_err(|error| format!("inspect worker `{worker_id}`: {error}"))?
-                .is_empty()
+                .map_err(|error| format!("inspect worker `{worker_id}`: {error}"))?;
+            if states
+                .iter()
+                .any(|(_, state)| worker_requires_deletion(*state))
             {
+                self.delete_fenced_pod(pod, &worker_id).await?;
                 continue;
             }
-            let pod_ip = pod
-                .status
-                .as_ref()
-                .and_then(|status| status.pod_ip.as_deref())
-                .ok_or_else(|| format!("Ready worker Pod `{worker_id}` has no IP"))?
-                .parse::<IpAddr>()
-                .map_err(|_| format!("Ready worker Pod `{worker_id}` has an invalid IP"))?;
+            if !pod_ready(pod) {
+                continue;
+            }
+            if !states.is_empty() {
+                continue;
+            }
             self.store
                 .register_worker(
                     &WorkerRegistration {
@@ -243,13 +291,48 @@ impl Controller {
                         topology: pool.placement_topology.clone(),
                         resource_shape: pool.key.resource_shape.clone(),
                         compatibility_cohort: pool.key.runtime_compatibility_cohort.clone(),
-                        broker_address: SocketAddr::new(pod_ip, self.broker_port),
+                        broker_address,
                         resource_ceilings: pool.resource_ceilings.clone(),
                     },
                     now_unix_ms()?,
                 )
                 .await
                 .map_err(|error| format!("register worker `{worker_id}`: {error}"))?;
+        }
+        Ok(())
+    }
+
+    async fn delete_fenced_pod(&self, pod: &Pod, worker_id: &WorkerId) -> Result<(), String> {
+        let name = pod
+            .metadata
+            .name
+            .as_deref()
+            .ok_or_else(|| format!("fenced worker `{worker_id}` has no Pod name"))?;
+        let uid = pod
+            .metadata
+            .uid
+            .clone()
+            .ok_or_else(|| format!("fenced worker `{worker_id}` has no Pod UID"))?;
+        match self
+            .pods
+            .delete(
+                name,
+                &DeleteParams {
+                    grace_period_seconds: Some(0),
+                    preconditions: Some(Preconditions {
+                        uid: Some(uid),
+                        resource_version: pod.metadata.resource_version.clone(),
+                    }),
+                    ..DeleteParams::default()
+                },
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(response)) if response.code == 404 => {}
+            Err(error) => {
+                return Err(format!("delete fenced worker Pod `{name}`: {error}"));
+            }
         }
         Ok(())
     }
@@ -392,6 +475,39 @@ fn workload_running(pod: &Pod) -> bool {
             })
 }
 
+fn worker_requires_deletion(state: PlacementWorkerState) -> bool {
+    matches!(
+        state,
+        PlacementWorkerState::Quarantined | PlacementWorkerState::Consumed
+    )
+}
+
+async fn broker_ready(address: SocketAddr) -> bool {
+    timeout(BROKER_PROBE_TIMEOUT, async move {
+        let mut stream = TcpStream::connect(address).await?;
+        stream
+            .write_all(
+                format!(
+                    "GET /health/ready HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let mut response = Vec::with_capacity(MAXIMUM_BROKER_PROBE_BYTES);
+        stream
+            .take((MAXIMUM_BROKER_PROBE_BYTES + 1) as u64)
+            .read_to_end(&mut response)
+            .await?;
+        Ok::<bool, std::io::Error>(
+            response.len() <= MAXIMUM_BROKER_PROBE_BYTES
+                && (response.starts_with(b"HTTP/1.1 200 ")
+                    || response.starts_with(b"HTTP/1.0 200 ")),
+        )
+    })
+    .await
+    .is_ok_and(|result| result.unwrap_or(false))
+}
+
 fn pod_worker_id(pod: &Pod) -> Result<WorkerId, String> {
     let uid = pod
         .metadata
@@ -426,6 +542,47 @@ fn now_unix_ms() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn only_permanently_fenced_workers_are_force_deleted() {
+        assert!(worker_requires_deletion(PlacementWorkerState::Quarantined));
+        assert!(worker_requires_deletion(PlacementWorkerState::Consumed));
+        assert!(!worker_requires_deletion(PlacementWorkerState::Clean));
+        assert!(!worker_requires_deletion(PlacementWorkerState::Leased));
+        assert!(!worker_requires_deletion(PlacementWorkerState::Draining));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_requires_a_live_broker_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = [0_u8; 256];
+            let _ = stream.read(&mut request).await.expect("request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("response");
+        });
+        assert!(broker_ready(address).await);
+        server.await.expect("server");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = [0_u8; 256];
+            let _ = stream.read(&mut request).await.expect("request");
+            stream
+                .write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("response");
+        });
+        assert!(!broker_ready(address).await);
+        server.await.expect("server");
+    }
 
     #[test]
     fn pod_uid_becomes_one_bounded_worker_identity() {

@@ -211,7 +211,7 @@ signed per-topology policy remains mandatory.
 | Secret volume | B expected | Not release-qualified | Non-persistent delivery, zeroization, access audit, snapshot exclusion |
 | Per-sandbox cgroup limits | E or F | External aggregate pod limit passed; managed subtree unavailable at B/C | Writable delegated cgroup subtree, one pod per sandbox, or resource broker |
 | Durable local recovery | B-V | Forced Pod loss cleared stale attachments and reopened retained content from the same RWO PVC | Repeated eviction/node-loss fault injection and storage-class-specific fencing |
-| Cross-worker restore | B plus shared artifact backend and egress | Not exercised | S3 backend, common key, identity fencing, compatibility cohort, credential rotation |
+| Cross-worker restore | B plus shared artifact backend and egress | Controller state machine and signed live-recovery fence proof passed transactional and adversarial coverage | Multi-node Pod-loss and node-loss conformance against the production object store |
 | Root/OCI-compatible guest profiles | B-V | Strict UID/GID 65534, root-in-sandbox, and OCI-compatible volume paths passed | Treat profile enablement as explicit operator policy |
 | Signed workload socket | Any daemon level | Non-root, capability-free broker passed local-k3s dispatch and reverse-ingress conformance | Production key delivery/rotation and continuous replay/NetworkPolicy tests |
 

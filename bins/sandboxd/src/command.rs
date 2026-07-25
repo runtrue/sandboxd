@@ -228,6 +228,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                     sandbox,
                     snapshot,
                     timeout_ms: timeout_seconds * 1_000,
+                    fenced_source_epoch: None,
                 },
             )
         }

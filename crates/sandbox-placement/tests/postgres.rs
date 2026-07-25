@@ -4,7 +4,7 @@ use runtrue_sandbox_core::{
 };
 use runtrue_sandbox_placement::{
     Assignment, CompletionOutcome, EnqueueOutcome, PlacementStoreConfig, PlacementStoreError,
-    PlacementSubmission, PostgresPlacementStore, WorkerRegistration,
+    PlacementSubmission, PostgresPlacementStore, RecoveryPolicy, WorkerRegistration,
 };
 use runtrue_sandbox_protocol::{Operation, WorkloadResponse, PROTOCOL_VERSION};
 use std::{env, time::Duration};
@@ -71,6 +71,33 @@ async fn exercise(url: &str) {
             .await
             .expect("idempotent retry"),
         EnqueueOutcome::Existing(_)
+    ));
+    let mut invalid_recovery = submission(
+        "tenant-a",
+        "invalid-recovery-operation",
+        "sandbox-invalid-recovery",
+        10_000,
+    );
+    invalid_recovery.recovery_policy = Some(RecoveryPolicy {
+        snapshot_interval_ms: 1_000,
+        maximum_staleness_ms: 5_000,
+        maximum_attempts: 2,
+    });
+    assert!(matches!(
+        replica_a.enqueue(&invalid_recovery, 101).await,
+        Err(PlacementStoreError::Invalid(_))
+    ));
+    invalid_recovery.operation = Operation::Restore {
+        topology: serde_json::from_str(include_str!("../../../deploy/k3s/fixed-runtime.lock.json"))
+            .expect("topology"),
+        sandbox: invalid_recovery.work.sandbox_id.to_string(),
+        snapshot: "snapshot-a".to_owned(),
+        timeout_ms: 1_000,
+        fenced_source_epoch: Some(1),
+    };
+    assert!(matches!(
+        replica_a.enqueue(&invalid_recovery, 101).await,
+        Err(PlacementStoreError::Invalid(_))
     ));
     let conflicting = submission("tenant-a", "idem-a-other", "sandbox-a", 10_000);
     assert!(matches!(
@@ -569,6 +596,170 @@ async fn exercise(url: &str) {
         pool_bound.work.sandbox_id
     );
 
+    let mut recovery = submission(
+        "tenant-recovery",
+        "recover-active",
+        "sandbox-recovery",
+        10_000,
+    );
+    recovery.topology = "recovery-topology".to_owned();
+    recovery.operation = Operation::Create {
+        topology: serde_json::from_str(include_str!("../../../deploy/k3s/fixed-runtime.lock.json"))
+            .expect("topology"),
+        sandbox: recovery.work.sandbox_id.to_string(),
+        timeout_ms: 1_000,
+    };
+    recovery.recovery_policy = Some(RecoveryPolicy {
+        snapshot_interval_ms: 1_000,
+        maximum_staleness_ms: 5_000,
+        maximum_attempts: 2,
+    });
+    replica_b
+        .enqueue(&recovery, 1_000)
+        .await
+        .expect("enqueue recoverable service");
+    let mut recovery_source = worker("worker-recovery-source");
+    recovery_source.topology = recovery.topology.clone();
+    replica_b
+        .register_worker(&recovery_source, 1_000)
+        .await
+        .expect("register recovery source");
+    let source_assignment = replica_b
+        .assign_next(&recovery_source.worker_id, 1_001)
+        .await
+        .expect("assign recovery source")
+        .expect("recovery source assignment");
+    replica_b
+        .complete_response(
+            &source_assignment,
+            &WorkloadResponse {
+                schema_version: PROTOCOL_VERSION,
+                request_id: source_assignment.request_id.clone(),
+                ok: true,
+                result: Some(serde_json::json!({"state": "running"})),
+                error: None,
+            },
+            1_002,
+        )
+        .await
+        .expect("source serving");
+    for heartbeat in (1_040..=2_000).step_by(40) {
+        replica_b
+            .heartbeat_worker(&recovery_source.worker_id, heartbeat)
+            .await
+            .expect("renew before checkpoint");
+    }
+    let checkpoints = replica_b
+        .claim_due_checkpoints(2_002, 8)
+        .await
+        .expect("claim checkpoint");
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].assignment.epoch, source_assignment.epoch);
+    assert!(replica_b
+        .claim_due_checkpoints(2_002, 8)
+        .await
+        .expect("checkpoint claim is leased")
+        .is_empty());
+    replica_b
+        .publish_checkpoint(&checkpoints[0], 2_003)
+        .await
+        .expect("publish durable checkpoint reference");
+    let fenced = replica_b
+        .fence_expired(2_052)
+        .await
+        .expect("fence lost recovery source");
+    let fenced_recovery = fenced
+        .iter()
+        .find(|record| record.request_id == source_assignment.request_id)
+        .expect("recovery source was fenced");
+    assert_eq!(
+        fenced_recovery.state,
+        runtrue_sandbox_placement::PlacementState::Recovering
+    );
+    let mut recovery_destination = worker("worker-recovery-destination");
+    recovery_destination.topology = recovery.topology.clone();
+    replica_b
+        .register_worker(&recovery_destination, 2_052)
+        .await
+        .expect("register recovery destination");
+    assert!(replica_b
+        .assign_next(&recovery_destination.worker_id, 2_053)
+        .await
+        .expect("unconfirmed fence blocks recovery")
+        .is_none());
+    assert_eq!(
+        replica_b
+            .confirm_recovery_fence(&recovery_source.worker_id, 2_053)
+            .await
+            .expect("confirm source Pod fence"),
+        1
+    );
+    let restored = replica_b
+        .assign_next(&recovery_destination.worker_id, 2_054)
+        .await
+        .expect("assign recovery destination")
+        .expect("recovery assignment");
+    assert!(restored.epoch > source_assignment.epoch);
+    assert!(matches!(
+        restored.operation,
+        Operation::Restore { ref snapshot, .. }
+            if snapshot == checkpoints[0].snapshot_id.as_str()
+    ));
+    assert!(matches!(
+        replica_b
+            .complete_response(
+                &source_assignment,
+                &WorkloadResponse {
+                    schema_version: PROTOCOL_VERSION,
+                    request_id: source_assignment.request_id.clone(),
+                    ok: true,
+                    result: Some(serde_json::json!({"stale": true})),
+                    error: None,
+                },
+                2_055,
+            )
+            .await,
+        Err(PlacementStoreError::StaleAssignment)
+    ));
+    replica_b
+        .complete_response(
+            &restored,
+            &WorkloadResponse {
+                schema_version: PROTOCOL_VERSION,
+                request_id: restored.request_id.clone(),
+                ok: true,
+                result: Some(serde_json::json!({"state": "running"})),
+                error: None,
+            },
+            2_056,
+        )
+        .await
+        .expect("destination serving");
+    let recovered = replica_b
+        .get_by_idempotency(
+            &recovery.work.tenant_id,
+            &recovery.subject_id,
+            &recovery.work.idempotency_key,
+        )
+        .await
+        .expect("recovery lookup")
+        .expect("recovered placement");
+    assert_eq!(
+        recovered.state,
+        runtrue_sandbox_placement::PlacementState::Serving
+    );
+    let recovery_status = recovered.recovery.expect("recovery status");
+    assert_eq!(recovery_status.source_epoch, Some(source_assignment.epoch));
+    assert_eq!(recovery_status.attempts, 1);
+    assert_eq!(recovery_status.recovered_unix_ms, Some(2_056));
+    assert_recovery_audit(
+        url,
+        &source_assignment,
+        &restored,
+        checkpoints[0].snapshot_id.as_str(),
+    )
+    .await;
+
     replica_b
         .record_scale_up("fixed-standard-warm", 3, 423)
         .await
@@ -591,8 +782,8 @@ async fn exercise(url: &str) {
                 "fixed-standard-warm".to_owned(),
                 "other-reviewed-pool".to_owned(),
             ],
-            500,
-            Duration::from_secs(1),
+            2_100,
+            Duration::from_secs(3),
         )
         .await
         .expect("durable autoscale metrics");
@@ -610,6 +801,79 @@ async fn exercise(url: &str) {
         .expect("activation quantiles");
     assert_eq!(activation.samples, 1);
     assert_eq!(activation.p99_milliseconds, 7);
+    let recovery_rpo = metrics
+        .latencies
+        .iter()
+        .find(|metric| metric.phase == "recovery_rpo/standard-v1")
+        .expect("recovery RPO quantiles");
+    assert_eq!(recovery_rpo.p99_milliseconds, 49);
+    let recovery_rto = metrics
+        .latencies
+        .iter()
+        .find(|metric| metric.phase == "recovery_rto/standard-v1")
+        .expect("recovery RTO quantiles");
+    assert_eq!(recovery_rto.p99_milliseconds, 4);
+}
+
+async fn assert_recovery_audit(
+    url: &str,
+    source: &Assignment,
+    destination: &Assignment,
+    snapshot: &str,
+) {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .expect("recovery audit database");
+    tokio::spawn(async move {
+        connection
+            .await
+            .expect("recovery audit database connection");
+    });
+    let rows = client
+        .query(
+            "SELECT worker_id, assignment_epoch, event, snapshot_id
+             FROM sandboxd_placement.audit WHERE request_id = $1
+             AND event IN (
+                'checkpoint_published', 'source_fenced', 'recovery_queued',
+                'source_fence_confirmed',
+                'recovery_assigned', 'recovery_completed'
+             ) ORDER BY sequence",
+            &[&source.request_id],
+        )
+        .await
+        .expect("recovery audit chain");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.get::<_, String>("event"))
+            .collect::<Vec<_>>(),
+        vec![
+            "checkpoint_published",
+            "source_fenced",
+            "recovery_queued",
+            "source_fence_confirmed",
+            "recovery_assigned",
+            "recovery_completed"
+        ]
+    );
+    assert_eq!(
+        rows[1].get::<_, Option<String>>("worker_id").as_deref(),
+        Some(source.worker_id.as_str())
+    );
+    assert_eq!(
+        rows[1].get::<_, Option<i64>>("assignment_epoch"),
+        Some(i64::try_from(source.epoch.get()).expect("source epoch"))
+    );
+    assert_eq!(
+        rows[4].get::<_, Option<String>>("worker_id").as_deref(),
+        Some(destination.worker_id.as_str())
+    );
+    assert_eq!(
+        rows[4].get::<_, Option<i64>>("assignment_epoch"),
+        Some(i64::try_from(destination.epoch.get()).expect("destination epoch"))
+    );
+    assert!(rows
+        .iter()
+        .all(|row| row.get::<_, Option<String>>("snapshot_id").as_deref() == Some(snapshot)));
 }
 
 async fn assert_terminal_audit(url: &str, assignment: &Assignment, result_digest: &str) {
@@ -711,6 +975,7 @@ fn submission(
         operation: Operation::Inspect {
             sandbox: sandbox_name.to_owned(),
         },
+        recovery_policy: None,
     }
 }
 

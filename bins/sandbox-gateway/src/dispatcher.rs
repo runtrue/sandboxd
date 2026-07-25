@@ -1,6 +1,7 @@
 use crate::signer::WorkOrderSigner;
+use runtrue_sandbox_core::SnapshotMode;
 use runtrue_sandbox_placement::{PlacementStoreError, PostgresPlacementStore};
-use runtrue_sandbox_protocol::{WorkloadRequest, WorkloadResponse};
+use runtrue_sandbox_protocol::{Operation, WorkloadRequest, WorkloadResponse};
 use std::{
     net::SocketAddr,
     sync::Arc,
@@ -64,6 +65,53 @@ impl Dispatcher {
             .fence_expired(now)
             .await
             .map_err(|error| error.to_string())?;
+        let checkpoints = self
+            .store
+            .claim_due_checkpoints(now, self.worker_scan_limit)
+            .await
+            .map_err(|error| error.to_string())?;
+        for checkpoint in checkpoints {
+            let operation = Operation::Snapshot {
+                sandbox: checkpoint.assignment.identity.sandbox_id.to_string(),
+                snapshot: checkpoint.snapshot_id.to_string(),
+                mode: SnapshotMode::Live,
+            };
+            let request =
+                self.signer
+                    .sign_operation(&checkpoint.assignment, &operation, now_unix_ms()?)?;
+            match dispatch(
+                checkpoint.assignment.broker_address,
+                &request,
+                self.request_timeout,
+            )
+            .await
+            {
+                Ok(response) if response.ok => {
+                    match self
+                        .store
+                        .publish_checkpoint(&checkpoint, now_unix_ms()?)
+                        .await
+                    {
+                        Ok(()) | Err(PlacementStoreError::StaleAssignment) => {}
+                        Err(error) => return Err(error.to_string()),
+                    }
+                }
+                Ok(response) => {
+                    eprintln!(
+                        "checkpoint {} rejected by worker {}: {}",
+                        checkpoint.snapshot_id,
+                        checkpoint.assignment.worker_id,
+                        response.error.as_deref().unwrap_or("unknown error")
+                    );
+                }
+                Err(error) => {
+                    eprintln!(
+                        "checkpoint {} dispatch to worker {} failed: {error}",
+                        checkpoint.snapshot_id, checkpoint.assignment.worker_id
+                    );
+                }
+            }
+        }
         let workers = self
             .store
             .clean_workers(now, self.worker_scan_limit)
@@ -386,6 +434,7 @@ mod tests {
                             operation: Operation::Inspect {
                                 sandbox: sandbox.to_string(),
                             },
+                            recovery_policy: None,
                         },
                         now,
                     )

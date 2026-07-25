@@ -168,6 +168,24 @@ Workers in one migration pool need:
 - compatible runtime and host cohorts; and
 - distinct worker IDs and local state roots.
 
+Automatic worker-loss recovery additionally requires:
+
+- a shared, durable S3-compatible backend; the local provider remains
+  same-worker only;
+- the same credential authority and artifact master key on every eligible
+  worker;
+- durable, highly available gateway PostgreSQL;
+- more than one schedulable node and a compatible clean destination worker;
+- namespaced autoscaler permission to delete only an owned Pod whose durable
+  worker state is already `quarantined` or `consumed`; and
+- outer network policy allowing only required artifact and control-plane
+  endpoints.
+
+Do not use node-local object storage for this feature. Configure replication,
+encryption, retention, and availability for the declared RPO. The controller
+never falls back to a stale checkpoint or an empty create when recovery was
+requested.
+
 The provider uses HTTPS by default. Set `--artifact-s3-endpoint` for a compatible
 service. `--artifact-s3-allow-http-for-local-testing` is only for a trusted
 local test endpoint.

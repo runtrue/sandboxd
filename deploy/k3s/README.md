@@ -570,14 +570,15 @@ feature available in the pinned Kubernetes cohort. Terminal Pod objects do not
 retain running processes or `emptyDir` data, but the control plane keeps them
 for diagnostics until garbage collection; the dedicated cohort therefore uses
 a bounded `terminated-pod-gc-threshold`. These manifests provide one static
-clean slot; they are not the warm-pool controller specified by the
-placement/autoscaling phases and do not claim restart-durable sandboxes. Before
-enabling durable operation:
+clean slot; the worker-pool manifests below provide the warm-pool controller.
+Cross-worker recovery also requires shared S3 artifact configuration and
+multi-node qualification. Before enabling durable operation:
 
 1. use an encrypted, user-namespace-compatible, single-writer PVC for state and
    local artifacts;
 2. verify idmapped-mount behavior with the selected CSI driver;
-3. add worker fencing and repeated crash/recovery tests;
+3. run repeated Pod-loss and node-loss recovery qualification against the
+   selected artifact service and CSI implementation;
 4. deploy the fenced placement and warm-pool controller before exposing tenant
    submission; and
 5. monitor failed cleanup, assignment reconciliation, storage capacity,
@@ -610,8 +611,10 @@ secret. The autoscaler registers only Ready Pods owned by the exact reviewed
 StatefulSet, derives `worker-<pod-uid>`, and records the catalog-fixed topology,
 shape, cohort, broker address, and resource ceilings in PostgreSQL.
 It continues heartbeat renewal for an already registered worker while
-sandboxd's container is Running; readiness intentionally becomes false while
-that worker is occupied.
+sandboxd's container is Running and a bounded direct request to that Pod's
+broker succeeds. Kubernetes phase alone is never lease evidence, because it can
+remain stale during node loss. Readiness intentionally becomes false while that
+worker is occupied.
 Only the userspace pool receives DNS and TCP/443 Pod egress; none of the pools
 has a Kubernetes Service, Ingress, host port, or host-network access.
 
@@ -619,13 +622,17 @@ has a Kubernetes Service, Ingress, host port, or host-network access.
 service-account token. Its namespaced Role permits exactly:
 
 - `get` and `patch` on StatefulSets; and
-- `list` on Pods.
+- `list` on Pods; and
+- `delete` on an owned Pod after its durable worker state is already
+  `quarantined` or `consumed`.
 
-It cannot read Secrets, create workloads, delete Pods, mutate Deployments, or
-access cluster-scoped resources. Database access uses a separate runtime
-identity. Apply a site-specific egress policy allowing only the Kubernetes API
-and PostgreSQL endpoints; those addresses cannot be expressed portably in the
-checked-in manifest.
+Deletion uses exact UID and resource-version preconditions, so a recreated Pod
+with the same StatefulSet name cannot be removed. The controller cannot read
+Secrets, create workloads, mutate Deployments, or access cluster-scoped
+resources. Database access uses a separate runtime identity. Apply a
+site-specific egress policy allowing only the Kubernetes API and PostgreSQL
+endpoints; those addresses cannot be expressed portably in the checked-in
+manifest.
 
 `--maximum-total-workers` is required and must equal the smaller worker budget
 allocated by cluster capacity policy and the namespace quota. The controller

@@ -263,6 +263,63 @@ Audit records contain verified tenant, workspace, and subject identities. They
 exclude operation parameters, topology content, environment values, work
 orders, signatures, and keys. Operators manage audit retention and rotation.
 
+### Automatic worker-loss recovery
+
+Create and restore submissions may opt into a bounded recovery policy:
+
+```json
+{
+  "recovery_policy": {
+    "snapshot_interval_ms": 30000,
+    "maximum_staleness_ms": 90000,
+    "maximum_attempts": 3
+  }
+}
+```
+
+The interval controls checkpoint cadence and storage cost. Maximum staleness is
+the declared RPO ceiling: an expired lease with no checkpoint inside that
+window terminates as `recovery_failed` instead of starting an empty sandbox.
+The attempt limit bounds controller, network, artifact-backend, and restore
+retries. Recovery is opt-in.
+
+A gateway replica transactionally claims each due checkpoint, signs a live
+snapshot operation for the current worker and epoch, and records the snapshot
+only after successful manifest-last publication. Multiple replicas cannot
+claim the same checkpoint. A failed or ambiguous attempt publishes no
+control-plane reference and becomes eligible again at the next interval.
+
+On lease expiry or explicit quarantine, PostgreSQL quarantines the source,
+validates the latest snapshot and attempt limit, replaces the stored operation
+with a restore bound to that snapshot and source epoch, and exposes
+`recovering`. Only an exactly compatible worker can receive the new,
+higher-epoch assignment. `serving` is restored only after restore succeeds.
+Autoscaler heartbeats require a bounded direct response from the worker broker;
+stale Kubernetes `Running` or `Ready` status cannot renew a partitioned node.
+
+The signed recovery operation contains a controller-only
+`fenced_source_epoch`. A live snapshot cannot move workers without that exact
+proof, and the destination epoch must be newer. Tenant submissions cannot
+supply the field. Restore also validates tenant scope, topology, attested
+roots, guest profile, runsc configuration and version, architecture, CPU
+features, artifact and volume portability, storage caps, and network policy
+before guest execution. Fresh route and tunnel credentials are created after
+restore.
+
+Responses include policy, latest snapshot, source epoch, attempts, timestamps,
+and terminal error. Recovery assignment remains blocked until the namespaced
+controller confirms that the exact old Pod UID is absent. Audit rows reconstruct
+`checkpoint_published -> source_fenced -> recovery_queued ->
+source_fence_confirmed -> recovery_assigned -> recovery_completed`.
+Metrics publish `recovery_rpo/<resource-shape>` and
+`recovery_rto/<resource-shape>` P50/P95/P99 series.
+
+Recovery preserves checkpointed process, memory, tmpfs, internal sockets,
+supported writable roots, and portable provider volumes. It does not make
+external effects exactly once. Work after the recovery point can repeat;
+clients need idempotency keys or transactional sinks at external side-effect
+boundaries.
+
 ## Compatibility
 
 Protocol v2 and work-order schema 4 are required on the workload socket.

@@ -20,7 +20,7 @@ use runtrue_sandbox_core::{
 use runtrue_sandbox_oci::NetworkProfile;
 use runtrue_sandbox_placement::{
     EnqueueOutcome, PlacementRecord, PlacementState, PlacementStoreError, PlacementSubmission,
-    PostgresPlacementStore, WorkerRegistration,
+    PostgresPlacementStore, RecoveryPolicy, WorkerRegistration,
 };
 use runtrue_sandbox_protocol::{Operation, WorkerAdvertisement, WorkloadResponse};
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,8 @@ struct SubmitRequest {
     resource_shape: String,
     compatibility_cohort: String,
     operation: Operation,
+    #[serde(default)]
+    recovery_policy: Option<RecoveryPolicy>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +104,7 @@ struct PlacementResponse {
     lease_expires_unix_ms: Option<u64>,
     result_digest: Option<String>,
     response: Option<WorkloadResponse>,
+    recovery: Option<runtrue_sandbox_placement::RecoveryStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -304,6 +307,7 @@ async fn submit(
         resource_shape: request.resource_shape,
         compatibility_cohort: request.compatibility_cohort,
         operation: request.operation,
+        recovery_policy: request.recovery_policy,
     };
     let (status, record) = match state.store.enqueue(&submission, now).await? {
         EnqueueOutcome::Queued(record) => (StatusCode::ACCEPTED, record),
@@ -445,7 +449,10 @@ async fn next_placement_event(
         };
         let terminal = matches!(
             record.state,
-            PlacementState::Completed | PlacementState::Cancelled | PlacementState::Expired
+            PlacementState::Completed
+                | PlacementState::RecoveryFailed
+                | PlacementState::Cancelled
+                | PlacementState::Expired
         );
         let encoded = match serde_json::to_string(&PlacementResponse::from(record)) {
             Ok(encoded) => encoded,
@@ -546,6 +553,7 @@ impl From<PlacementRecord> for PlacementResponse {
             lease_expires_unix_ms: record.lease_expires_unix_ms,
             result_digest: record.result_digest,
             response: record.response,
+            recovery: record.recovery,
         }
     }
 }
