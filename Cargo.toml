@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "bins/sandbox-net-agent",
   "bins/sandbox-broker",
   "bins/sandbox-autoscaler",
   "bins/sandbox-gateway",
