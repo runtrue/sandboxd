@@ -27,7 +27,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 const MIGRATION_LOCK: i64 = 7_223_510_449_421;
 const QUEUE_LOCK: i64 = 7_223_510_449_422;
 const AUTOSCALE_LOCK: i64 = 7_223_510_449_423;
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 const MAXIMUM_PEM_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_OPERATION_BYTES: usize = 512 * 1024;
 const MAXIMUM_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS sandboxd_placement.requests (
     deadline_unix_ms BIGINT NOT NULL,
     created_unix_ms BIGINT NOT NULL,
     fair_finish BIGINT NOT NULL CHECK (fair_finish > 0),
-    state TEXT NOT NULL CHECK (state IN ('queued', 'assigned', 'completed', 'cancelled', 'expired')),
+    state TEXT NOT NULL CHECK (state IN ('queued', 'assigned', 'serving', 'completed', 'cancelled', 'expired')),
     worker_id TEXT REFERENCES sandboxd_placement.workers(worker_id),
     assignment_epoch BIGINT,
     lease_expires_unix_ms BIGINT,
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS sandboxd_placement.requests (
 
 CREATE UNIQUE INDEX IF NOT EXISTS requests_live_sandbox
 ON sandboxd_placement.requests (tenant_id, workspace_id, sandbox_id)
-WHERE state IN ('queued', 'assigned', 'completed');
+WHERE state IN ('queued', 'assigned', 'serving', 'completed');
 
 CREATE INDEX IF NOT EXISTS requests_queue_order
 ON sandboxd_placement.requests (fair_finish, created_unix_ms, request_id)
@@ -231,6 +231,21 @@ WHERE terminal_unix_ms IS NOT NULL;
 UPDATE sandboxd_placement.schema_version SET version = 5 WHERE singleton = TRUE;
 "#;
 
+const MIGRATION_V6: &str = r#"
+ALTER TABLE sandboxd_placement.requests
+    DROP CONSTRAINT IF EXISTS requests_state_check;
+ALTER TABLE sandboxd_placement.requests
+    ADD CONSTRAINT requests_state_check
+    CHECK (state IN ('queued', 'assigned', 'serving', 'completed', 'cancelled', 'expired'));
+
+DROP INDEX IF EXISTS sandboxd_placement.requests_live_sandbox;
+CREATE UNIQUE INDEX requests_live_sandbox
+ON sandboxd_placement.requests (tenant_id, workspace_id, sandbox_id)
+WHERE state IN ('queued', 'assigned', 'serving', 'completed');
+
+UPDATE sandboxd_placement.schema_version SET version = 6 WHERE singleton = TRUE;
+"#;
+
 #[derive(Debug, Clone, Copy)]
 pub struct PlacementStoreConfig {
     pub global_queue_limit: i64,
@@ -313,6 +328,7 @@ pub struct WorkerRegistration {
 pub enum PlacementState {
     Queued,
     Assigned,
+    Serving,
     Completed,
     Cancelled,
     Expired,
@@ -539,6 +555,10 @@ impl PostgresPlacementStore {
             transaction.batch_execute(MIGRATION_V5).await?;
             version = 5;
         }
+        if version == 5 {
+            transaction.batch_execute(MIGRATION_V6).await?;
+            version = 6;
+        }
         if version != SCHEMA_VERSION {
             return Err(PlacementStoreError::Invalid(format!(
                 "placement database schema version {version} is not supported"
@@ -677,7 +697,7 @@ impl PostgresPlacementStore {
             .query_opt(
                 "SELECT 1 FROM sandboxd_placement.requests
                  WHERE tenant_id = $1 AND workspace_id = $2 AND sandbox_id = $3
-                 AND state IN ('queued', 'assigned', 'completed')",
+                 AND state IN ('queued', 'assigned', 'serving', 'completed')",
                 &[
                     &submission.work.tenant_id.as_str(),
                     &submission.work.workspace_id.as_str(),
@@ -822,19 +842,31 @@ impl PostgresPlacementStore {
         worker_id: &WorkerId,
         now_unix_ms: u64,
     ) -> Result<(), PlacementStoreError> {
-        let updated = self
-            .client
-            .lock()
-            .await
+        let now = to_i64(now_unix_ms)?;
+        let expires = now
+            .checked_add(duration_millis(self.config.lease_lifetime)?)
+            .ok_or_else(|| PlacementStoreError::Invalid("lease expiration overflow".to_owned()))?;
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        let updated = transaction
             .execute(
                 "UPDATE sandboxd_placement.workers SET heartbeat_unix_ms = $2
                  WHERE worker_id = $1 AND state IN ('clean', 'leased', 'draining')",
-                &[&worker_id.as_str(), &to_i64(now_unix_ms)?],
+                &[&worker_id.as_str(), &now],
             )
             .await?;
         if updated != 1 {
             return Err(PlacementStoreError::WorkerUnavailable);
         }
+        transaction
+            .execute(
+                "UPDATE sandboxd_placement.requests SET lease_expires_unix_ms = $2
+                 WHERE worker_id = $1 AND state = 'serving'
+                 AND lease_expires_unix_ms > $3",
+                &[&worker_id.as_str(), &expires, &now],
+            )
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -979,7 +1011,7 @@ impl PostgresPlacementStore {
         let rows = transaction
             .query(
                 "SELECT * FROM sandboxd_placement.requests
-                 WHERE worker_id = $1 AND state = 'assigned' FOR UPDATE",
+                 WHERE worker_id = $1 AND state IN ('assigned', 'serving') FOR UPDATE",
                 &[&worker_id.as_str()],
             )
             .await?;
@@ -1000,7 +1032,9 @@ impl PostgresPlacementStore {
                         "UPDATE sandboxd_placement.requests SET state = 'queued',
                          worker_id = NULL, assignment_epoch = NULL,
                          lease_expires_unix_ms = NULL, assigned_unix_ms = NULL,
-                         first_output_unix_ms = NULL WHERE request_id = $1",
+                         first_output_unix_ms = NULL, result_digest = NULL,
+                         terminal_response = NULL, terminal_unix_ms = NULL
+                         WHERE request_id = $1",
                         &[&record.request_id],
                     )
                     .await?;
@@ -1085,9 +1119,9 @@ impl PostgresPlacementStore {
             .query_one(
                 "SELECT
                     count(*) FILTER (WHERE state = 'queued') AS queued,
-                    count(*) FILTER (WHERE state = 'assigned') AS assigned
+                    count(*) FILTER (WHERE state IN ('assigned', 'serving')) AS assigned
                  FROM sandboxd_placement.requests
-                 WHERE pool_name = $1 AND state IN ('queued', 'assigned')",
+                 WHERE pool_name = $1 AND state IN ('queued', 'assigned', 'serving')",
                 &[&pool_name],
             )
             .await?;
@@ -1297,9 +1331,9 @@ impl PostgresPlacementStore {
                  demand AS (
                     SELECT pool_name,
                         count(*) FILTER (WHERE state = 'queued') AS queued,
-                        count(*) FILTER (WHERE state = 'assigned') AS active
+                        count(*) FILTER (WHERE state IN ('assigned', 'serving')) AS active
                     FROM sandboxd_placement.requests
-                    WHERE pool_name = ANY($1) AND state IN ('queued', 'assigned')
+                    WHERE pool_name = ANY($1) AND state IN ('queued', 'assigned', 'serving')
                     GROUP BY pool_name
                  )
                  SELECT selected.pool_name,
@@ -1444,7 +1478,8 @@ impl PostgresPlacementStore {
         expire_queued(&transaction, now).await?;
         let active: i64 = transaction
             .query_one(
-                "SELECT count(*) FROM sandboxd_placement.requests WHERE state = 'assigned'",
+                "SELECT count(*) FROM sandboxd_placement.requests
+                 WHERE state IN ('assigned', 'serving')",
                 &[],
             )
             .await?
@@ -1463,7 +1498,8 @@ impl PostgresPlacementStore {
                  AND r.compatibility_cohort = $5
                  AND (
                     SELECT count(*) FROM sandboxd_placement.requests active
-                    WHERE active.tenant_id = r.tenant_id AND active.state = 'assigned'
+                    WHERE active.tenant_id = r.tenant_id
+                    AND active.state IN ('assigned', 'serving')
                  ) < p.concurrency_limit
                  ORDER BY r.fair_finish, r.created_unix_ms, r.request_id
                  LIMIT 1 FOR UPDATE OF r SKIP LOCKED",
@@ -1627,7 +1663,10 @@ impl PostgresPlacementStore {
             .await?
             .ok_or(PlacementStoreError::StaleAssignment)?;
         let record = record_from_row(&row)?;
-        if record.state == PlacementState::Completed {
+        if matches!(
+            record.state,
+            PlacementState::Serving | PlacementState::Completed
+        ) {
             return if record.result_digest.as_deref() == Some(result_digest) {
                 Ok(CompletionOutcome::AlreadyPublished)
             } else {
@@ -1643,33 +1682,63 @@ impl PostgresPlacementStore {
         {
             return Err(PlacementStoreError::StaleAssignment);
         }
+        let serving = response.as_ref().is_some_and(|(_, response)| response.ok)
+            && matches!(
+                assignment.operation,
+                Operation::Create { .. } | Operation::Restore { .. }
+            );
         let first_output = response.as_ref().map(|_| now);
+        let next_state = if serving { "serving" } else { "completed" };
+        let terminal = (!serving).then_some(now);
+        let serving_expiry = serving
+            .then(|| {
+                now.checked_add(duration_millis(self.config.lease_lifetime)?)
+                    .ok_or_else(|| {
+                        PlacementStoreError::Invalid("lease expiration overflow".to_owned())
+                    })
+            })
+            .transpose()?;
         transaction
             .execute(
-                "UPDATE sandboxd_placement.requests SET state = 'completed',
-                 result_digest = $2, terminal_response = $3, terminal_unix_ms = $4,
-                 first_output_unix_ms = $5
+                "UPDATE sandboxd_placement.requests SET state = $4,
+                 result_digest = $2, terminal_response = $3, terminal_unix_ms = $5,
+                 first_output_unix_ms = $6,
+                 lease_expires_unix_ms = COALESCE($7, lease_expires_unix_ms)
                  WHERE request_id = $1",
                 &[
                     &assignment.request_id,
                     &result_digest,
                     &response.as_ref().map(|(encoded, _)| encoded),
-                    &now,
+                    &next_state,
+                    &terminal,
                     &first_output,
+                    &serving_expiry,
                 ],
             )
             .await?;
-        transaction
-            .execute(
-                "UPDATE sandboxd_placement.workers SET state = 'consumed' WHERE worker_id = $1",
-                &[&assignment.worker_id.as_str()],
-            )
-            .await?;
+        if !serving {
+            transaction
+                .execute(
+                    "UPDATE sandboxd_placement.workers SET state = 'consumed' WHERE worker_id = $1",
+                    &[&assignment.worker_id.as_str()],
+                )
+                .await?;
+        }
         let mut completed = record;
-        completed.state = PlacementState::Completed;
+        completed.state = if serving {
+            PlacementState::Serving
+        } else {
+            PlacementState::Completed
+        };
         completed.result_digest = Some(result_digest.to_owned());
         completed.response = response.map(|(_, response)| response);
-        append_audit(&transaction, &completed, now, "completed").await?;
+        append_audit(
+            &transaction,
+            &completed,
+            now,
+            if serving { "serving" } else { "completed" },
+        )
+        .await?;
         transaction.commit().await?;
         Ok(CompletionOutcome::Published)
     }
@@ -1739,7 +1808,7 @@ impl PostgresPlacementStore {
         let rows = transaction
             .query(
                 "SELECT * FROM sandboxd_placement.requests
-                 WHERE state = 'assigned' AND lease_expires_unix_ms <= $1
+                 WHERE state IN ('assigned', 'serving') AND lease_expires_unix_ms <= $1
                  FOR UPDATE",
                 &[&now],
             )
@@ -1774,7 +1843,9 @@ impl PostgresPlacementStore {
                     .execute(
                         "UPDATE sandboxd_placement.requests SET state = 'queued',
                          worker_id = NULL, assignment_epoch = NULL, lease_expires_unix_ms = NULL,
-                         assigned_unix_ms = NULL, first_output_unix_ms = NULL
+                         assigned_unix_ms = NULL, first_output_unix_ms = NULL,
+                         result_digest = NULL, terminal_response = NULL,
+                         terminal_unix_ms = NULL
                          WHERE request_id = $1",
                         &[&previous.request_id],
                     )
@@ -1829,7 +1900,7 @@ impl PostgresPlacementStore {
                  FROM sandboxd_placement.requests r
                  JOIN sandboxd_placement.workers w ON w.worker_id = r.worker_id
                  WHERE r.tenant_id = $1 AND r.subject_id = $2
-                 AND r.idempotency_key = $3 AND r.state = 'assigned'
+                 AND r.idempotency_key = $3 AND r.state IN ('assigned', 'serving')
                  AND r.lease_expires_unix_ms > $4 AND w.state = 'leased'
                  AND w.broker_address IS NOT NULL AND w.resource_ceilings IS NOT NULL",
                 &[
@@ -1974,6 +2045,7 @@ fn record_from_row(row: &Row) -> Result<PlacementRecord, PlacementStoreError> {
         state: match row.get::<_, &str>("state") {
             "queued" => PlacementState::Queued,
             "assigned" => PlacementState::Assigned,
+            "serving" => PlacementState::Serving,
             "completed" => PlacementState::Completed,
             "cancelled" => PlacementState::Cancelled,
             "expired" => PlacementState::Expired,

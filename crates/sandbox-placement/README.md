@@ -73,11 +73,13 @@ bearer from sandboxd, strips tenant/internal authorization, and relays through
 the authenticated reverse tunnel. The route disappears when the lease is
 expired, fenced, quarantined, or reassigned. Headers are capped at 16 KiB,
 bodies in each adapter hop at 1 MiB, and the normal concurrency/deadline bounds
-remain in force. Completed placements are not yet durable service leases.
+remain in force. Successful create/restore placements remain in `serving`
+until cancellation or fencing.
 
 `GET /v1/placements/{idempotency_key}/events` returns authenticated
 `text/event-stream` placement snapshots. It emits only when the durable record
-changes and closes after completed, cancelled, or expired. Each replica admits
+changes, remains open for `serving`, and closes after completed, cancelled, or
+expired. Each replica admits
 at most 64 concurrent streams, retains one bounded last snapshot plus the
 bounded outgoing event per stream, and polls PostgreSQL at a fixed interval. A
 client may reconnect to any replica because the stream owns no correctness
@@ -185,6 +187,10 @@ network failure leaves the assignment leased; lease reconciliation quarantines
 that worker before a higher epoch is requeued. The same periodic transaction
 terminalizes queued requests whose client deadlines elapsed, even when no
 worker is available, so they cannot retain queue quota indefinitely.
-PostgreSQL stores the complete
-typed operation and terminal response, while audit rows contain only identity,
-epoch, worker, event, and result digest.
+PostgreSQL stores the complete typed operation and bounded response, while
+audit rows contain only identity, epoch, worker, event, and result digest.
+Successful `create` and `restore` responses enter `serving`: the worker stays
+leased, authenticated heartbeats extend only an unexpired serving lease, and
+ingress remains routable. Cancel, quarantine, or lease expiry fences the worker
+and removes the route. Batch operations and failed service starts enter
+terminal `completed`.
