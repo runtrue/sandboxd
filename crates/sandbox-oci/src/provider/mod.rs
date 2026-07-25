@@ -19,6 +19,21 @@ pub use writable::{
 };
 
 use crate::{LockedImage, SandboxError};
+use std::path::Path;
+
+/// Measure a prepared root with the same bounded, special-file and xattr
+/// policy used by the containerd provider.
+pub fn measure_expanded_rootfs(
+    root: &Path,
+    limits: &ImageLimits,
+) -> Result<FixedRootfsMeasurement, SandboxError> {
+    let measured = validation::measure_rootfs(root, limits)?;
+    Ok(FixedRootfsMeasurement {
+        digest: measured.digest,
+        entries: measured.entries,
+        bytes: measured.bytes,
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreparationStatus {

@@ -1,4 +1,6 @@
 use crate::cli::{Cli, Command};
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use ed25519_dalek::SigningKey;
 use runtrue_sandbox_core::{
     sign_image_attestation, verify_image_attestation, ImagePreparationAttestation,
     SignedImageAttestation,
@@ -15,7 +17,7 @@ use runtrue_sandbox_oci::{
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read as _,
+    io::{Read as _, Write as _},
     os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     path::{Path, PathBuf},
     sync::Arc,
@@ -33,6 +35,10 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
         platform: cli.image_platform,
     };
     match cli.command {
+        Command::GenerateImageAttestationKey {
+            private_key,
+            public_key,
+        } => generate_attestation_key(private_key, public_key),
         Command::Lock {
             compose,
             output,
@@ -47,6 +53,39 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
         } => {
             let provider = provider(&provider_options, image_store)?;
             prepare_image(provider.as_ref(), reference)
+        }
+        Command::PublishAttestedRoot {
+            reference,
+            image_store,
+            cache,
+            private_key,
+            key_id,
+            preparation_policy,
+            toolchain_digest,
+            sbom,
+            provenance,
+            vulnerability_policy,
+            registry_credential,
+        } => {
+            let provider = provider(&provider_options, image_store)?;
+            let private_key = read_exact_key(&private_key, true)?;
+            let registry_credential = registry_credential
+                .as_deref()
+                .map(crate::publication::read_registry_credential)
+                .transpose()?;
+            crate::publication::publish(
+                provider.as_ref(),
+                &reference,
+                registry_credential.as_ref(),
+                &cache,
+                &private_key,
+                &key_id,
+                &preparation_policy,
+                &toolchain_digest,
+                &sbom,
+                &provenance,
+                &vulnerability_policy,
+            )
         }
         Command::PrepareDockerImage {
             docker,
@@ -89,6 +128,57 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
             )
         }
     }
+}
+
+fn generate_attestation_key(
+    private_key_path: PathBuf,
+    public_key_path: PathBuf,
+) -> Result<(), SandboxError> {
+    let mut seed = [0_u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut seed))
+        .map_err(|source| io_error("/dev/urandom", source))?;
+    let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    let mut private = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&private_key_path)
+        .map_err(|source| io_error(&private_key_path, source))?;
+    let public = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&public_key_path);
+    let mut public = match public {
+        Ok(public) => public,
+        Err(source) => {
+            drop(private);
+            let _ = fs::remove_file(&private_key_path);
+            return Err(io_error(&public_key_path, source));
+        }
+    };
+    let write_result = private
+        .write_all(&seed)
+        .and_then(|()| private.sync_all())
+        .and_then(|()| public.write_all(&public_key))
+        .and_then(|()| public.sync_all());
+    if let Err(source) = write_result {
+        drop(private);
+        drop(public);
+        let _ = fs::remove_file(&private_key_path);
+        let _ = fs::remove_file(&public_key_path);
+        return Err(io_error("image attestation keypair", source));
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "private_key": private_key_path,
+            "public_key": public_key_path,
+            "public_key_base64": STANDARD_NO_PAD.encode(public_key),
+        })
+    );
+    Ok(())
 }
 
 fn sign_attestation(
@@ -136,12 +226,18 @@ fn decode_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Sandbox
 }
 
 fn read_exact_key(path: &Path, private: bool) -> Result<[u8; 32], SandboxError> {
+    // Kubernetes Secret and ConfigMap volumes expose keys through the atomic
+    // writer's read-only symlink layout. Resolve that indirection once, then
+    // retain O_NOFOLLOW on the file we actually open.
+    let resolved = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
     let mut options = fs::OpenOptions::new();
     options.read(true).custom_flags(libc::O_NOFOLLOW);
     let file = options
-        .open(path)
-        .map_err(|source| io_error(path, source))?;
-    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+        .open(&resolved)
+        .map_err(|source| io_error(&resolved, source))?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| io_error(&resolved, source))?;
     if !metadata.file_type().is_file()
         || (private
             && (metadata.mode() & 0o077 != 0 || metadata.uid() != nix::unistd::geteuid().as_raw()))
@@ -150,9 +246,9 @@ fn read_exact_key(path: &Path, private: bool) -> Result<[u8; 32], SandboxError> 
             "{} key must be a regular {} file",
             if private { "private" } else { "public" },
             if private {
-                "owner-only non-symlink owned by the invoking identity"
+                "owner-only file owned by the invoking identity"
             } else {
-                "non-symlink"
+                "file"
             }
         )));
     }

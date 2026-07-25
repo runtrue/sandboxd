@@ -1,0 +1,8 @@
+version = 3
+
+# The preparer only needs content, metadata, transfer, and the native
+# snapshotter. It is not a CRI runtime and must not expose workload APIs.
+disabled_plugins = [
+  "io.containerd.grpc.v1.cri",
+  "io.containerd.internal.v1.opt",
+]

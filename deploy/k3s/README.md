@@ -11,6 +11,7 @@ matrix is in [`SECURITY-PROFILES.md`](SECURITY-PROFILES.md).
 
 | Profile | Manifest | Image build | Intended use |
 | --- | --- | --- | --- |
+| Isolated image preparation | `image-preparer.yaml` | `Dockerfile.preparer` | Resolve, verify, unpack, measure, attach evidence, sign, and atomically publish approved OCI roots without a host runtime socket. Runs separately from reduced workers. |
 | Fixed runtime | `sandboxd-fixed-runtime.yaml` | `Dockerfile.fixed-runtime` | Recommended minimum-authority profile. One attested, pre-expanded rootfs; internal loopback only; pod-level resource limits. |
 | Userspace network runtime | `sandboxd-userspace-runtime.yaml` | `Dockerfile.fixed-runtime` | Fixed runtime plus policy-approved HTTPS CONNECT and declared reverse HTTP ingress over guest-visible Unix sockets. No `NET_ADMIN`, `NET_RAW`, veth, bridge, nftables, forwarding sysctl, host path, host namespace, Kubernetes Service/Ingress, or `hostPort`. |
 | Brokered fixed runtime | `sandboxd-fixed-runtime-brokered.yaml` | `Dockerfile.fixed-runtime` + `Dockerfile.broker` | Fixed worker plus a capability-free native broker sidecar, signed workload socket, authenticated registration, and default-deny control-plane routing. |
@@ -94,6 +95,15 @@ that supports FQDN policy. Their control socket exists only inside the pod.
   `runtrue.io/sandbox-host-integrated=true` label.
 - An admission policy that pins worker images by digest in release
   environments.
+- A bounded RWO CSI StorageClass for the preparation cache. The local
+  conformance harness creates one static local PV only because the local-only
+  k3s profile deliberately disables its host-path provisioner.
+- An operator signing identity delivered only to the isolated preparer. Use an
+  external signing service or a short-lived projected Secret in production;
+  never mount it into a worker.
+- FQDN-aware egress enforcement for approved OCI registries. Portable
+  NetworkPolicy can restrict the preparer to DNS and TCP/443 but cannot express
+  registry hostnames.
 - Node-installed, versioned AppArmor and seccomp profiles before untrusted
   production use. The supplied manifests remain `Unconfined` because the stock
   profiles blocked the pinned gVisor release; this is a tracked release
@@ -164,6 +174,26 @@ throughput; checks runsc uses `network=none` and `host-uds=open`; and compares
 host links, network namespaces, nftables, and forwarding sysctls before and
 after the nested run.
 
+[`tools/test-k3s-image-preparation.sh`](../../tools/test-k3s-image-preparation.sh)
+drives the isolated preparation and reduced-runtime boundary in the same real
+cluster. It resolves a mutable Python tag to one immutable manifest, publishes
+the expanded root through a private containerd with no host socket, repeats the
+request and requires the same cache object, verifies the signed descriptor,
+platform, root, evidence, and worker-artifact binding, and confirms the private
+key is absent from retained content. It then starts a worker with no
+containerd, registry Secret, pull egress, host path, host namespace, or
+service-account token; requires revocation and artifact mismatch to fail before
+readiness; and creates two nested containers under gVisor. CI retains cold
+preparation time, root size, cache-hit status, and signed-root activation time.
+
+The preparer needs only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, and `SYS_ADMIN`
+inside its Kubernetes user namespace. `allowPrivilegeEscalation` is false and
+the seccomp profile is `RuntimeDefault`. The stock AppArmor default denied the
+private native-snapshotter bind mount and its supervisor signal, so the
+checked-in Job explicitly uses AppArmor `Unconfined` until a node-installed
+localhost profile grants exactly those operations. The reduced worker does not
+inherit any preparation capability.
+
 Production application images for this profile include the released
 `runtrue-sandbox-net-agent` in their measured OCI root and declare one ordinary
 guest service that runs it. The agent requires no capability: it presents a
@@ -203,6 +233,94 @@ measurements on each run. The fixed tier exposes no writable disk-backed guest
 path, so disk amplification is rejected by construction and bounded `/tmp`
 exhaustion is the relevant guest-write test. Writable disk conformance belongs
 to the directory/PVC storage tier.
+
+## Build and deploy isolated image preparation
+
+Build and publish `Dockerfile.preparer` by immutable digest. It contains the
+release `runtrue-sandboxctl`, checksum-verified containerd 2.2.3 binaries, a
+private containerd configuration with workload/CRI plugins disabled, and the
+bounded supervisor. It never connects to the node container runtime.
+
+Before applying `image-preparer.yaml`, create:
+
+- `sandbox-image-preparer-signing`, with the 32-byte Ed25519 seed at
+  `private-key`;
+- `sandbox-image-preparer-evidence`, with bounded `sbom.json` and
+  `provenance.json` keys; and
+- optionally `sandbox-image-preparer-registry`, with `credential.json`.
+
+Generate an offline keypair when an external signer is not yet integrated:
+
+```bash
+runtrue-sandboxctl generate-image-attestation-key \
+  --private-key ./preparer.private \
+  --public-key ./preparer.public
+
+kubectl create secret generic sandbox-image-preparer-signing \
+  --namespace sandboxd-system \
+  --from-file=private-key=./preparer.private
+```
+
+The optional registry credential is accepted only by the preparer:
+
+```json
+{
+  "kind": "basic",
+  "tenant": "preparation-service",
+  "registry": "registry.example",
+  "username": "short-lived-identity",
+  "password": "short-lived-secret"
+}
+```
+
+Bearer form replaces `username`/`password` with `token` and sets
+`"kind": "bearer"`. The credential is registry-scoped by the provider, is read
+from a bounded projected file, and is not copied to the cache. Do not put a
+credential in an environment variable, topology lock, Job argument, or
+ConfigMap.
+
+Set these reviewed values in the Job template or render them through the
+release deployment pipeline:
+
+- `RUNTRUE_PREPARATION_REFERENCE`: the approved OCI reference; a mutable tag is
+  resolved once and only the resulting digest-pinned identity is attested;
+- `RUNTRUE_PREPARATION_KEY_ID`: the key identifier present in worker trust
+  policy;
+- `RUNTRUE_PREPARATION_POLICY`: normalization/validation policy version;
+- `RUNTRUE_PREPARATION_TOOLCHAIN_DIGEST`: digest of the reviewed preparer
+  toolchain; and
+- `RUNTRUE_VULNERABILITY_POLICY`: the vulnerability gate that produced the
+  mounted evidence.
+
+Each successful cache directory is named by
+`worker_artifact_digest` and contains only `rootfs/`, `attestation.json`,
+`sbom.json`, and `provenance.json`. A same-filesystem temporary directory is
+fsynced and renamed once while an advisory lock is held. The lock is released
+by the kernel on process or Pod death, concurrent publishers re-check the
+winner, and a failed copy has no trusted final directory. `latest-result.json`
+is an atomic operational pointer, not a trust root.
+
+Workers mount one digest directory read-only and supply all of:
+
+```text
+--fixed-rootfs /artifact/rootfs
+--fixed-topology-lock /config/topology.json
+--fixed-rootfs-digest <expanded-root digest>
+--fixed-rootfs-entries <expanded-root entries>
+--fixed-rootfs-bytes <expanded-root bytes>
+--image-attestation /artifact/attestation.json
+--image-attestation-trust-policy /trust/policy.json
+--worker-artifact-digest <selected artifact digest>
+```
+
+The trust policy must contain the signer public key, allowlisted preparation,
+toolchain, and vulnerability policies, a maximum age, and both root and worker
+artifact revocation sets. Any mismatch or revocation exits before the worker
+becomes Ready. A deployment controller must select only a prepared artifact;
+unseen `cold-build` requests remain queued until publication completes, while
+`preapproved` requests bind directly to an existing digest directory. Cache
+quota/GC and the revocation-to-pool inventory require a preparation-cache
+controller; do not enable unbounded tenant-triggered preparation without it.
 
 ## Build and deploy the fixed-runtime profile
 

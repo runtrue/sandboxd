@@ -1,0 +1,55 @@
+name: attested-runtime-conformance
+
+networks:
+  application:
+    internal: true
+    driver: bridge
+
+services:
+  server:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import http.server, json
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"from": "attested-server", "ok": True}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *_):
+                pass
+        http.server.ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    working_dir: /tmp
+    networks: [application]
+    healthcheck:
+      test: [CMD, /usr/local/bin/python3, -c, 'import socket; socket.create_connection(("127.0.0.1", 8080), timeout=0.5).close()']
+      interval_ms: 50
+      timeout_ms: 500
+      retries: 80
+    read_only: true
+
+  client:
+    image: mirror.gcr.io/library/python:3.13-slim
+    entrypoint: [/usr/local/bin/python3, -c]
+    command:
+      - |
+        import json, os, urllib.request
+        with urllib.request.urlopen("http://server:8080/ready", timeout=2) as response:
+            payload = json.load(response)
+        assert payload == {"from": "attested-server", "ok": True}
+        print(json.dumps({
+            "marker": "attested-runtime-passed",
+            "kernel": os.uname().release,
+            "payload": payload,
+            "uid": os.getuid()
+        }, sort_keys=True))
+    working_dir: /tmp
+    depends_on:
+      server:
+        condition: service_healthy
+    networks: [application]
+    read_only: true

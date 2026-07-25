@@ -1904,7 +1904,10 @@ dependencies = [
 name = "runtrue-sandboxctl"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "base64 0.23.0",
  "clap",
+ "ed25519-dalek",
+ "hex",
  "libc",
  "nix",
  "runtrue-sandbox-core",
@@ -1913,6 +1916,8 @@ dependencies = [
  "runtrue-sandbox-volume",
  "serde",
  "serde_json",
+ "sha2 0.10.8",
+ "tempfile",
 ]
 
 [[package]]

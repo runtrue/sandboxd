@@ -1,0 +1,32 @@
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
+
+ARG CONTAINERD_VERSION=2.2.3
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    archive="containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"; \
+    curl -fsSL \
+      "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/${archive}" \
+      -o "/tmp/${archive}"; \
+    curl -fsSL \
+      "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/${archive}.sha256sum" \
+      -o "/tmp/${archive}.sha256sum"; \
+    (cd /tmp && sha256sum -c "${archive}.sha256sum"); \
+    tar -xzf "/tmp/${archive}" -C /tmp bin/containerd bin/ctr; \
+    install -m 0755 /tmp/bin/containerd /usr/local/bin/containerd; \
+    install -m 0755 /tmp/bin/ctr /usr/bin/ctr; \
+    rm -rf "/tmp/${archive}" "/tmp/${archive}.sha256sum" /tmp/bin
+
+ARG SANDBOXD_BUILD_ID=local
+RUN test -n "$SANDBOXD_BUILD_ID"
+COPY target/release/runtrue-sandboxctl /usr/local/bin/runtrue-sandboxctl
+COPY deploy/k3s/containerd-preparer.toml /etc/containerd/preparer.toml
+COPY deploy/k3s/run-image-preparer.sh /usr/local/bin/run-image-preparer
+RUN chmod 0755 /usr/local/bin/runtrue-sandboxctl /usr/local/bin/run-image-preparer
+
+ENTRYPOINT ["/usr/local/bin/run-image-preparer"]

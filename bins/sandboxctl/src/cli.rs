@@ -27,6 +27,13 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Generate an Ed25519 image-attestation keypair without exposing the private seed.
+    GenerateImageAttestationKey {
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        public_key: PathBuf,
+    },
     /// Resolve OCI descriptors and compile restricted Compose into an immutable lock.
     Lock {
         #[arg(long)]
@@ -42,6 +49,31 @@ pub(crate) enum Command {
         reference: String,
         #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]
         image_store: PathBuf,
+    },
+    /// Prepare, measure, sign, and atomically publish one immutable root artifact.
+    PublishAttestedRoot {
+        #[arg(long)]
+        reference: String,
+        #[arg(long, default_value = "/var/lib/runtrue-sandboxd/images")]
+        image_store: PathBuf,
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        preparation_policy: String,
+        #[arg(long)]
+        toolchain_digest: String,
+        #[arg(long)]
+        sbom: PathBuf,
+        #[arg(long)]
+        provenance: PathBuf,
+        #[arg(long)]
+        vulnerability_policy: String,
+        #[arg(long)]
+        registry_credential: Option<PathBuf>,
     },
     /// Diagnostic-only Docker export; not accepted by the production runtime.
     PrepareDockerImage {

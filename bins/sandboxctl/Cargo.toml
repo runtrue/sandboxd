@@ -7,11 +7,16 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 libc.workspace = true
 nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tempfile.workspace = true
 runtrue-sandbox-gvisor.workspace = true
 runtrue-sandbox-oci.workspace = true
 runtrue-sandbox-core.workspace = true
