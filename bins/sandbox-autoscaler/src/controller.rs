@@ -203,7 +203,7 @@ impl Controller {
     }
 
     async fn refresh_workers(&self, pool: &WorkerPool, pods: &[Pod]) -> Result<(), String> {
-        for pod in pods.iter().filter(|pod| pod_ready(pod)) {
+        for pod in pods.iter().filter(|pod| workload_running(pod)) {
             let worker_id = pod_worker_id(pod)?;
             match self
                 .store
@@ -215,6 +215,9 @@ impl Controller {
                 Err(error) => {
                     return Err(format!("heartbeat worker `{worker_id}`: {error}"));
                 }
+            }
+            if !pod_ready(pod) {
+                continue;
             }
             if !self
                 .store
@@ -372,6 +375,23 @@ fn pod_ready(pod: &Pod) -> bool {
             .any(|condition| condition.type_ == "Ready" && condition.status == "True")
 }
 
+fn workload_running(pod: &Pod) -> bool {
+    pod.metadata.deletion_timestamp.is_none()
+        && pod
+            .status
+            .as_ref()
+            .and_then(|status| status.container_statuses.as_deref())
+            .unwrap_or_default()
+            .iter()
+            .any(|container| {
+                container.name == "sandboxd"
+                    && container
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| state.running.is_some())
+            })
+}
+
 fn pod_worker_id(pod: &Pod) -> Result<WorkerId, String> {
     let uid = pod
         .metadata
@@ -416,5 +436,30 @@ mod tests {
         );
         assert!(worker_id_from_uid("../pod").is_err());
         assert!(worker_id_from_uid(&"a".repeat(49)).is_err());
+    }
+
+    #[test]
+    fn running_busy_workload_remains_heartbeat_eligible() {
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": {"name": "worker-0", "uid": "worker-pod-a"},
+            "status": {
+                "conditions": [{"type": "Ready", "status": "False"}],
+                "containerStatuses": [{
+                    "name": "sandboxd",
+                    "image": "sandboxd",
+                    "imageID": "sandboxd",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": {"running": {"startedAt": "2026-07-25T00:00:00Z"}}
+                }]
+            }
+        }))
+        .expect("pod");
+        assert!(!pod_ready(&pod));
+        assert!(workload_running(&pod));
+
+        let mut stopped = pod;
+        stopped.status.as_mut().expect("status").container_statuses = None;
+        assert!(!workload_running(&stopped));
     }
 }

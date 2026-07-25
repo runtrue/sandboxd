@@ -283,11 +283,13 @@ async fn exercise(url: &str) {
         sandbox: service.work.sandbox_id.to_string(),
         timeout_ms: 1_000,
     };
+    service.topology = "service-topology".to_owned();
     replica_b
         .enqueue(&service, 400)
         .await
         .expect("enqueue service");
-    let service_worker = worker("worker-service");
+    let mut service_worker = worker("worker-service");
+    service_worker.topology = service.topology.clone();
     replica_b
         .register_worker(&service_worker, 400)
         .await
