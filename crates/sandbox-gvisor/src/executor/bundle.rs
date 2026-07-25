@@ -14,6 +14,7 @@ pub(super) fn write_bundle(
     bundle: &Path,
     rootfs: &Path,
     rootfs_read_only: bool,
+    rootfs_upper: Option<(&Path, u64)>,
     service_name: &str,
     service: &LockedService,
     guest_profile: &GuestProfile,
@@ -66,7 +67,7 @@ pub(super) fn write_bundle(
         .into_iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<_>>();
-    let annotations = match role {
+    let mut annotations = match role {
         ContainerRole::Sandbox => BTreeMap::from([
             (
                 "io.kubernetes.cri.container-type".to_owned(),
@@ -92,6 +93,23 @@ pub(super) fn write_bundle(
             ),
         ]),
     };
+    if let Some((rootfs_upper, maximum_bytes)) = rootfs_upper {
+        let metadata =
+            fs::symlink_metadata(rootfs_upper).map_err(|source| io_error(rootfs_upper, source))?;
+        if !rootfs_upper.is_absolute()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > maximum_bytes
+        {
+            return Err(SandboxError::Runtime(
+                "writable rootfs restore archive is invalid".to_owned(),
+            ));
+        }
+        annotations.insert(
+            format!("dev.gvisor.tar.rootfs.upper.{service_name}"),
+            rootfs_upper.display().to_string(),
+        );
+    }
     let mut mounts = vec![
         json!({"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]}),
         json!({"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "strictatime", "mode=755", format!("size={tmpfs_bytes}")]}),
@@ -236,6 +254,7 @@ mod tests {
             &bundle,
             &rootfs,
             true,
+            None,
             "service",
             &service(),
             &profile,
@@ -257,6 +276,71 @@ mod tests {
 
     fn generated(profile_name: &str) -> serde_json::Value {
         generated_with_userspace(profile_name, false)
+    }
+
+    #[test]
+    fn writable_restore_is_bound_to_one_container_and_bounded_archive() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let bundle = directory.path().join("bundle");
+        let rootfs = directory.path().join("rootfs");
+        let hosts = directory.path().join("hosts");
+        let resolv = directory.path().join("resolv.conf");
+        let upper = directory.path().join("rootfs-upper.tar");
+        fs::create_dir(&rootfs).expect("rootfs");
+        fs::write(&hosts, "127.0.0.1 localhost\n").expect("hosts");
+        fs::write(&resolv, "").expect("resolv");
+        fs::write(&upper, [0_u8; 1024]).expect("rootfs upper");
+        let profile = GuestProfile::reviewed_named(STRICT_GUEST_PROFILE).expect("profile");
+
+        write_bundle(
+            &bundle,
+            &rootfs,
+            false,
+            Some((&upper, 2048)),
+            "service",
+            &service(),
+            &profile,
+            "test-netns",
+            &hosts,
+            &resolv,
+            None,
+            None,
+            None,
+            1024,
+            96,
+            &[],
+            ContainerRole::Sandbox,
+        )
+        .expect("write bundle");
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(bundle.join("config.json")).expect("bundle"))
+                .expect("config");
+        assert_eq!(
+            config["annotations"]["dev.gvisor.tar.rootfs.upper.service"],
+            json!(upper)
+        );
+
+        let oversized = directory.path().join("oversized-bundle");
+        assert!(write_bundle(
+            &oversized,
+            &rootfs,
+            false,
+            Some((&upper, 512)),
+            "service",
+            &service(),
+            &profile,
+            "test-netns",
+            &hosts,
+            &resolv,
+            None,
+            None,
+            None,
+            1024,
+            96,
+            &[],
+            ContainerRole::Sandbox,
+        )
+        .is_err());
     }
 
     #[test]

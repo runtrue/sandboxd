@@ -206,16 +206,21 @@ impl SnapshotStaging {
         ))
     }
 
-    pub(super) fn stage_writable_rootfs(
+    pub(super) fn stage_writable_rootfs<F>(
         &self,
         service: &str,
         provider: &dyn ImageProvider,
         rootfs: &WritableRootfs,
-    ) -> Result<(StagedSnapshotObject, WritableRootfsExport), SandboxError> {
+        export: F,
+    ) -> Result<(StagedSnapshotObject, WritableRootfsExport), SandboxError>
+    where
+        F: FnOnce(&Path) -> Result<(), SandboxError>,
+    {
         validate_name(service)?;
         let name = format!("rootfs-{service}.tar");
         let path = self.temporary.path().join(&name);
-        let exported = provider.export_writable_rootfs(rootfs, &path)?;
+        export(&path)?;
+        let exported = provider.validate_writable_rootfs_export(rootfs, &path)?;
         Ok((
             StagedSnapshotObject {
                 role: ArtifactRole::WritableFilesystem,

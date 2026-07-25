@@ -157,6 +157,7 @@ struct ServiceRootfs {
     path: PathBuf,
     read_only: bool,
     writable: Option<WritableRootfs>,
+    restore_diff: Option<PathBuf>,
 }
 
 struct ExecutionOutput {
@@ -415,10 +416,23 @@ fn create_resources(
             return Err(error);
         }
     };
+    let has_writable_rootfs = lock
+        .services
+        .values()
+        .any(|service| service.root_filesystem == RootFilesystemMode::Writable);
+    let overlay = has_writable_rootfs.then(|| {
+        (
+            state.join("rootfs-overlay"),
+            lock.policy.writable_root_bytes_per_service,
+        )
+    });
     let runsc = match Runsc::new(
         runsc_program,
         &state.join("runsc"),
         configuration.network_mode,
+        overlay
+            .as_ref()
+            .map(|(directory, maximum_bytes)| (directory.as_path(), *maximum_bytes)),
     ) {
         Ok(runsc) => runsc,
         Err(error) => {
@@ -568,6 +582,15 @@ fn start_services(
             &bundle_path,
             &resources.service_rootfs[service_name].path,
             resources.service_rootfs[service_name].read_only,
+            resources.service_rootfs[service_name]
+                .restore_diff
+                .as_deref()
+                .zip(
+                    resources.service_rootfs[service_name]
+                        .writable
+                        .as_ref()
+                        .map(|rootfs| rootfs.quota_bytes().saturating_mul(2)),
+                ),
             service_name,
             service,
             &guest_profile,
@@ -699,6 +722,7 @@ impl Resources {
                     path: immutable.rootfs().to_owned(),
                     read_only: true,
                     writable: None,
+                    restore_diff: None,
                 },
                 RootFilesystemMode::Writable => {
                     let identity = WritableRootfsIdentity::new(project, service_name)?;
@@ -722,6 +746,9 @@ impl Resources {
                         path: writable.rootfs().to_owned(),
                         read_only: false,
                         writable: Some(writable),
+                        restore_diff: writable_diffs
+                            .and_then(|diffs| diffs.get(service_name))
+                            .cloned(),
                     }
                 }
             };

@@ -40,8 +40,9 @@ access for OCI image preparation. The worker image contains:
   and
 - iproute2, nftables, util-linux, and e2fsprogs.
 
-Building from source uses Rust 1.97.1. Writable roots and local named volumes
-also require assigned loop devices.
+Building from source uses Rust 1.97.1. Directory-backed writable roots require
+no block device or host mount. The legacy local named-volume provider still
+requires explicitly assigned loop devices.
 
 The worker process and its private containerd run in the same container and
 mount namespace. They do not use the Kubernetes node's containerd socket,

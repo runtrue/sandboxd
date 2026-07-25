@@ -15,7 +15,8 @@ pub use credentials::RegistryCredential;
 pub use handle::{ImmutableRootfs, PreparedImageHandle};
 pub use writable::{
     WritableRootfs, WritableRootfsConfig, WritableRootfsExport, WritableRootfsIdentity,
-    LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID, MINIMUM_WRITABLE_ROOT_BYTES,
+    GVISOR_WRITABLE_ROOTFS_PROVIDER_ID, LOOPBACK_WRITABLE_ROOTFS_PROVIDER_ID,
+    MINIMUM_WRITABLE_ROOT_BYTES,
 };
 
 use crate::{LockedImage, SandboxError};
@@ -98,6 +99,17 @@ pub trait ImageProvider: Send + Sync {
         let _ = (rootfs, destination);
         Err(SandboxError::Unsupported(
             "image provider does not support writable-root export".to_owned(),
+        ))
+    }
+
+    fn validate_writable_rootfs_export(
+        &self,
+        rootfs: &WritableRootfs,
+        source: &std::path::Path,
+    ) -> Result<WritableRootfsExport, SandboxError> {
+        let _ = (rootfs, source);
+        Err(SandboxError::Unsupported(
+            "image provider does not support runtime writable-root exports".to_owned(),
         ))
     }
 

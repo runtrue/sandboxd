@@ -1,4 +1,4 @@
-use super::writable::LoopbackWritableRootfs;
+use super::writable::GvisorWritableRootfs;
 use super::{
     command::CommandRunner,
     config::{canonical_child, ContainerdProviderConfig, ImagePlatform},
@@ -39,7 +39,7 @@ const MANIFEST_MEDIA_TYPES: &[&str] = &[
 pub struct ContainerdImageProvider {
     config: ContainerdProviderConfig,
     runner: CommandRunner,
-    writable: Option<LoopbackWritableRootfs>,
+    writable: GvisorWritableRootfs,
     fixed_rootfs: Option<PathBuf>,
     fixed_image: Option<LockedImage>,
     operation: Mutex<()>,
@@ -57,14 +57,7 @@ impl ContainerdImageProvider {
             .as_ref()
             .map(|fixed| load_fixed_image(&fixed.topology_lock))
             .transpose()?;
-        let writable = if fixed_rootfs.is_some() {
-            None
-        } else {
-            Some(LoopbackWritableRootfs::new(
-                config.writable_rootfs.clone(),
-                config.limits.maximum_command_output_bytes,
-            )?)
-        };
+        let writable = GvisorWritableRootfs::new(config.writable_rootfs.clone())?;
         let runner = CommandRunner::new(
             config.ctr_program.clone(),
             config.address.clone(),
@@ -938,26 +931,13 @@ impl ImageProvider for ContainerdImageProvider {
         identity: WritableRootfsIdentity,
         quota_bytes: u64,
     ) -> Result<WritableRootfs, SandboxError> {
-        if self.fixed_rootfs.is_some() {
-            return Err(SandboxError::Unsupported(
-                "fixed-rootfs image provider supports read-only roots only".to_owned(),
-            ));
-        }
         let _operation = self.operation.lock().expect("image provider lock");
-        self.writable
-            .as_ref()
-            .expect("dynamic provider has a writable-root provider")
-            .create(immutable, identity, quota_bytes)
+        self.writable.create(immutable, identity, quota_bytes)
     }
 
     fn release_writable_rootfs(&self, rootfs: &WritableRootfs) -> Result<(), SandboxError> {
-        let Some(writable) = &self.writable else {
-            return Err(SandboxError::Unsupported(
-                "fixed-rootfs image provider has no writable roots".to_owned(),
-            ));
-        };
         let _operation = self.operation.lock().expect("image provider lock");
-        writable.release(rootfs)
+        self.writable.release(rootfs)
     }
 
     fn export_writable_rootfs(
@@ -965,13 +945,19 @@ impl ImageProvider for ContainerdImageProvider {
         rootfs: &WritableRootfs,
         destination: &Path,
     ) -> Result<WritableRootfsExport, SandboxError> {
-        let Some(writable) = &self.writable else {
-            return Err(SandboxError::Unsupported(
-                "fixed-rootfs image provider has no writable roots".to_owned(),
-            ));
-        };
+        let _ = (rootfs, destination);
+        Err(SandboxError::Unsupported(
+            "gVisor writable roots must be exported by the runtime".to_owned(),
+        ))
+    }
+
+    fn validate_writable_rootfs_export(
+        &self,
+        rootfs: &WritableRootfs,
+        source: &Path,
+    ) -> Result<WritableRootfsExport, SandboxError> {
         let _operation = self.operation.lock().expect("image provider lock");
-        writable.export(rootfs, destination)
+        self.writable.validate_export(rootfs, source)
     }
 
     fn restore_writable_rootfs(
@@ -981,36 +967,21 @@ impl ImageProvider for ContainerdImageProvider {
         quota_bytes: u64,
         diff: &Path,
     ) -> Result<WritableRootfs, SandboxError> {
-        if self.fixed_rootfs.is_some() {
-            return Err(SandboxError::Unsupported(
-                "fixed-rootfs image provider cannot restore writable roots".to_owned(),
-            ));
-        }
         let _operation = self.operation.lock().expect("image provider lock");
         self.writable
-            .as_ref()
-            .expect("dynamic provider has a writable-root provider")
             .restore(immutable, identity, quota_bytes, diff)
     }
 
     fn garbage_collect(&self) -> Result<GarbageCollectionReport, SandboxError> {
-        if self.fixed_rootfs.is_some() {
-            return Ok(GarbageCollectionReport {
-                stale_staging_directories: 0,
-                stale_mounts: 0,
-                stale_writable_roots: 0,
-            });
-        }
         let _operation = self.operation.lock().expect("image provider lock");
         let mut report = GarbageCollectionReport {
             stale_staging_directories: 0,
             stale_mounts: 0,
-            stale_writable_roots: self
-                .writable
-                .as_ref()
-                .expect("dynamic provider has a writable-root provider")
-                .garbage_collect()?,
+            stale_writable_roots: self.writable.garbage_collect()?,
         };
+        if self.fixed_rootfs.is_some() {
+            return Ok(report);
+        }
         for entry in fs::read_dir(&self.config.mount_root)
             .map_err(|source| io_error(&self.config.mount_root, source))?
         {

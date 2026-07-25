@@ -158,8 +158,6 @@ pub(crate) fn serve(config: ServerConfig) -> Result<ServeOutcome, SandboxError> 
             mount_root: config.image_store,
             writable_rootfs: WritableRootfsConfig {
                 root: config.state_root.join("writable-roots"),
-                mkfs_ext4_program: config.mkfs_ext4.clone(),
-                losetup_program: config.losetup.clone(),
                 minimum_bytes: runtrue_sandbox_oci::provider::MINIMUM_WRITABLE_ROOT_BYTES,
                 maximum_bytes: MAXIMUM_WRITABLE_ROOT_BYTES,
                 operation_timeout: Duration::from_secs(60),

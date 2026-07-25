@@ -27,8 +27,6 @@ use std::{
 pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
     let provider_options = ProviderOptions {
         ctr: cli.ctr,
-        mkfs_ext4: cli.mkfs_ext4,
-        losetup: cli.losetup,
         address: cli.containerd_address,
         namespace: cli.containerd_namespace,
         snapshotter: cli.snapshotter,
@@ -314,8 +312,6 @@ fn write_new_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), San
 
 struct ProviderOptions {
     ctr: PathBuf,
-    mkfs_ext4: PathBuf,
-    losetup: PathBuf,
     address: PathBuf,
     namespace: String,
     snapshotter: String,
@@ -335,8 +331,6 @@ fn provider(
         mount_root,
         writable_rootfs: WritableRootfsConfig {
             root: writable_root,
-            mkfs_ext4_program: options.mkfs_ext4.clone(),
-            losetup_program: options.losetup.clone(),
             minimum_bytes: MINIMUM_WRITABLE_ROOT_BYTES,
             maximum_bytes: 16 * 1024 * 1024 * 1024,
             operation_timeout: Duration::from_secs(60),

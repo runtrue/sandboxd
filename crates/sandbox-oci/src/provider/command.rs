@@ -12,45 +12,6 @@ pub(crate) struct CommandResult {
     pub(crate) stdout: Vec<u8>,
 }
 
-pub(crate) fn run_external(
-    program: &Path,
-    arguments: &[String],
-    timeout: Duration,
-    output_limit: usize,
-    operation: &str,
-) -> Result<CommandResult, SandboxError> {
-    let mut child = Command::new(program)
-        .args(arguments)
-        .env_clear()
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| io_error(program, source))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| SandboxError::ImageProvider(format!("{operation} stdout is unavailable")))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| SandboxError::ImageProvider(format!("{operation} stderr is unavailable")))?;
-    let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
-    let stderr_reader = thread::spawn(move || read_bounded(stderr, output_limit));
-    let status = wait(&mut child, timeout, program, operation)?;
-    let (stdout, _) = stdout_reader
-        .join()
-        .map_err(|_| SandboxError::ImageProvider(format!("{operation} stdout reader panicked")))?
-        .map_err(|source| io_error(program, source))?;
-    let (stderr, stderr_truncated) = stderr_reader
-        .join()
-        .map_err(|_| SandboxError::ImageProvider(format!("{operation} stderr reader panicked")))?
-        .map_err(|source| io_error(program, source))?;
-    ensure_success(status, operation, &stderr, stderr_truncated)?;
-    Ok(CommandResult { stdout })
-}
-
 pub(crate) struct BlobDigest {
     pub(crate) digest: String,
     pub(crate) bytes: u64,

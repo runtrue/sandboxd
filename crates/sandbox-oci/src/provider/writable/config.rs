@@ -1,18 +1,11 @@
 use crate::{io_error, SandboxError};
-use std::{
-    fs,
-    os::unix::fs::{FileTypeExt as _, MetadataExt as _},
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{fs, os::unix::fs::MetadataExt as _, path::PathBuf, time::Duration};
 
 pub const MINIMUM_WRITABLE_ROOT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct WritableRootfsConfig {
     pub root: PathBuf,
-    pub mkfs_ext4_program: PathBuf,
-    pub losetup_program: PathBuf,
     pub minimum_bytes: u64,
     pub maximum_bytes: u64,
     pub operation_timeout: Duration,
@@ -30,23 +23,12 @@ impl WritableRootfsConfig {
                 "writable rootfs configuration is invalid".to_owned(),
             ));
         }
-        self.mkfs_ext4_program = validate_program(&self.mkfs_ext4_program, "mkfs.ext4")?;
-        self.losetup_program = validate_program(&self.losetup_program, "losetup")?;
         fs::create_dir_all(&self.root).map_err(|source| io_error(&self.root, source))?;
         self.root = fs::canonicalize(&self.root).map_err(|source| io_error(&self.root, source))?;
-        let encoded = self.root.as_os_str().as_encoded_bytes();
-        if encoded
-            .iter()
-            .any(|byte| matches!(byte, b',' | b':' | b'\\'))
-        {
-            return Err(SandboxError::ImageProvider(
-                "writable rootfs path cannot be represented as an overlay mount option".to_owned(),
-            ));
-        }
         let metadata = fs::metadata(&self.root).map_err(|source| io_error(&self.root, source))?;
-        if !metadata.is_dir() || metadata.uid() != 0 {
+        if !metadata.is_dir() || metadata.uid() != nix::unistd::geteuid().as_raw() {
             return Err(SandboxError::ImageProvider(
-                "writable rootfs root must be a root-owned directory".to_owned(),
+                "writable rootfs root must be owned by the worker identity".to_owned(),
             ));
         }
         fs::set_permissions(
@@ -66,20 +48,4 @@ impl WritableRootfsConfig {
         }
         Ok(())
     }
-}
-
-fn validate_program(path: &Path, name: &str) -> Result<PathBuf, SandboxError> {
-    if !path.is_absolute() {
-        return Err(SandboxError::ImageProvider(format!(
-            "{name} executable must be absolute"
-        )));
-    }
-    let canonical = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
-    let metadata = fs::metadata(&canonical).map_err(|source| io_error(&canonical, source))?;
-    if !metadata.is_file() || metadata.uid() != 0 || metadata.file_type().is_socket() {
-        return Err(SandboxError::ImageProvider(format!(
-            "{name} executable is not a root-owned regular file"
-        )));
-    }
-    Ok(canonical)
 }
