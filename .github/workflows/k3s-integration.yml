@@ -250,6 +250,11 @@ jobs:
           bash tools/test-k3s-autoscaling.sh \
             | tee k3s-diagnostics/autoscaling.log
 
+      - name: Enforce warm-pool activation SLO
+        run: |
+          tools/performance/run-warm-pool-slo.sh \
+            --output k3s-diagnostics/warm-pool-slo.json
+
       - name: Run multi-node durable recovery conformance
         env:
           MULTINODE_DIAGNOSTICS_DIR: k3s-diagnostics

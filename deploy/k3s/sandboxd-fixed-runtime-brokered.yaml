@@ -180,6 +180,8 @@ spec:
             - /usr/local/bin/runtrue-sandboxd
           args:
             - serve
+            - --minimum-clean-age-milliseconds
+            - "1000"
             - --worker-id
             - worker-fixed-a
             - --resource-shape
@@ -257,7 +259,7 @@ spec:
                 - ready
                 - --socket
                 - /run/runtrue-sandboxd-operator/control.sock
-            periodSeconds: 5
+            periodSeconds: 1
           startupProbe:
             exec:
               command:

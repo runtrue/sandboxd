@@ -62,6 +62,7 @@ jobs:
           shellcheck \
             tools/performance/run-control-plane.sh \
             tools/performance/run-density-gate.sh \
+            tools/performance/run-warm-pool-slo.sh \
             tools/configure-release-signing.sh \
             tools/security-review/verify-target.sh
       - name: Validate GitHub workflows

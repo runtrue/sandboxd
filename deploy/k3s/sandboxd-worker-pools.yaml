@@ -97,6 +97,15 @@ items:
           enableServiceLinks: false
           dnsPolicy: ClusterFirst
           terminationGracePeriodSeconds: 30
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector:
+                matchLabels:
+                  runtrue.io/autoscaled-worker: "true"
+              matchLabelKeys:
+                - runtrue.io/worker-pool
           securityContext:
             fsGroup: 65533
             fsGroupChangePolicy: OnRootMismatch
@@ -157,6 +166,8 @@ items:
               command: [/usr/local/bin/runtrue-sandboxd]
               args:
                 - serve
+                - --minimum-clean-age-milliseconds
+                - "1000"
                 - --worker-pod-uid-env
                 - POD_UID
                 - --resource-shape
@@ -235,7 +246,7 @@ items:
                     - ready
                     - --socket
                     - /run/runtrue-sandboxd-operator/control.sock
-                periodSeconds: 5
+                periodSeconds: 1
               startupProbe:
                 exec:
                   command:
@@ -323,6 +334,8 @@ items:
               command: [/usr/local/bin/runtrue-sandboxd]
               args:
                 - serve
+                - --minimum-clean-age-milliseconds
+                - "1000"
                 - --worker-pod-uid-env
                 - POD_UID
                 - --resource-shape
@@ -401,7 +414,7 @@ items:
                     - ready
                     - --socket
                     - /run/runtrue-sandboxd-operator/control.sock
-                periodSeconds: 5
+                periodSeconds: 1
               startupProbe:
                 exec:
                   command:
@@ -470,6 +483,8 @@ items:
               command: [/usr/local/bin/runtrue-sandboxd]
               args:
                 - serve
+                - --minimum-clean-age-milliseconds
+                - "1000"
                 - --worker-pod-uid-env
                 - POD_UID
                 - --resource-shape
@@ -548,7 +563,7 @@ items:
                     - ready
                     - --socket
                     - /run/runtrue-sandboxd-operator/control.sock
-                periodSeconds: 5
+                periodSeconds: 1
               startupProbe:
                 exec:
                   command:

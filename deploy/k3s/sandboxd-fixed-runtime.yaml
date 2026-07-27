@@ -68,6 +68,8 @@ spec:
                   fieldPath: metadata.uid
           args:
             - serve
+            - --minimum-clean-age-milliseconds
+            - "1000"
             - --worker-id
             - worker-$(POD_UID)
             - --resource-shape
@@ -137,7 +139,7 @@ spec:
                 - ready
                 - --socket
                 - /run/runtrue-sandboxd/control.sock
-            periodSeconds: 5
+            periodSeconds: 1
           startupProbe:
             exec:
               command:
