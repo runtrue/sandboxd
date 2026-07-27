@@ -2,11 +2,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --output FILE [--slots N]" >&2
+  echo "usage: $0 --output FILE [--slots N] [--activation-mode sequential|concurrent] [--activation-rounds N] [--node NAME]" >&2
 }
 
 output_file=
 slots=8
+activation_mode=sequential
+activation_rounds=1
+requested_node=
 while (($#)); do
   case "$1" in
     --output)
@@ -17,6 +20,18 @@ while (($#)); do
       slots=${2:-}
       shift 2
       ;;
+    --activation-mode)
+      activation_mode=${2:-}
+      shift 2
+      ;;
+    --activation-rounds)
+      activation_rounds=${2:-}
+      shift 2
+      ;;
+    --node)
+      requested_node=${2:-}
+      shift 2
+      ;;
     *)
       usage
       exit 2
@@ -24,7 +39,15 @@ while (($#)); do
   esac
 done
 
-if [[ -z "$output_file" || ! "$slots" =~ ^[4-9]$|^[1-2][0-9]$|^3[0-2]$ ]]; then
+if [[ -z "$output_file" ||
+  ! "$slots" =~ ^[2-9]$|^[1-2][0-9]$|^3[0-2]$ ||
+  ! "$activation_mode" =~ ^(sequential|concurrent)$ ||
+  ! "$activation_rounds" =~ ^[1-9]$|^[1-9][0-9]$|^100$ ]]
+then
+  usage
+  exit 2
+fi
+if [[ "$activation_mode" == sequential && "$slots" -lt 4 ]]; then
   usage
   exit 2
 fi
@@ -63,7 +86,9 @@ test -s "$lock"
 test -n "$(git rev-parse HEAD)"
 output_file=$(realpath -m "$output_file")
 mkdir -p "$(dirname -- "$output_file")"
-sed "s/sandboxd-system/${namespace}/g" \
+sed \
+  -e "s/sandboxd-system/${namespace}/g" \
+  -e '0,/replicas: 1/s//replicas: 0/' \
   deploy/k3s/sandboxd-fixed-runtime.yaml \
   >"$temporary/sandboxd-fixed-runtime.yaml"
 
@@ -161,8 +186,30 @@ record_memory() {
   done
 }
 
+node=$requested_node
+if [[ -z "$node" ]]; then
+  node=$(kubectl get nodes -o json | jq -r '
+    first(
+      .items[]
+      | select(.metadata.labels["runtrue.io/sandbox-node"] == "true")
+      | select(any(.status.conditions[]?;
+          .type == "Ready" and .status == "True"))
+      | .metadata.name
+    )
+  ')
+fi
+[[ -n "$node" && "$node" != null ]]
+kubectl get node "$node" -o json | jq -e '
+  .metadata.labels["runtrue.io/sandbox-node"] == "true"
+  and any(.status.conditions[]?;
+    .type == "Ready" and .status == "True")
+' >/dev/null
+
 scale_started_ns=$(date +%s%N)
 kubectl apply -f "$temporary/sandboxd-fixed-runtime.yaml" >/dev/null
+kubectl patch deployment -n "$namespace" "$deployment" --type merge \
+  --patch "$(jq -nc --arg node "$node" \
+    '{spec:{template:{spec:{nodeName:$node}}}}')" >/dev/null
 kubectl scale deployment -n "$namespace" "$deployment" \
   --replicas="$slots" >/dev/null
 wait_for_ready_count "$slots"
@@ -179,10 +226,15 @@ done
 sleep 2
 record_memory "$temporary/idle-memory.jsonl" "${pods[@]}"
 : >"$temporary/activation.jsonl"
-started_ns=$(date +%s%N)
-for index in "${!pods[@]}"; do
-  pod=${pods[$index]}
-  sandbox="density-${index}-$(date +%s)"
+: >"$temporary/cleanup.jsonl"
+activate_worker() {
+  local index=$1
+  local pod=$2
+  local round=$3
+  local sandbox
+  local begin
+  local end
+  sandbox="density-${round}-${index}-$(date +%s)-$$"
   begin=$(date +%s%N)
   kubectl exec -i -n "$namespace" "$pod" -- \
     runtrue-sandboxd create \
@@ -190,78 +242,101 @@ for index in "${!pods[@]}"; do
     --lock /dev/stdin \
     --sandbox "$sandbox" \
     --timeout-seconds 30 <"$lock" \
-    >"$temporary/create-${index}.json"
+    >"$temporary/create-${round}-${index}.json"
   end=$(date +%s%N)
   jq -e '.ok == true and .result.state == "running"' \
-    "$temporary/create-${index}.json" >/dev/null
+    "$temporary/create-${round}-${index}.json" >/dev/null
   echo "$(((end - begin) / 1000000))" \
-    >"$temporary/activation-${index}"
-done
-activation_batch_ms="$((($(date +%s%N) - started_ns) / 1000000))"
-for index in "${!pods[@]}"; do
-  cat "$temporary/activation-${index}" >>"$temporary/activation.jsonl"
-done
+    >"$temporary/activation-${round}-${index}"
+}
 
-sleep 2
-record_memory "$temporary/active-memory.jsonl" "${pods[@]}"
-
-old_uid_csv=$(IFS=,; echo "${old_uids[*]}")
-: >"$temporary/cleanup.jsonl"
-cleanup_started_ns=$(date +%s%N)
-stop_pids=()
-for index in "${!pods[@]}"; do
-  pod=${pods[$index]}
-  sandbox="density-${index}-$(date +%s)"
-  # The create and stop loops execute within the same second in normal runs.
-  # Resolve the exact sandbox identity from the successful create response.
-  sandbox=$(jq -r '.result.project' "$temporary/create-${index}.json")
-  (
-    kubectl exec -n "$namespace" "$pod" -- \
-      runtrue-sandboxd stop \
-      --socket "$socket" \
-      --sandbox "$sandbox" >/dev/null
-  ) &
-  stop_pids+=("$!")
-done
-for pid in "${stop_pids[@]}"; do
-  wait "$pid"
-done
-
-recorded=0
-for _ in $(seq 1 900); do
-  replacements=$(ready_pods |
-    awk -F'\t' -v excluded="$old_uid_csv" '
-      BEGIN {
-        count = 0
-        split(excluded, values, ",")
-        for (item in values) {
-          old[values[item]] = 1
-        }
-      }
-      !($2 in old) { count += 1 }
-      END { print count }
-    ')
-  while ((recorded < replacements)); do
-    echo "$((($(date +%s%N) - cleanup_started_ns) / 1000000))" \
-      >>"$temporary/cleanup.jsonl"
-    recorded=$((recorded + 1))
+activation_batch_ms=0
+cleanup_batch_ms=0
+for round in $(seq 1 "$activation_rounds"); do
+  started_ns=$(date +%s%N)
+  activation_processes=()
+  for index in "${!pods[@]}"; do
+    if [[ "$activation_mode" == concurrent ]]; then
+      activate_worker "$index" "${pods[$index]}" "$round" &
+      activation_processes+=("$!")
+    else
+      activate_worker "$index" "${pods[$index]}" "$round"
+    fi
   done
-  if [[ "$recorded" -eq "$slots" ]]; then
-    break
-  fi
-  sleep 0.1
-done
-test "$recorded" -eq "$slots"
-cleanup_batch_ms="$((($(date +%s%N) - cleanup_started_ns) / 1000000))"
+  for process in "${activation_processes[@]}"; do
+    wait "$process"
+  done
+  activation_batch_ms=$((activation_batch_ms
+    + ($(date +%s%N) - started_ns) / 1000000))
+  for index in "${!pods[@]}"; do
+    cat "$temporary/activation-${round}-${index}" \
+      >>"$temporary/activation.jsonl"
+  done
 
-node=$(kubectl get nodes -o json | jq -r '
-  first(
-    .items[]
-    | select(.metadata.labels["runtrue.io/sandbox-node"] == "true")
-    | .metadata.name
-  )
-')
-test -n "$node"
+  if [[ "$round" -eq 1 ]]; then
+    sleep 2
+    record_memory "$temporary/active-memory.jsonl" "${pods[@]}"
+  fi
+
+  old_uids=()
+  for row in "${pod_rows[@]}"; do
+    old_uids+=("${row##*$'\t'}")
+  done
+  old_uid_csv=$(IFS=,; echo "${old_uids[*]}")
+  cleanup_started_ns=$(date +%s%N)
+  stop_pids=()
+  for index in "${!pods[@]}"; do
+    pod=${pods[$index]}
+    sandbox=$(jq -r '.result.project' \
+      "$temporary/create-${round}-${index}.json")
+    (
+      kubectl exec -n "$namespace" "$pod" -- \
+        runtrue-sandboxd stop \
+        --socket "$socket" \
+        --sandbox "$sandbox" >/dev/null
+    ) &
+    stop_pids+=("$!")
+  done
+  for pid in "${stop_pids[@]}"; do
+    wait "$pid"
+  done
+
+  recorded=0
+  for _ in $(seq 1 900); do
+    replacements=$(ready_pods |
+      awk -F'\t' -v excluded="$old_uid_csv" '
+        BEGIN {
+          count = 0
+          split(excluded, values, ",")
+          for (item in values) {
+            old[values[item]] = 1
+          }
+        }
+        !($2 in old) { count += 1 }
+        END { print count }
+      ')
+    while ((recorded < replacements)); do
+      echo "$((($(date +%s%N) - cleanup_started_ns) / 1000000))" \
+        >>"$temporary/cleanup.jsonl"
+      recorded=$((recorded + 1))
+    done
+    if [[ "$recorded" -eq "$slots" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+  test "$recorded" -eq "$slots"
+  cleanup_batch_ms=$((cleanup_batch_ms
+    + ($(date +%s%N) - cleanup_started_ns) / 1000000))
+
+  mapfile -t pod_rows < <(ready_pods | sort)
+  test "${#pod_rows[@]}" -eq "$slots"
+  pods=()
+  for row in "${pod_rows[@]}"; do
+    pods+=("${row%%$'\t'*}")
+  done
+done
+
 node_memory=$(memory_bytes "$(
   kubectl get node "$node" -o jsonpath='{.status.allocatable.memory}'
 )")
@@ -301,6 +376,8 @@ jq -n \
   --arg kernel_version "$kernel_version" \
   --arg os_image "$os_image" \
   --arg runsc_version "$runsc_version" \
+  --arg activation_mode "$activation_mode" \
+  --argjson activation_rounds "$activation_rounds" \
   --argjson slots "$slots" \
   --argjson node_memory "$node_memory" \
   --argjson node_cpu "$node_cpu" \
@@ -380,7 +457,12 @@ jq -n \
         methodology:{
           baseline:"one active sandbox per Kubernetes worker Pod",
           dense_upper_bound:"one median clean-worker footprint plus every measured per-sandbox active increment",
-          activation_issuance:"sequential while retaining earlier sandboxes so all slots are active for the memory sample",
+          activation_issuance:(
+            $activation_mode
+            + " while retaining every sandbox so all slots are active for the memory sample"
+          ),
+          activation_rounds:$activation_rounds,
+          pinned_node:$node,
           caveat:"optimistic model excludes dense slot bookkeeping, cgroup broker, monitoring, cleanup, and contention overhead"
         },
         one_sandbox_per_worker:{

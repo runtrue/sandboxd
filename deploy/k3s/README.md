@@ -617,6 +617,14 @@ remain stale during node loss. Readiness intentionally becomes false while that
 worker is occupied.
 Only the userspace pool receives DNS and TCP/443 Pod egress; none of the pools
 has a Kubernetes Service, Ingress, host port, or host-network access.
+Worker Pods are balanced across available sandbox-node hostnames with a soft
+topology spread constraint. The reference retained-warm policy keeps twelve
+clean workers, sized for one peak assignment per second over the measured
+nine-second replacement budget, a two-task burst, a one-second worker
+stabilization window, and a 25 percent margin.
+Run `tools/performance/run-warm-pool-slo.sh` on the exact deployment cohort
+before adopting its one-second activation objective; see
+[`docs/workload-model.md`](../../docs/workload-model.md).
 
 `sandbox-autoscaler.yaml` is the only component in this path with a Kubernetes
 service-account token. Its namespaced Role permits exactly:

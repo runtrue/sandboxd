@@ -275,7 +275,11 @@ cat >"$temporary/worker-policy.json" <<'EOF'
 }
 EOF
 jq -e . "$temporary/policy.json" "$temporary/worker-policy.json" >/dev/null
-install -m 0600 deploy/k3s/worker-pools.json "$temporary/catalog.json"
+jq '
+  (.pools[] | select(.name == "fixed-standard-warm")
+    | .policy.warm_headroom) = 2
+' deploy/k3s/worker-pools.json >"$temporary/catalog.json"
+chmod 0600 "$temporary/catalog.json"
 chmod 0600 "$temporary"/*
 
 kubectl create secret generic sandbox-gateway-local-database \
@@ -660,7 +664,8 @@ wait_for_checkpoint() {
 run_recovery() {
   local fault=$1
   local idempotency="multinode-recovery-${fault}"
-  local sandbox="recovery-${fault}-$(date +%s)"
+  local sandbox
+  sandbox="recovery-${fault}-$(date +%s)"
   local request="$temporary/${fault}-request.json"
   local cancelled
   local rpo_ms

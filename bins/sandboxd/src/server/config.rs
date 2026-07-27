@@ -40,6 +40,7 @@ pub(crate) struct ServerConfig {
     pub(crate) nft: PathBuf,
     pub(crate) maximum_connections: usize,
     pub(crate) io_timeout: Duration,
+    pub(crate) minimum_clean_age: Duration,
 }
 
 impl ServerConfig {
@@ -84,6 +85,11 @@ impl ServerConfig {
         if self.io_timeout.is_zero() || self.io_timeout > Duration::from_secs(60) {
             return Err(SandboxError::Runtime(
                 "I/O timeout must be between 1 and 60 seconds".to_owned(),
+            ));
+        }
+        if self.minimum_clean_age > Duration::from_secs(60) {
+            return Err(SandboxError::Runtime(
+                "minimum clean age cannot exceed 60 seconds".to_owned(),
             ));
         }
         let attestation_values = [
@@ -189,6 +195,7 @@ mod tests {
             nft: PathBuf::from("/usr/sbin/nft"),
             maximum_connections: 64,
             io_timeout: Duration::from_secs(5),
+            minimum_clean_age: Duration::ZERO,
         }
     }
 

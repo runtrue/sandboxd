@@ -32,7 +32,7 @@
       "policy": {
         "minimum_workers": 0,
         "maximum_workers": 100,
-        "warm_headroom": 2,
+        "warm_headroom": 12,
         "maximum_scale_up_per_reconcile": 10,
         "maximum_scale_down_per_reconcile": 4,
         "idle_before_scale_down_ms": 60000

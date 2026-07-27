@@ -98,3 +98,23 @@ See [Dense multi-sandbox worker decision](dense-worker-decision.md) for the
 measured P50/P95/P99 results, security constraints, decision thresholds, and
 reconsideration criteria. The production boundary remains one active sandbox
 per worker Pod.
+
+## Warm-pool service objective
+
+The production workload model, pause semantics, capacity formula, and measured
+one-second activation gate are documented in
+[Workload and suspension model](workload-model.md).
+
+Run the complete primed and measured k3s gate with:
+
+```bash
+tools/performance/run-warm-pool-slo.sh \
+  --output /tmp/sandboxd-warm-pool-slo.json
+```
+
+The checked-in reference policy validates two concurrent activations per node,
+a one-second activation P99 over at least 100 samples, a nine-second
+replacement P99, one peak arrival per second, a two-task burst, and a 25
+percent capacity margin. The evaluator requires twelve configured clean workers
+and reports both the node count for the declared burst and the conservative
+count for consuming the full reserve at once.

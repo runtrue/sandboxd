@@ -47,6 +47,8 @@ spec:
             - /usr/local/bin/runtrue-sandboxd
           args:
             - serve
+            - --minimum-clean-age-milliseconds
+            - "1000"
             - --guest-profile
             - root-in-sandbox-v1
             - --socket
@@ -80,11 +82,10 @@ spec:
             exec:
               command:
                 - /usr/local/bin/runtrue-sandboxd
-                - ping
+                - ready
                 - --socket
                 - /run/runtrue-sandboxd/control.sock
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            periodSeconds: 1
           livenessProbe:
             exec:
               command:

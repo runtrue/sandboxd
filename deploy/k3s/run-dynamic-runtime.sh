@@ -39,6 +39,8 @@ done
 /usr/bin/ctr --address "$containerd_address" version >/dev/null
 
 /usr/local/bin/runtrue-sandboxd serve \
+  --minimum-clean-age-milliseconds \
+    "${SANDBOXD_MINIMUM_CLEAN_AGE_MILLISECONDS:-1000}" \
   --worker-id "worker-${SANDBOXD_WORKER_ID:-local}" \
   --resource-shape "${SANDBOXD_RESOURCE_SHAPE:-dynamic-v1}" \
   --sandbox-cpu-millis "${SANDBOXD_SANDBOX_CPU_MILLIS:-2000}" \
