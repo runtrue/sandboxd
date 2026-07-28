@@ -34,7 +34,7 @@ flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backe
 futures-util = "=0.3.33"
 hex = "=0.4.3"
 hmac = "=0.12.1"
-hkdf = "=0.12.4"
+hkdf = "=0.13.0"
 k8s-openapi = { version = "=0.28.0", features = ["v1_36"] }
 kube = { version = "=4.0.0", default-features = false, features = ["client", "rustls-tls", "ring"] }
 libc = "=0.2.186"
