@@ -841,33 +841,14 @@ if [[ "$recovery_faults" != pod ]]; then
   run_recovery node
 fi
 
-has_recovery_metrics() {
-  local metrics=$1
-  local phase quantile
-  for phase in recovery_rpo recovery_rto; do
-    for quantile in 0.5 0.95 0.99; do
-      grep -F \
-        "sandboxd_pool_latency_milliseconds{pool=\"fixed-standard-warm\",phase=\"${phase}/standard-v1\",quantile=\"${quantile}\"}" \
-        <<<"$metrics" >/dev/null || return 1
-    done
+metrics=$(curl -fsS "http://127.0.0.1:${metrics_port}/metrics")
+printf '%s\n' "$metrics" >"$temporary/recovery-metrics.prom"
+for phase in recovery_rpo recovery_rto; do
+  # Match the quantile labels emitted by the autoscaler's Prometheus renderer.
+  for quantile in 0.50 0.95 0.99; do
+    grep -F \
+      "sandboxd_pool_latency_milliseconds{pool=\"fixed-standard-warm\",phase=\"${phase}/standard-v1\",quantile=\"${quantile}\"}" \
+      <<<"$metrics" >/dev/null
   done
-}
-
-# Metrics refresh on reconciliation. Cancellation above can complete before
-# the next refresh, especially after the node-loss worker inventory settles.
-recovery_metrics_ready=false
-for _ in $(seq 1 40); do
-  metrics=$(curl -fsS "http://127.0.0.1:${metrics_port}/metrics")
-  printf '%s\n' "$metrics" >"$temporary/recovery-metrics.prom"
-  if has_recovery_metrics "$metrics"; then
-    recovery_metrics_ready=true
-    break
-  fi
-  sleep 0.25
 done
-if [[ "$recovery_metrics_ready" != true ]]; then
-  cat "$temporary/recovery-metrics.prom" >&2
-  printf 'timed out waiting for recovery latency metrics\n' >&2
-  exit 1
-fi
 echo "multi-node durable recovery conformance passed"
