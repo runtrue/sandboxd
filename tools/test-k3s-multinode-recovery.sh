@@ -568,7 +568,7 @@ done
 curl -fsS "http://127.0.0.1:${gateway_port}/health/ready" >/dev/null
 
 lock="$temporary/multinode-recovery.lock.json"
-target/release/runtrue-sandboxctl \
+"${privilege[@]}" target/release/runtrue-sandboxctl \
   --ctr /usr/bin/ctr \
   --containerd-address /run/k3s/containerd/containerd.sock \
   --containerd-namespace k8s.io \

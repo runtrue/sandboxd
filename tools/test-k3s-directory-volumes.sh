@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "directory-volume conformance failed at line %s\n" "$LINENO" >&2' ERR
 
 namespace=${SANDBOXD_K3S_NAMESPACE:-sandboxd-system}
 worker=sandboxd-fixed-runtime
@@ -62,7 +63,7 @@ wait_for_worker() {
 generate_lock() {
   local compose=$1
   local output=$2
-  "$ctl" \
+  "${privilege[@]}" "$ctl" \
     --ctr /usr/bin/ctr \
     --containerd-address /run/k3s/containerd/containerd.sock \
     --containerd-namespace k8s.io \

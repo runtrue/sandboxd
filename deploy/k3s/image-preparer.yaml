@@ -63,7 +63,7 @@ spec:
           imagePullPolicy: Never
           env:
             - name: RUNTRUE_PREPARATION_REFERENCE
-              value: mirror.gcr.io/library/python:3.13-slim
+              value: mirror.gcr.io/library/python@sha256:afe189875f1d2f9b45e287834fb9f2c273a5d59d354ae4050ab9affbf0a6ba06
             - name: RUNTRUE_PREPARATION_KEY_ID
               value: local-preparer
             - name: RUNTRUE_PREPARATION_POLICY
