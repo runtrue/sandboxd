@@ -263,10 +263,10 @@ jobs:
           bash tools/test-k3s-multinode-recovery.sh \
             2>&1 | tee k3s-diagnostics/multinode-recovery.log
 
-      - name: Enforce hosted-runner warm-pool performance budget
+      - name: Enforce warm-pool activation SLO
         run: |
+          kubectl wait --for=delete namespace/sandboxd-system --timeout=120s
           tools/performance/run-warm-pool-slo.sh \
-            --policy tools/performance/warm-pool-ci.json \
             --output k3s-diagnostics/warm-pool-slo.json
 
       - name: Collect diagnostics
