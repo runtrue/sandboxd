@@ -205,12 +205,13 @@ cp deploy/k3s/conformance-volume.yaml "$missing_compose"
 sed -i 's#/mnt#/missing/nested/mnt#g' "$missing_compose"
 missing_lock=$(mktemp "$temporary"/sandboxd-volume-missing.XXXXXX.lock.json)
 generate_lock "$missing_compose" "$missing_lock"
-set +e
-missing=$(kubectl exec -i -n "$namespace" "$pod" -- \
+if missing=$(kubectl exec -i -n "$namespace" "$pod" -- \
   runtrue-sandboxd admit --socket "$socket" --lock /dev/stdin \
-  <"$missing_lock" 2>&1)
-status=$?
-set -e
+  <"$missing_lock" 2>&1); then
+  status=0
+else
+  status=$?
+fi
 if [[ $status -eq 0 ]] ||
   ! grep -Fq "does not exist in the admitted image" <<<"$missing"; then
   echo "missing volume mountpoint was not rejected during admission: $missing" >&2
@@ -222,12 +223,13 @@ cp deploy/k3s/conformance-volume-profile.yaml "$quota_compose"
 sed -i 's/quota_bytes: 8388608/quota_bytes: 3221225472/' "$quota_compose"
 quota_lock=$(mktemp "$temporary"/sandboxd-volume-quota.XXXXXX.lock.json)
 generate_lock "$quota_compose" "$quota_lock"
-set +e
-quota=$(kubectl exec -i -n "$namespace" "$pod" -- \
+if quota=$(kubectl exec -i -n "$namespace" "$pod" -- \
   runtrue-sandboxd admit --socket "$socket" --lock /dev/stdin \
-  <"$quota_lock" 2>&1)
-status=$?
-set -e
+  <"$quota_lock" 2>&1); then
+  status=0
+else
+  status=$?
+fi
 if [[ $status -eq 0 ]] ||
   ! grep -Fq "exceeds worker resource shape" <<<"$quota"; then
   echo "aggregate storage demand above the worker boundary was not rejected: $quota" >&2
