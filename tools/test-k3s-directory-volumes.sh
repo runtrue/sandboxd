@@ -20,7 +20,7 @@ else
 fi
 
 cleanup() {
-  kubectl delete deployment -n "$namespace" "$worker" \
+  kubectl delete deployment -n "$namespace" "$worker" --cascade=foreground \
     --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kubectl delete pvc -n "$namespace" sandboxd-directory-state \
     --ignore-not-found --wait=true >/dev/null 2>&1 || true
@@ -45,6 +45,7 @@ wait_for_worker() {
       jq -r --arg previous "$previous" '
         .items[]
         | select(.metadata.uid != $previous)
+        | select(.metadata.deletionTimestamp == null)
         | select(.status.phase == "Running")
         | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
         | [.metadata.name, .metadata.uid]
@@ -90,7 +91,7 @@ stop_sandbox() {
     runtrue-sandboxd stop --socket "$socket" --sandbox "$sandbox" >/dev/null
 }
 
-kubectl delete deployment -n "$namespace" "$worker" \
+kubectl delete deployment -n "$namespace" "$worker" --cascade=foreground \
   --ignore-not-found --wait=true >/dev/null
 kubectl delete pvc -n "$namespace" sandboxd-directory-state \
   --ignore-not-found --wait=true >/dev/null
@@ -142,7 +143,10 @@ jq -e '
   and ([.spec.volumes[] | select(has("hostPath"))] | length) == 0
   and ([.spec.containers[].volumeMounts[] | select(.mountPropagation != null)]
     | length) == 0
-' >/dev/null <<<"$pod_json"
+' >/dev/null <<<"$pod_json" || {
+  printf 'unexpected directory-volume worker configuration: %s\n' "$pod_json" >&2
+  exit 1
+}
 
 strict_lock=$(mktemp "$temporary"/sandboxd-volume-strict.XXXXXX.lock.json)
 reopen_lock=$(mktemp "$temporary"/sandboxd-volume-reopen.XXXXXX.lock.json)
