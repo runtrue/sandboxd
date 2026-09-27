@@ -11,6 +11,7 @@ pv_name="sandboxd-directory-conformance-${suffix}"
 ctl=${SANDBOXD_CTL:-target/release/runtrue-sandboxctl}
 pv_path=
 pod=
+temporary=$(mktemp -d)
 
 if [[ $(id -u) -eq 0 ]]; then
   privilege=()
@@ -27,6 +28,7 @@ cleanup() {
   if [[ $pv_path == /var/lib/runtrue-sandboxd-directory-conformance.* ]]; then
     "${privilege[@]}" rm -rf -- "$pv_path"
   fi
+  rm -rf -- "$temporary"
   kubectl apply -f deploy/k3s/sandboxd-fixed-runtime.yaml >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -122,7 +124,7 @@ spec:
                 - ${node}
 EOF
 
-rendered=$(mktemp /tmp/sandboxd-directory-volumes.XXXXXX.yaml)
+rendered=$(mktemp "$temporary"/sandboxd-directory-volumes.XXXXXX.yaml)
 kubectl kustomize --load-restrictor LoadRestrictionsNone \
   deploy/k3s/directory-volumes >"$rendered"
 kubectl apply -f "$rendered" >/dev/null
@@ -142,8 +144,8 @@ jq -e '
     | length) == 0
 ' >/dev/null <<<"$pod_json"
 
-strict_lock=$(mktemp /tmp/sandboxd-volume-strict.XXXXXX.lock.json)
-reopen_lock=$(mktemp /tmp/sandboxd-volume-reopen.XXXXXX.lock.json)
+strict_lock=$(mktemp "$temporary"/sandboxd-volume-strict.XXXXXX.lock.json)
+reopen_lock=$(mktemp "$temporary"/sandboxd-volume-reopen.XXXXXX.lock.json)
 generate_lock deploy/k3s/conformance-volume.yaml "$strict_lock"
 generate_lock deploy/k3s/conformance-volume-reopen.yaml "$reopen_lock"
 
@@ -198,10 +200,10 @@ stop_sandbox "directory-reopen-${suffix}"
 
 previous_uid=$pod_uid
 wait_for_worker "$previous_uid"
-missing_compose=$(mktemp /tmp/sandboxd-volume-missing.XXXXXX.yaml)
+missing_compose=$(mktemp "$temporary"/sandboxd-volume-missing.XXXXXX.yaml)
 cp deploy/k3s/conformance-volume.yaml "$missing_compose"
 sed -i 's#/mnt#/missing/nested/mnt#g' "$missing_compose"
-missing_lock=$(mktemp /tmp/sandboxd-volume-missing.XXXXXX.lock.json)
+missing_lock=$(mktemp "$temporary"/sandboxd-volume-missing.XXXXXX.lock.json)
 generate_lock "$missing_compose" "$missing_lock"
 set +e
 missing=$(kubectl exec -i -n "$namespace" "$pod" -- \
@@ -215,10 +217,10 @@ if [[ $status -eq 0 ]] ||
   exit 1
 fi
 
-quota_compose=$(mktemp /tmp/sandboxd-volume-quota.XXXXXX.yaml)
+quota_compose=$(mktemp "$temporary"/sandboxd-volume-quota.XXXXXX.yaml)
 cp deploy/k3s/conformance-volume-profile.yaml "$quota_compose"
 sed -i 's/quota_bytes: 8388608/quota_bytes: 3221225472/' "$quota_compose"
-quota_lock=$(mktemp /tmp/sandboxd-volume-quota.XXXXXX.lock.json)
+quota_lock=$(mktemp "$temporary"/sandboxd-volume-quota.XXXXXX.lock.json)
 generate_lock "$quota_compose" "$quota_lock"
 set +e
 quota=$(kubectl exec -i -n "$namespace" "$pod" -- \
@@ -233,10 +235,10 @@ if [[ $status -eq 0 ]] ||
 fi
 
 for profile in root-in-sandbox-v1 oci-compat-v1; do
-  profile_compose=$(mktemp "/tmp/sandboxd-volume-${profile}.XXXXXX.yaml")
+  profile_compose=$(mktemp "$temporary/sandboxd-volume-${profile}.XXXXXX.yaml")
   cp deploy/k3s/conformance-volume-profile.yaml "$profile_compose"
   sed -i "2i x-runtrue-guest-profile: ${profile}" "$profile_compose"
-  profile_lock=$(mktemp "/tmp/sandboxd-volume-${profile}.XXXXXX.lock.json")
+  profile_lock=$(mktemp "$temporary/sandboxd-volume-${profile}.XXXXXX.lock.json")
   generate_lock "$profile_compose" "$profile_lock"
   create=$(create_sandbox "$profile_lock" "directory-${profile}-${suffix}")
   jq -e '.ok == true and .result.running_services == 1' >/dev/null <<<"$create"

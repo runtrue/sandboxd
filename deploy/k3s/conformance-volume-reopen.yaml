@@ -8,7 +8,7 @@ volumes:
 
 services:
   reader:
-    image: mirror.gcr.io/library/python:3.13-slim
+    image: mirror.gcr.io/library/python@sha256:afe189875f1d2f9b45e287834fb9f2c273a5d59d354ae4050ab9affbf0a6ba06
     entrypoint: [/usr/local/bin/python3, -c]
     command:
       - |
