@@ -21,8 +21,7 @@ agent_volume=sandboxd-k3s-recovery-agent-data
 agent_identity_volume=sandboxd-k3s-recovery-agent-identity
 api_forward=sandboxd-k3s-recovery-api-forward
 agent_forward=sandboxd-k3s-recovery-agent-forward
-minio_image='minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e'
-minio_runtime_image='minio/minio:sandboxd-recovery-local'
+minio_runtime_image='sandboxd-test-minio:local'
 k3s_image='rancher/k3s:v1.36.1-k3s1@sha256:08fdebd14db9ab7d5ea821d5bfa95d02341a6ef886842fcc8d9dfd0e9fa9e0cd'
 socat_image='alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e'
 secret_prep_image='alpine/socat:sandboxd-secret-prep-local'
@@ -149,9 +148,9 @@ kubectl label node "$primary_node" \
 
 pull_image "$k3s_image"
 pull_image "$socat_image"
-pull_image "$minio_image"
+docker build --tag "$minio_runtime_image" \
+  --file deploy/k3s/Dockerfile.test-minio .
 docker tag "$socat_image" "$secret_prep_image"
-docker tag "$minio_image" "$minio_runtime_image"
 docker save \
   sandboxd-fixed-runtime:local \
   sandbox-gateway:local \
