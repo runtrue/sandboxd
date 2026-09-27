@@ -118,3 +118,17 @@ replacement P99, one peak arrival per second, a two-task burst, and a 25
 percent capacity margin. The evaluator requires twelve configured clean workers
 and reports both the node count for the declared burst and the conservative
 count for consuming the full reserve at once.
+
+The GitHub-hosted k3s integration job uses
+[`tools/performance/warm-pool-ci.json`](../tools/performance/warm-pool-ci.json)
+with a two-second activation P99 budget. Hosted runs on September 15 and 22,
+2026 measured 1,495 ms and 1,504 ms respectively with the same source revision.
+This CI regression budget retains the reference policy's two concurrent starts,
+100 samples, nine-second replacement budget, and capacity checks. Timing includes
+`kubectl exec` and the complete locked topology startup. Passing it does not
+establish the one-second production objective; run the default policy on the
+intended production node cohort to validate that objective.
+
+The workflow runs all functional conformance checks, including multi-node
+recovery, before the performance gate. Changes to the performance scripts and
+policy trigger the workflow as well.

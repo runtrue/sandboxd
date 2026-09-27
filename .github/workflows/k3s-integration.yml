@@ -18,6 +18,7 @@ on:
       - "tools/test-k3s-multinode-recovery.sh"
       - "tools/test-k3s-image-preparation.sh"
       - "tools/test-k3s-userspace-egress.sh"
+      - "tools/performance/**"
   push:
     branches: [main]
     paths:
@@ -36,6 +37,7 @@ on:
       - "tools/test-k3s-multinode-recovery.sh"
       - "tools/test-k3s-image-preparation.sh"
       - "tools/test-k3s-userspace-egress.sh"
+      - "tools/performance/**"
   schedule:
     - cron: "41 3 * * 2"
   workflow_dispatch:
@@ -250,17 +252,18 @@ jobs:
           bash tools/test-k3s-autoscaling.sh \
             | tee k3s-diagnostics/autoscaling.log
 
-      - name: Enforce warm-pool activation SLO
-        run: |
-          tools/performance/run-warm-pool-slo.sh \
-            --output k3s-diagnostics/warm-pool-slo.json
-
       - name: Run multi-node durable recovery conformance
         env:
           MULTINODE_DIAGNOSTICS_DIR: k3s-diagnostics
         run: |
           bash tools/test-k3s-multinode-recovery.sh \
             | tee k3s-diagnostics/multinode-recovery.log
+
+      - name: Enforce hosted-runner warm-pool performance budget
+        run: |
+          tools/performance/run-warm-pool-slo.sh \
+            --policy tools/performance/warm-pool-ci.json \
+            --output k3s-diagnostics/warm-pool-slo.json
 
       - name: Collect diagnostics
         if: always()
