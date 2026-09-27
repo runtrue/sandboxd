@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes the worker's security-relevant design. Operational
-instructions live in [install.md](install.md); the wire contract lives in
+instructions are in [install.md](install.md); the wire protocol is in
 [control-plane.md](control-plane.md).
 
 ## Trust boundary
@@ -23,8 +23,8 @@ image store, state store, artifact store, and artifact master key are trusted.
 
 The security boundary for guest code is gVisor plus host namespaces and cgroup
 containment. Access to the operator socket grants worker administration. The
-workload socket additionally requires a valid signed work order; the configured
-broker and signer are part of the trusted control-plane boundary.
+workload socket also requires a valid signed work order; the configured broker
+and signer are part of the trusted control-plane boundary.
 
 ## Sandbox ownership
 
@@ -35,8 +35,8 @@ unexpired assignment epoch. Batch runs and failed starts enter terminal
 `completed`. Cancellation, quarantine, lease expiry, and reassignment fence a
 serving route before another epoch may own the sandbox.
 
-A sandbox—not an individual container—is the unit of create, placement, pause,
-resume, snapshot, restore, recovery, and destruction. It owns:
+Create, placement, pause, resume, snapshot, restore, recovery, and destruction
+operate on the whole sandbox. Each sandbox owns:
 
 ```text
 sandbox
@@ -44,14 +44,14 @@ sandbox
   |-- root OCI container
   |-- zero or more child OCI containers
   |-- one host network namespace and veth pair
-  |-- service cgroup materializations
+  |-- service cgroups
   |-- zero or more private quota-backed writable roots
   |-- runsc state and process handles
   `-- portable immutable snapshot references
 ```
 
 Host paths, network interface names, process IDs, cgroup paths, and runtime
-handles are worker materializations. They do not enter topology locks or the
+handles are local to the worker. They do not enter topology locks or the
 backend-neutral snapshot data types.
 
 ## Control plane
@@ -80,11 +80,11 @@ after persistence. Recovery repairs an incomplete final record, validates
 complete state, and fences in-progress assignments. Completed transferable
 records remain fenced across restart.
 
-Each tenant/workspace/sandbox identity is reserved while create, run, or restore
-materializes host resources. Persistent instances are stored behind a
-sandbox-specific mutex. Artifact keys include the verified tenant and workspace,
-logs require a scoped live-sandbox lookup, and workload metrics contain only
-the verified scope. The immutable image cache may be shared; its
+The daemon reserves each tenant/workspace/sandbox identity while create, run,
+or restore allocates host resources. Persistent instances are stored behind a
+sandbox-specific mutex. Artifact keys include the verified tenant and
+workspace, logs require a scoped live-sandbox lookup, and workload metrics
+contain only the verified scope. The immutable image cache may be shared; its
 contents and global cache metrics are not exposed through workload stats.
 Graceful shutdown refuses to proceed while a sandbox remains active.
 
@@ -94,10 +94,10 @@ The exact request and signing contract is documented in
 ## Topology admission
 
 `sandboxctl` accepts a restricted Compose subset. Unknown fields are rejected.
-The compiler bounds service, network, argument, environment, and value counts;
-rejects privileged and ambient host features; requires internal
-networks; validates dependency order; resolves images to repository and image
-digests; and writes a canonical topology digest.
+The compiler limits service, network, argument, environment, and value counts.
+It rejects privileged and ambient host features, requires internal networks,
+and validates dependency order. It resolves images to repository and image
+digests and writes a canonical topology digest.
 
 The topology contains one versioned guest-profile identity for the complete
 sandbox. `strict-v1` is the default. Tenants can request another reviewed name
@@ -143,19 +143,19 @@ such as `/host/path:/guest/path`, protected guest destinations, unknown IDs,
 writable artifact/secret mounts, and secrets included in snapshots fail before
 image admission.
 
-`sandbox-volume` defines create, attach, mount, freeze/thaw, snapshot, restore,
-unmount, detach, delete, capability, and recovery operations over opaque
-provider handles. Operator-installed storage integrations connect at this
-boundary. The reduced directory provider derives a SHA-256 key from tenant,
-workspace, and volume ID beneath an operator-mounted PVC. It exposes only the
-canonical data leaf to runsc; tenant input never contains a claim, host path,
-or mount source. Persistent storage remains after the final detach; ephemeral
-storage is destroyed. Attachment ownership is atomically persisted before a
-mount is issued, and startup recovery clears stale ownership and reconciles an
-interrupted directory replacement after daemon or worker failure. Plain
-directory volumes use the worker Pod/PVC as their aggregate physical boundary;
-the declared per-volume quota additionally bounds portable export but is not
-misrepresented as a hard write-time directory quota.
+`sandbox-volume` defines create, attach, mount, freeze/thaw, snapshot,
+restore, unmount, detach, delete, capability, and recovery operations over
+opaque provider handles. Operator-installed storage integrations connect at
+this boundary. The reduced directory provider derives a SHA-256 key from
+tenant, workspace, and volume ID beneath an operator-mounted PVC. It exposes
+only the canonical data leaf to runsc; tenant input never contains a claim,
+host path, or mount source. Persistent storage remains after the final detach;
+ephemeral storage is destroyed. Attachment ownership is atomically persisted
+before a mount is issued, and startup recovery clears stale ownership and
+reconciles an interrupted directory replacement after daemon or worker
+failure. Plain directory volumes share the worker Pod/PVC's physical storage
+limit. The declared per-volume quota limits portable exports but does not
+enforce a per-directory quota during writes.
 
 Artifact volumes resolve a provider-owned regular file by its SHA-256 digest,
 verify it is immutable, and expose it only through a read-only bind mount.
@@ -201,13 +201,13 @@ Generated OCI specifications provide:
 - read-only OCI roots unless the topology explicitly requests an authorized
   quota-backed writable root;
 - bounded tmpfs mounts for `/dev`, `/tmp`, and `/work`;
-- read-only `/etc/hosts` and `/etc/resolv.conf` materializations;
+- read-only `/etc/hosts` and `/etc/resolv.conf` files;
 - isolated PID, network, IPC, UTS, and mount namespaces;
 - masked sensitive proc/sys paths; and
 - no raw networking, host Unix sockets, host FIFOs, or directfs.
 
 The worker always installs `strict-v1` (UID/GID 65534, no capabilities).
-Operators may additionally install `root-in-sandbox-v1` (guest UID/GID 0, no
+Operators may also install `root-in-sandbox-v1` (guest UID/GID 0, no
 capabilities) and `oci-compat-v1`. The compatibility profile grants only
 `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_SETGID`, and
 `CAP_SETUID` inside gVisor. It never grants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
@@ -216,10 +216,10 @@ host namespace access. Every CRI child uses the same sandbox-wide profile, so
 a child cannot exceed its parent sandbox. Ping capability responses report the
 installed identities and these exact restrictions.
 
-Every runsc control command has a subprocess deadline. A wedged state, pause,
+Every runsc control command has a subprocess deadline. A stuck state, pause,
 resume, checkpoint, kill, or delete command cannot hold a daemon request
-indefinitely. Failed cleanup preserves its recovery journal so a daemon restart
-can retry deletion of runsc, network, and cgroup materializations.
+indefinitely. Failed cleanup preserves its recovery journal so a daemon
+restart can retry deletion of runsc state, network resources, and cgroups.
 
 ## Networking
 
@@ -240,14 +240,14 @@ HTTP proxy targets.
 
 The reduced userspace-network deployment keeps gVisor networking disabled and
 mounts only a read-only Unix-socket transport directory into the guest. One
-unprivileged `runtrue-sandbox-net-agent` service exposes an HTTP proxy on shared
-guest loopback and registers reverse tunnels for explicitly selected ingress
-services. It re-reads the read-only route configuration before each tunnel so
-pause, resume, restore, and reassignment use only the current epoch credential.
-The agent is a static executable baked into the measured application image; it
-needs no capability, device, host path, cluster network, or shared library.
-This mode intentionally cannot provide transparent TCP, guest DNS, UDP, or
-QUIC.
+unprivileged `runtrue-sandbox-net-agent` service exposes an HTTP proxy on
+shared guest loopback and registers reverse tunnels for explicitly selected
+ingress services. It re-reads the read-only route configuration before each
+tunnel so pause, resume, restore, and reassignment use only the current epoch
+credential. The agent is a static executable included in the measured
+application image; it needs no capability, device, host path, cluster network,
+or shared library. This mode does not support transparent TCP, guest DNS, UDP,
+or QUIC.
 
 `restricted_tcp` is intended only for a signer-approved topology. Its canonical
 destination CIDR and port rules are rendered into the sandbox nftables table;
@@ -306,7 +306,7 @@ is the aggregate sandbox storage ceiling.
 
 The shared Sentry performs guest work for every container. Host cgroup metrics
 therefore establish the sandbox containment boundary. Policy fields named
-`per_service` configure host process materializations; they do not provide
+`per_service` configure limits for host processes; they do not provide
 independent guest-container CPU or memory accounting.
 
 ## Lifecycle
@@ -399,8 +399,7 @@ and total snapshot sizes before publication into an empty read-only directory.
 It authenticates every encrypted chunk, re-hashes every plaintext file, and
 checks tenant scope, sandbox identity, source and destination workers,
 monotonically increasing assignment epoch, stop-and-move grant or signed live
-recovery fence, provider
-portability, topology, runsc state format and version, runtime configuration,
+recovery fence, provider portability, topology, runsc state format and version, runtime configuration,
 CPU features, architecture, and operating system. These checks finish before
 destination cgroups, namespaces, or runsc state are allocated. The root restore
 starts first; every child container then supplies its replacement OCI spec and

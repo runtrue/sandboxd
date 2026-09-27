@@ -20,13 +20,13 @@ representing the project.
 
 ## Enforcement
 
-Report conduct concerns through the repository's
-[private reporting form](https://github.com/runtrue/sandboxd/security/advisories/new)
-and begin the title with `Conduct report`. This project uses that maintainer-only
+Report conduct concerns through the repository's [private reporting
+form](https://github.com/runtrue/sandboxd/security/advisories/new) and begin
+the title with `Conduct report`. This project uses that maintainer-only
 channel because it does not publish a separate conduct-reporting mailbox. Do
 not include vulnerability details unless the same report also concerns a
-security issue. Reports will be reviewed promptly and handled as confidentially
-as practical.
+security issue. Maintainers will review reports promptly and keep them as
+confidential as practical.
 
 Maintainers may edit or remove contributions and may warn, temporarily restrict,
 or permanently ban participants whose behavior is inconsistent with this

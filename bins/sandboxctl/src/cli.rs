@@ -91,7 +91,7 @@ pub(crate) enum Command {
         maximum_cache_artifacts: usize,
         #[arg(long, default_value_t = 68_719_476_736_u64)]
         maximum_cache_bytes: u64,
-        /// Return nonzero after emitting JSON when a reviewed root is unhealthy.
+        /// Write the JSON report, then exit with a nonzero status if a reviewed root is unhealthy.
         #[arg(long)]
         require_healthy: bool,
     },

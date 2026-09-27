@@ -1,4 +1,4 @@
-"""Latency and throughput measurement primitives."""
+"""Calculate latency statistics and measure throughput."""
 
 from __future__ import annotations
 

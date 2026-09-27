@@ -6,10 +6,11 @@ The Python programs are inline Compose commands. The client resolves `server`,
 verifies its HTTP response, and exits. The lifecycle script then pauses,
 inspects, resumes, and stops the sandbox before verifying cleanup.
 
-The lifecycle also publishes `artifact-volume.txt` twice through the operator
-socket, proving publication is idempotent, mounts the verified digest into the
-client without putting its host source path in Compose or the topology lock,
-and garbage-collects the unreferenced object after the sandbox stops.
+The lifecycle script publishes `artifact-volume.txt` twice through the
+operator socket to check that publication is idempotent. It mounts the
+verified digest into the client without putting its host source path in
+Compose or the topology lock. After the sandbox stops, it garbage-collects the
+unreferenced object.
 
 ```bash
 sudo ./examples/python-compose/run-local.sh
@@ -24,9 +25,9 @@ operator-enabled `oci-compat-v1` profile. It verifies the profile's capability
 masks, `noNewPrivileges`, blocked raw sockets, masked proc paths, and read-only
 sysctl paths.
 
-The snapshot example keeps both containers running, creates and restores a live
-copy while the source continues, then performs a stop-and-move restore under a
-second sandbox identity. The client opts into a quota-backed writable OCI root
-and atomically updates `/var/tmp/snapshot-counter`. Both paths verify that the
-persistent connection and writable-root state survived and continued
-advancing, and that a larger payload retains its digest, mode, and size.
+The snapshot example keeps both containers running, creates and restores a
+live copy while the source continues, then performs a stop-and-move restore
+under a second sandbox identity. The client opts into a quota-backed writable
+OCI root and atomically updates `/var/tmp/snapshot-counter`. Both paths verify
+that the persistent connection survives and writable-root updates continue.
+They also check that a larger payload retains its digest, mode, and size.

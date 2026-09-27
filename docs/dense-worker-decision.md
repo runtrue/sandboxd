@@ -14,10 +14,10 @@ The dense mode had to pass both gates before implementation:
    cleanup, and failure boundaries without a privileged Pod, host path, host
    namespace, host runtime socket, or general-purpose node agent.
 
-The thresholds reflect the minimum material gain required to offset a larger
-trusted computing base, multi-tenant worker lifecycle, more complex
-reconciliation, and an increased failure blast radius. They were fixed before
-the retained measurement.
+These thresholds set the minimum savings needed to justify a larger trusted
+computing base and the extra work of managing multiple tenants in one worker.
+A worker failure would also affect more sandboxes. The thresholds were fixed
+before the recorded measurement.
 
 ## Reproducible measurement
 
@@ -36,10 +36,10 @@ It ran commit `abaf313000f70b6d42aa6b41598acf1583dcd669` with k3s
 `v1.36.1+k3s1`, Linux `7.0.0-1009-ibm`, and runsc
 `release-20260714.0`.
 
-Sixteen real Level B workers were scheduled. Each held one independent active
+The test scheduled sixteen Level B workers. Each held one independent active
 gVisor sandbox while the script read its complete Pod cgroup. The dense result
-is deliberately more favorable than an implementation could be: it charges
-one median clean-worker footprint, adds only each measured active-minus-idle
+is deliberately more favorable than an implementation could be: it charges one
+median clean-worker footprint, adds only each measured active-minus-idle
 sandbox increment, shares the entire declared broker request, and assigns zero
 cost to slot state, cgroup enforcement, monitoring, cleanup, contention, and
 the broker itself.
@@ -57,20 +57,20 @@ sequentially took 13.024 seconds; replacing them after concurrent stop took
 
 The optimistic dense bound saved only 3.94% of measured worker memory and
 improved brokered scheduler packing from 58 to 64 slots, or 10.34%. It also
-changed one worker failure from one lost sandbox to 16. Both economic results
-missed their thresholds before any dense-mode overhead was charged.
+changed one worker failure from one lost sandbox to 16. Both memory savings
+and packing improvements fell below their thresholds before accounting for
+dense-mode overhead.
 
-Exploratory 32-slot burst runs strengthened the rejection: one successful run
-had 18.460-second P99 activation and 11.022-second P99 replacement, while
-subsequent high-pressure runs exercised fail-closed worker quarantine and a
-resource kill. Those stress runs are operational evidence, not inputs to the
-retained sequential economics result.
+In an exploratory 32-slot burst run, P99 activation took 18.460 seconds and
+P99 replacement took 11.022 seconds. Later stress runs triggered fail-closed
+worker quarantine and a resource kill. These runs document behavior under
+load; the memory and packing calculations above use the sequential run.
 
 ## Security and operational cost
 
 Kubernetes applies CPU, memory, PID, and ephemeral-storage enforcement to a
-Pod, not to tenant-selected process groups inside one Pod. A hard dense mode
-would therefore need one of:
+Pod, not to tenant-selected process groups inside one Pod. A dense mode with
+hard per-sandbox limits would therefore need one of:
 
 - a writable cgroup-v2 subtree delegated by the host runtime;
 - a privileged or host-integrated node agent; or
@@ -100,7 +100,7 @@ measured shareable worker overhead is small.
 - A node or worker failure affects one active tenant sandbox per worker Pod.
 
 Reconsider this decision only if Kubernetes or the selected runtime exposes a
-standard, non-privileged hard sub-Pod resource boundary and a new retained
+standard, non-privileged hard sub-Pod resource boundary and a new recorded
 benchmark passes both gates on representative small, standard, and large
 resource shapes.
 

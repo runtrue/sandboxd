@@ -1,9 +1,9 @@
 # Durable placement repository
 
-`runtrue-sandbox-placement` is the shared correctness boundary for placement
-replicas. PostgreSQL, rather than process memory, owns accepted queue entries,
-idempotency, typed operations, worker state, assignment epochs, leases,
-terminal responses, and the audit chain.
+`runtrue-sandbox-placement` coordinates placement replicas through PostgreSQL.
+The database stores accepted queue entries, idempotency, typed operations,
+worker state, assignment epochs, leases, terminal responses, and the audit
+chain.
 
 The repository enforces:
 
@@ -45,24 +45,25 @@ ON sandboxd_placement.pool_activations
 TO sandboxd_placement_runtime;
 ```
 
-The narrow row-delete grant only bounds completed activation measurements; no
-request, worker, assignment, audit, or tenant-policy row is deletable by this
-role. Do not grant database ownership, schema creation, table DDL, role
-administration, replication, or superuser privileges.
+The delete grant lets the runtime role prune completed activation
+measurements. It cannot delete request, worker, assignment, audit, or
+tenant-policy rows. Do not grant database ownership, schema creation, table
+DDL, role administration, replication, or superuser privileges.
 
-The repository is intentionally not a tenant-facing API.
+Tenant clients cannot call the placement repository directly.
 
-`runtrue-sandbox-gateway` is the stateless tenant-facing HTTP boundary. Tenant,
-subject, workspace, deadline, topology, shape, and cohort authorization come
-from an owner-only hashed-token policy. Pool selection is restricted by that
-policy and resolved against the bounded operator catalog; tenant identity is
-never accepted from the request body. The gateway can submit, inspect, cancel,
-stream placement records, and forward bounded HTTP to a declared ingress
-service on an active assignment. It has no Kubernetes client, service-account
-token, tenant-selected worker address, or sandboxd operator operation. Every
-replica also runs the same bounded reconciliation loop: it claims durable work,
-signs the typed operation, delivers it to the assigned broker, and publishes a
-terminal response only while that lease epoch still wins.
+`runtrue-sandbox-gateway` is the stateless tenant-facing HTTP boundary.
+Tenant, subject, workspace, deadline, topology, shape, and cohort
+authorization come from an owner-only hashed-token policy. Pool selection is
+restricted by that policy and resolved against the bounded operator catalog;
+tenant identity is never accepted from the request body. The gateway can
+submit, inspect, cancel, stream placement records, and forward bounded HTTP to
+a declared ingress service on an active assignment. It has no Kubernetes
+client, service-account token, tenant-selected worker address, or sandboxd
+operator operation. Every replica also runs the same bounded reconciliation
+loop: it claims durable work, signs the typed operation, delivers it to the
+assigned broker, and publishes a terminal response only while that lease epoch
+is current.
 
 Ingress forwarding uses
 `/v1/placements/{idempotency_key}/ingress/{service}/{container_port}/{path}`.
@@ -79,13 +80,13 @@ until cancellation or fencing.
 `GET /v1/placements/{idempotency_key}/events` returns authenticated
 `text/event-stream` placement snapshots. It emits only when the durable record
 changes, remains open for `serving`, and closes after completed, cancelled, or
-expired. Each replica admits
-at most 64 concurrent streams, retains one bounded last snapshot plus the
-bounded outgoing event per stream, and polls PostgreSQL at a fixed interval. A
-client may reconnect to any replica because the stream owns no correctness
-state. Events contain the same tenant-scoped fields as inspection and never
-expose queue position or another tenant's identity. Database failures produce a
-generic terminal error event without internal details.
+expired. Each replica admits at most 64 concurrent streams, retains one
+bounded last snapshot plus the bounded outgoing event per stream, and polls
+PostgreSQL at a fixed interval. A client may reconnect to any replica because
+PostgreSQL retains the placement state. Events contain the same tenant-scoped
+fields as inspection and never expose queue position or another tenant's
+identity. Database failures produce a generic terminal error event without
+internal details.
 
 The deployment in `deploy/k3s/sandbox-gateway.yaml` runs as UID/GID 65532 with
 no Linux capabilities, no privilege escalation, a read-only root, RuntimeDefault
@@ -170,8 +171,8 @@ Pool demand, fresh clean/leased/draining workers, the idle clock, desired
 capacity, and quota backpressure are reconciled transactionally in PostgreSQL.
 Duplicate controllers serialize their decision and a restart resumes from the
 same idle clock. Kubernetes replica count is an explicit observation rather
-than inferred from registrations, so stale worker rows cannot manufacture
-capacity.
+than inferred from registrations, so stale worker rows cannot inflate the
+available capacity.
 
 The same exact worker credential may request a fail-closed state transition at
 `POST /internal/v1/workers/{worker_id}/drain` or
@@ -185,12 +186,12 @@ return to service through either endpoint.
 The dispatcher uses bounded worker scans and request timeouts. An ambiguous
 network failure leaves the assignment leased; lease reconciliation quarantines
 that worker before a higher epoch is requeued. The same periodic transaction
-terminalizes queued requests whose client deadlines elapsed, even when no
-worker is available, so they cannot retain queue quota indefinitely.
-PostgreSQL stores the complete typed operation and bounded response, while
-audit rows contain only identity, epoch, worker, event, and result digest.
-Successful `create` and `restore` responses enter `serving`: the worker stays
-leased, authenticated heartbeats extend only an unexpired serving lease, and
-ingress remains routable. Cancel, quarantine, or lease expiry fences the worker
-and removes the route. Batch operations and failed service starts enter
-terminal `completed`.
+marks queued requests as expired when their client deadlines have elapsed,
+even when no worker is available, so they cannot retain queue quota
+indefinitely. PostgreSQL stores the complete typed operation and bounded
+response, while audit rows contain only identity, epoch, worker, event, and
+result digest. Successful `create` and `restore` responses enter `serving`.
+The worker stays leased and ingress remains routable. Authenticated heartbeats
+extend only an unexpired serving lease. Cancel, quarantine, or lease expiry
+fences the worker and removes the route. Batch operations and failed service
+starts enter terminal `completed`.

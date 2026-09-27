@@ -3,9 +3,9 @@
 ## Pull request benchmark
 
 A collaborator with `write`, `maintain`, or `admin` permission can comment
-exactly `/perf` on a pull request targeting `main`. The same test can be started
-from the **PR performance** workflow with a pull request number, request count,
-and concurrency.
+exactly `/perf` on a pull request targeting `main`. The same test can be
+started from the PR performance workflow with a pull request number, request
+count, and concurrency.
 
 `PERF_APPROVERS`, when set, further restricts who may start a run. Its value is a
 comma-separated list of GitHub usernames.
@@ -23,7 +23,7 @@ The dedicated gVisor workflow measures guest lifecycle and snapshot operations.
 
 ### Workflow isolation
 
-Workflow and harness code come from `main`. The benchmark job verifies the
+Workflow and benchmark code come from `main`. The benchmark job verifies the
 GitHub-provided base and head commit IDs, has read-only repository access,
 receives no repository secrets, and does not persist checkout credentials.
 
@@ -84,8 +84,8 @@ measurements, record the commit, host cohort, configuration, and raw JSON.
 
 ## Dense-worker decision gate
 
-The optional multi-sandbox worker design was rejected after a real k3s
-measurement and an intentionally optimistic dense upper-bound comparison.
+The multi-sandbox worker design was rejected after a k3s benchmark. Even an
+optimistic estimate of the savings fell below the adoption thresholds.
 Reproduce the gate with:
 
 ```bash
@@ -105,7 +105,7 @@ The production workload model, pause semantics, capacity formula, and measured
 one-second activation gate are documented in
 [Workload and suspension model](workload-model.md).
 
-Run the complete primed and measured k3s gate with:
+Run the k3s warm-up and measurement phases with:
 
 ```bash
 tools/performance/run-warm-pool-slo.sh \

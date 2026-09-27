@@ -50,17 +50,18 @@ snapshotter storage, or other runtime paths. The container runs as UID 0 with a
 bounded capability set; it does not require `privileged: true`. See
 [Installation and operation](docs/install.md#run-the-worker-container).
 
-The listed runtime versions are a known-good reference rather than global pins.
-Qualify other versions with the lifecycle and snapshot integration suites in
-the target environment. Snapshot restore requires source and destination
-workers to report the same `runsc` version and runtime configuration.
+The listed runtime versions have passed the integration tests. They are not
+required for every deployment. Qualify other versions with the lifecycle and
+snapshot integration suites in the target environment. Snapshot restore
+requires source and destination workers to report the same `runsc` version and
+runtime configuration.
 
 ## Kubernetes deployment
 
-Production-oriented k3s manifests are provided for fixed-rootfs,
-private-containerd, and host-integrated feature levels. The fixed-rootfs
-profile is the recommended minimum-authority starting point; the complete
-capability and feature contract is documented in
+The k3s manifests support fixed-rootfs, private-containerd, and
+host-integrated deployments. Start with the fixed-rootfs profile, which
+requires the fewest privileges. The required capabilities and supported
+features are documented in
 [`deploy/k3s/SECURITY-PROFILES.md`](deploy/k3s/SECURITY-PROFILES.md).
 
 ## Get started
@@ -105,7 +106,8 @@ see [Installation and operation](docs/install.md).
   containerd socket or snapshotter storage.
 - A sandbox uses one shared network and port namespace.
 - A worker Pod admits exactly one active sandbox; the measured dense-worker
-  design did not justify a host cgroup broker or larger failure blast radius.
+  design did not justify a host cgroup broker or the risk of losing more
+  sandboxes when a worker fails.
 - Host CPU and memory limits apply to the complete sandbox.
 - Local artifact storage supports same-worker restore; S3-compatible storage
   supports cross-worker restore within a compatible backend cohort.

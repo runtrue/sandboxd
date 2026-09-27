@@ -1,8 +1,8 @@
 # Kubernetes deployment
 
-This directory contains production-oriented deployment profiles for running
-sandboxd as a nested gVisor worker. Start with the fixed-runtime profile and
-enable additional authority only for features that require it.
+These profiles run sandboxd as a nested gVisor worker. Start with the
+fixed-runtime profile and grant additional permissions only when a feature
+requires them.
 
 The detailed capability, host-integration, feature, and release-readiness
 matrix is in [`SECURITY-PROFILES.md`](SECURITY-PROFILES.md).
@@ -76,9 +76,10 @@ credential across replicas. The warm-pool controller owns that lifecycle.
 The fixed and dynamic profiles use a Kubernetes user namespace
 (`hostUsers: false`), disable service-account token mounting, expose no Service
 or Ingress, use no host namespace or `hostPath`, and apply a default-deny
-NetworkPolicy. The dynamic profile additionally permits DNS and TCP/443 egress
-for OCI registries; constrain those destinations with a CNI or egress gateway
-that supports FQDN policy. Their control socket exists only inside the pod.
+NetworkPolicy.
+The dynamic profile also permits DNS and TCP/443 egress for OCI registries;
+constrain those destinations with a CNI or egress gateway that supports FQDN
+policy. Their control socket exists only inside the pod.
 
 ## Cluster prerequisites
 
@@ -101,7 +102,7 @@ that supports FQDN policy. Their control socket exists only inside the pod.
   k3s profile deliberately disables its host-path provisioner.
 - A PVC storage quota and a namespace `ResourceQuota` that bounds concurrent
   preparation Jobs. The CLI limits logical cache bytes and artifact count, but
-  the CSI quota is the final physical-storage backstop.
+  the CSI quota enforces the physical storage limit.
 - A bounded, encrypted RWO CSI volume for each directory-volume worker slot.
   Plain directories provide an aggregate PVC boundary, not a hard
   per-volume quota. Use separate claims, CSI capacity, or a reviewed
@@ -174,26 +175,28 @@ and a mismatched OCI image. Pod, k3s, firewall, and image diagnostics are
 retained for every workflow run.
 
 [`tools/test-k3s-userspace-egress.sh`](../../tools/test-k3s-userspace-egress.sh)
-proves the reduced network profile in the same real cluster. It requires
-approved TLS to traverse the policy socket; denies guest DNS, direct IP, raw
-socket, metadata/private, unapproved-domain, and over-limit connection paths;
-routes authenticated ingress only to the declared service; rejects a stale
-pre-pause tunnel after resume; measures warm ingress latency and 128 KiB
-throughput; checks runsc uses `network=none` and `host-uds=open`; and compares
-host links, network namespaces, nftables, and forwarding sysctls before and
-after the nested run.
+tests the reduced network profile in the same cluster. Approved TLS must pass
+through the policy socket. The test rejects guest DNS, direct IP, raw sockets,
+metadata and private addresses, unapproved domains, and connections above the
+limit. It routes authenticated ingress only to the declared service and
+rejects a stale pre-pause tunnel after resume. It measures warm ingress latency
+and 128 KiB throughput, checks that runsc uses `network=none` and
+`host-uds=open`, and compares host links, network namespaces, nftables, and
+forwarding sysctls before and after the nested run.
 
 [`tools/test-k3s-image-preparation.sh`](../../tools/test-k3s-image-preparation.sh)
-drives the isolated preparation and reduced-runtime boundary in the same real
-cluster. It resolves a mutable Python tag to one immutable manifest, publishes
-the expanded root through a private containerd with no host socket, repeats the
-request and requires the same cache object, verifies the signed descriptor,
-platform, root, evidence, and worker-artifact binding, and confirms the private
-key is absent from retained content. It then starts a worker with no
-containerd, registry Secret, pull egress, host path, host namespace, or
-service-account token; requires revocation and artifact mismatch to fail before
-readiness; and creates two nested containers under gVisor. CI retains cold
-preparation time, root size, cache-hit status, and signed-root activation time.
+tests isolated image preparation and activation on a reduced worker in the
+same cluster. It resolves a mutable Python tag to one immutable manifest and
+publishes the expanded root through a private containerd with no host socket.
+Repeating the request must return the same cache object. The test verifies the
+signed descriptor, platform, root, evidence, and worker-artifact binding, and
+confirms that retained content contains no private key.
+
+It then starts a worker with no containerd, registry Secret, pull egress, host
+path, host namespace, or service-account token. Revocation and artifact
+mismatch must fail before readiness. The test also creates two nested
+containers under gVisor. CI retains cold preparation time, root size, cache-hit
+status, and signed-root activation time.
 
 [`tools/test-k3s-directory-volumes.sh`](../../tools/test-k3s-directory-volumes.sh)
 uses the production PVC overlay with a static local PV only inside the
@@ -214,9 +217,9 @@ localhost profile grants exactly those operations. The reduced worker does not
 inherit any preparation capability.
 
 Production application images for this profile include the released
-`runtrue-sandbox-net-agent` in their measured OCI root and declare one ordinary
-guest service that runs it. The agent requires no capability: it presents a
-loopback HTTP proxy to applications, consumes only the read-only policy
+`runtrue-sandbox-net-agent` in their measured OCI root and declare one
+ordinary guest service that runs it. The agent requires no capability. It
+provides a loopback HTTP proxy to applications, uses only the read-only policy
 transports under `/run/lock`, and opens reverse tunnels only for services
 selected with `--ingress-service`. The conformance image retains its compact
 Python protocol fixture so the fixed upstream rootfs measurement remains
@@ -501,11 +504,10 @@ devices, host mounts, mount propagation, and privileged mode are not required.
 The provider derives its directory and attachment identities from tenant,
 workspace, and volume IDs. Callers never submit a claim name or worker path.
 Persistent directories survive detach and Pod replacement; ephemeral
-directories are removed during cleanup. Snapshot export rejects special
-files, hard links, sparse files, unsafe links, excessive paths/depth/count,
-unsupported extended metadata, and content beyond the declared logical
-quota. The CSI/PVC capacity remains the physical and aggregate write-time
-backstop.
+directories are removed during cleanup. Snapshot export rejects special files,
+hard links, sparse files, unsafe links, excessive paths/depth/count,
+unsupported extended metadata, and content beyond the declared logical quota.
+The CSI/PVC capacity enforces the total physical storage limit during writes.
 
 `tools/test-k3s-brokered-runtime.sh` exercises the network-facing path through
 an integration-only loopback PostgreSQL sidecar:
@@ -524,7 +526,7 @@ socket, or service-account token.
 
 ## Runtime configuration
 
-Production behavior is selected by typed command-line options:
+Configure production behavior with these typed command-line options:
 
 - `--fixed-rootfs` and `--fixed-topology-lock` enable a pre-expanded image
   provider bound to the lock's single verified OCI image identity, without
@@ -552,7 +554,7 @@ Production behavior is selected by typed command-line options:
 - `--cgroup-mode managed` creates sandboxd-owned cgroup-v2 subtrees.
 - `--resource-shape` and the accompanying CPU, memory, PID, ephemeral-storage,
   and service ceilings define the guest admission budget. The Pod limit is a
-  larger enforcement envelope that includes runsc, Sentry, gofers, sandboxd,
+  larger resource budget that includes runsc, Sentry, gofers, sandboxd,
   and cleanup overhead.
 
 The daemon validates these options at startup. There are no deployment-only
@@ -563,13 +565,13 @@ environment-variable shortcuts.
 The checked-in fixed and dynamic manifests run single-use worker Deployments
 with bounded `emptyDir` volumes. The Pod-level policy remains `Always`, as
 required by a Deployment, while Kubernetes 1.36's per-container restart policy
-sets sandboxd to `Never`. Exit code 75 therefore makes the Pod terminal and the
-ReplicaSet creates a fresh Pod with fresh storage instead of restarting
-sandboxd in the contaminated Pod. This requires the `ContainerRestartRules`
-feature available in the pinned Kubernetes cohort. Terminal Pod objects do not
-retain running processes or `emptyDir` data, but the control plane keeps them
-for diagnostics until garbage collection; the dedicated cohort therefore uses
-a bounded `terminated-pod-gc-threshold`. These manifests provide one static
+sets sandboxd to `Never`. Exit code 75 therefore makes the Pod terminal and
+the ReplicaSet creates a fresh Pod with fresh storage instead of restarting
+sandboxd in the used Pod. This requires the `ContainerRestartRules` feature
+available in the pinned Kubernetes cohort. Terminal Pod objects do not retain
+running processes or `emptyDir` data, but the control plane keeps them for
+diagnostics until garbage collection; the dedicated cohort therefore uses a
+bounded `terminated-pod-gc-threshold`. These manifests provide one static
 clean slot; the worker-pool manifests below provide the warm-pool controller.
 Cross-worker recovery also requires shared S3 artifact configuration and
 multi-node qualification. Before enabling durable operation:
@@ -604,26 +606,29 @@ StatefulSet reconciliation consume this catalog; the static Deployment below
 remains the single-worker conformance fixture.
 
 `sandboxd-worker-pools.yaml` pre-creates three reviewed StatefulSets at zero
-replicas: retained-warm loopback, scale-to-zero userspace ingress, and reviewed
-cold fallback. Worker Pods still have `automountServiceAccountToken: false`;
-they carry neither a Kubernetes credential nor a shared worker-registration
-secret. The autoscaler registers only Ready Pods owned by the exact reviewed
-StatefulSet, derives `worker-<pod-uid>`, and records the catalog-fixed topology,
-shape, cohort, broker address, and resource ceilings in PostgreSQL.
-It continues heartbeat renewal for an already registered worker while
-sandboxd's container is Running and a bounded direct request to that Pod's
-broker succeeds. Kubernetes phase alone is never lease evidence, because it can
-remain stale during node loss. Readiness intentionally becomes false while that
-worker is occupied.
-Only the userspace pool receives DNS and TCP/443 Pod egress; none of the pools
-has a Kubernetes Service, Ingress, host port, or host-network access.
-Worker Pods are balanced across available sandbox-node hostnames with a soft
-topology spread constraint. The reference retained-warm policy keeps twelve
-clean workers, sized for one peak assignment per second over the measured
-nine-second replacement budget, a two-task burst, a one-second worker
-stabilization window, and a 25 percent margin.
-Run `tools/performance/run-warm-pool-slo.sh` on the exact deployment cohort
-before adopting its one-second activation objective; see
+replicas: retained-warm loopback, scale-to-zero userspace ingress, and
+reviewed cold fallback. Worker Pods still have
+`automountServiceAccountToken: false`; they carry neither a Kubernetes
+credential nor a shared worker-registration secret. The autoscaler registers only Ready Pods owned by
+the exact reviewed StatefulSet, derives `worker-<pod-uid>`, and records the
+catalog-fixed topology, shape, cohort, broker address, and resource ceilings
+in PostgreSQL.
+
+The autoscaler continues heartbeat renewal for an already registered worker
+while sandboxd's container is Running and a bounded direct request to that
+Pod's broker succeeds. Kubernetes phase alone cannot confirm a live lease
+because it can remain stale during node loss. Readiness becomes false while
+that worker is occupied.
+
+Only the userspace pool receives DNS and TCP/443 Pod egress; none of the pools has a Kubernetes Service, Ingress, host
+port, or host-network access.
+
+Worker Pods are balanced across available sandbox-node hostnames with a soft topology spread constraint. The reference
+retained-warm policy keeps twelve clean workers, sized for one peak assignment
+per second over the measured nine-second replacement budget, a two-task burst,
+a one-second worker stabilization window, and a 25 percent margin. Run
+`tools/performance/run-warm-pool-slo.sh` on the exact deployment cohort before
+adopting its one-second activation objective; see
 [`docs/workload-model.md`](../../docs/workload-model.md).
 
 `sandbox-autoscaler.yaml` is the only component in this path with a Kubernetes
@@ -662,9 +667,9 @@ response, so `first_output` records that first observable response; a future
 streaming worker protocol can persist an earlier timestamp without changing
 the metric contract.
 
-Scale-down is StatefulSet-ordinal-safe. The controller examines the exact
-highest ordinals Kubernetes will remove, atomically changes only clean workers
-to `draining`, and then patches the replica count with the observed resource
+Before scaling down, the controller checks the highest StatefulSet ordinals,
+which Kubernetes removes first. It atomically changes only clean workers to
+`draining`, and then patches the replica count with the observed resource
 version. A leased, missing, starting, quarantined, or consumed trailing worker
 blocks ordinary scale-down. A failed patch leaves workers draining and
 unroutable for a safe retry. Duplicate controllers serialize their durable
