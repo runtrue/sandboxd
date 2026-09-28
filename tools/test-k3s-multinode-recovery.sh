@@ -21,8 +21,7 @@ agent_volume=sandboxd-k3s-recovery-agent-data
 agent_identity_volume=sandboxd-k3s-recovery-agent-identity
 api_forward=sandboxd-k3s-recovery-api-forward
 agent_forward=sandboxd-k3s-recovery-agent-forward
-minio_image='minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e'
-minio_runtime_image='minio/minio:sandboxd-recovery-local'
+minio_runtime_image='sandboxd-test-minio:local'
 k3s_image='rancher/k3s:v1.36.1-k3s1@sha256:08fdebd14db9ab7d5ea821d5bfa95d02341a6ef886842fcc8d9dfd0e9fa9e0cd'
 socat_image='alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e'
 secret_prep_image='alpine/socat:sandboxd-secret-prep-local'
@@ -43,6 +42,8 @@ cleanup() {
     cp "$temporary/autoscaler.log" \
       "$temporary/database-forward.log" \
       "$temporary/gateway-forward.log" \
+      "$MULTINODE_DIAGNOSTICS_DIR/" 2>/dev/null || true
+    cp "$temporary/recovery-metrics.prom" \
       "$MULTINODE_DIAGNOSTICS_DIR/" 2>/dev/null || true
     cp "$temporary"/*-submitted.json \
       "$temporary"/*-recovered.json \
@@ -149,9 +150,9 @@ kubectl label node "$primary_node" \
 
 pull_image "$k3s_image"
 pull_image "$socat_image"
-pull_image "$minio_image"
+docker build --tag "$minio_runtime_image" \
+  --file deploy/k3s/Dockerfile.test-minio .
 docker tag "$socat_image" "$secret_prep_image"
-docker tag "$minio_image" "$minio_runtime_image"
 docker save \
   sandboxd-fixed-runtime:local \
   sandbox-gateway:local \
@@ -569,7 +570,7 @@ done
 curl -fsS "http://127.0.0.1:${gateway_port}/health/ready" >/dev/null
 
 lock="$temporary/multinode-recovery.lock.json"
-target/release/runtrue-sandboxctl \
+"${privilege[@]}" target/release/runtrue-sandboxctl \
   --ctr /usr/bin/ctr \
   --containerd-address /run/k3s/containerd/containerd.sock \
   --containerd-namespace k8s.io \
@@ -841,10 +842,13 @@ if [[ "$recovery_faults" != pod ]]; then
 fi
 
 metrics=$(curl -fsS "http://127.0.0.1:${metrics_port}/metrics")
+printf '%s\n' "$metrics" >"$temporary/recovery-metrics.prom"
 for phase in recovery_rpo recovery_rto; do
-  for quantile in 0.5 0.95 0.99; do
+  # Match the quantile labels emitted by the autoscaler's Prometheus renderer.
+  for quantile in 0.50 0.95 0.99; do
     grep -F \
       "sandboxd_pool_latency_milliseconds{pool=\"fixed-standard-warm\",phase=\"${phase}/standard-v1\",quantile=\"${quantile}\"}" \
       <<<"$metrics" >/dev/null
   done
 done
+echo "multi-node durable recovery conformance passed"
