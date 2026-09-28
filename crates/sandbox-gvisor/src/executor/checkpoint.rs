@@ -279,16 +279,22 @@ pub(super) fn snapshot(
     let resources = sandbox.resources.as_ref().ok_or_else(|| {
         SandboxError::Runtime("active sandbox has no runtime resources".to_owned())
     })?;
-    let control_id = resources
-        .processes
-        .values()
-        .find(|process| {
+    // A short-lived child can exit after its state probe. Prefer the sandbox root.
+    let control_id = std::iter::once(resources.sandbox_runtime_id.as_str())
+        .chain(
+            resources
+                .processes
+                .values()
+                .map(|process| process.id.as_str())
+                .filter(|id| *id != resources.sandbox_runtime_id),
+        )
+        .find(|id| {
             matches!(
-                resources.runsc.state(&process.id).as_deref(),
+                resources.runsc.state(id).as_deref(),
                 Ok("running" | "paused")
             )
         })
-        .map(|process| process.id.clone())
+        .map(str::to_owned)
         .ok_or_else(|| SandboxError::Runtime("sandbox has no checkpointable service".to_owned()))?;
     let captured_from = match sandbox.state {
         GvisorSandboxState::Running => LifecycleState::Running,
