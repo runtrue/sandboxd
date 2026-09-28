@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-minio_image='minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e'
+minio_image='sandboxd-test-minio:local'
 container_name="sandboxd-s3-test-$$"
 access_key='sandboxd-test-access'
 secret_key='sandboxd-test-secret-key'
@@ -12,6 +12,9 @@ cleanup() {
   docker rm --force "$container_name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+docker build --tag "$minio_image" \
+  --file deploy/k3s/Dockerfile.test-minio .
 
 docker run --detach --rm \
   --name "$container_name" \

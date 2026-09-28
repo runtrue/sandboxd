@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "pool_name": "fixed-standard-warm",
+  "activation_p99_budget_ms": 1000,
+  "replacement_p99_budget_ms": 9000,
+  "maximum_concurrent_starts_per_node": 2,
+  "minimum_activation_samples": 100,
+  "peak_arrivals_per_second": 1,
+  "burst_tasks": 2,
+  "safety_margin_percent": 25,
+  "task_model": "fresh_sandbox_per_assignment",
+  "pause_policy": {
+    "short_pause": "retain_worker",
+    "capacity_releasing_suspend": "stop_and_move_snapshot",
+    "independent_child_pause": false
+  }
+}

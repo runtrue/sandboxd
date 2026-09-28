@@ -135,7 +135,7 @@ spec:
                 - ready
                 - --socket
                 - /run/runtrue-sandboxd/control.sock
-            periodSeconds: 5
+            periodSeconds: 1
           startupProbe:
             exec:
               command:

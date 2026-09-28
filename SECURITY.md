@@ -88,6 +88,13 @@ Every pull request runs Rust tests, dependency policy checks, CodeQL analysis,
 and a reproducible release build. The release process adds S3 conformance and
 gVisor lifecycle and snapshot runs on the validated worker cohort.
 
+Production-ready or complete multi-tenant security-boundary claims additionally
+require an independent adversarial review against a signed candidate and the
+exact pinned host/runtime cohort. The review contract, target verifier, private
+finding schema, and public-summary requirements are in
+[docs/security-review](docs/security-review/README.md). Repository tests and
+maintainer self-review do not satisfy that independent gate.
+
 Run the local security checks with:
 
 ```bash

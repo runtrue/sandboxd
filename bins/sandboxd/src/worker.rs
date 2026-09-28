@@ -8,6 +8,7 @@ use std::{
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 
 const TERMINAL_MARKER: &str = "worker-terminal.json";
@@ -38,11 +39,13 @@ struct SlotState {
     generation: u64,
     assignment: Option<SandboxKey>,
     recycle_required: bool,
+    clean_since: Option<Instant>,
 }
 
 pub(crate) struct WorkerSlot {
     marker: PathBuf,
     shape: WorkerResourceShape,
+    minimum_clean_age: Duration,
     state: Mutex<SlotState>,
 }
 
@@ -57,6 +60,7 @@ impl WorkerSlot {
     pub(crate) fn open(
         control_root: &Path,
         shape: WorkerResourceShape,
+        minimum_clean_age: Duration,
     ) -> Result<Option<Self>, SandboxError> {
         shape
             .validate()
@@ -70,22 +74,30 @@ impl WorkerSlot {
         Ok(Some(Self {
             marker,
             shape,
+            minimum_clean_age,
             state: Mutex::new(SlotState {
                 state: WorkerState::Starting,
                 generation: 0,
                 assignment: None,
                 recycle_required: false,
+                clean_since: None,
             }),
         }))
     }
 
     pub(crate) fn mark_clean(&self) -> Result<(), SandboxError> {
-        self.transition(None, WorkerState::Starting, WorkerState::Clean)
+        let mut state = self.state.lock().expect("worker slot lock");
+        if state.state != WorkerState::Starting {
+            return Err(invalid_transition(state.state, WorkerState::Clean));
+        }
+        set_state(&mut state, WorkerState::Clean)?;
+        state.clean_since = Some(Instant::now());
+        Ok(())
     }
 
     pub(crate) fn lease(&self, key: &SandboxKey) -> Result<(), SandboxError> {
         let mut state = self.state.lock().expect("worker slot lock");
-        if state.state != WorkerState::Clean || state.assignment.is_some() {
+        if !self.is_ready(&state) || state.assignment.is_some() {
             return Err(SandboxError::Runtime(format!(
                 "worker slot is not available: state is {:?}",
                 state.state
@@ -147,10 +159,17 @@ impl WorkerSlot {
         WorkerStatus {
             state: state.state,
             generation: state.generation,
-            ready: state.state.is_ready(),
+            ready: self.is_ready(&state),
             recycle_required: state.recycle_required,
             resource_shape: self.shape.clone(),
         }
+    }
+
+    fn is_ready(&self, state: &SlotState) -> bool {
+        state.state.is_ready()
+            && state
+                .clean_since
+                .is_some_and(|clean_since| clean_since.elapsed() >= self.minimum_clean_age)
     }
 
     pub(crate) fn resource_shape(&self) -> &WorkerResourceShape {
@@ -242,6 +261,9 @@ fn set_state(state: &mut SlotState, next: WorkerState) -> Result<(), SandboxErro
         .checked_add(1)
         .ok_or_else(|| SandboxError::Runtime("worker state generation overflow".to_owned()))?;
     state.state = next;
+    if next != WorkerState::Clean {
+        state.clean_since = None;
+    }
     Ok(())
 }
 
@@ -280,7 +302,7 @@ mod tests {
     #[test]
     fn one_assignment_reaches_terminal_recycle_and_cannot_be_reopened() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let worker = WorkerSlot::open(directory.path(), shape())
+        let worker = WorkerSlot::open(directory.path(), shape(), Duration::ZERO)
             .expect("worker")
             .expect("clean pod");
         worker.mark_clean().expect("clean");
@@ -293,7 +315,7 @@ mod tests {
             .recycle_clean(&key("tenant-a"))
             .expect("terminal marker");
         assert!(worker.recycle_required());
-        assert!(WorkerSlot::open(directory.path(), shape())
+        assert!(WorkerSlot::open(directory.path(), shape(), Duration::ZERO)
             .expect("marker check")
             .is_none());
     }
@@ -301,7 +323,7 @@ mod tests {
     #[test]
     fn failure_quarantines_and_persists_fail_closed_state() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let worker = WorkerSlot::open(directory.path(), shape())
+        let worker = WorkerSlot::open(directory.path(), shape(), Duration::ZERO)
             .expect("worker")
             .expect("clean pod");
         worker.mark_clean().expect("clean");
@@ -312,8 +334,19 @@ mod tests {
         let status = worker.status();
         assert_eq!(status.state, WorkerState::Quarantined);
         assert!(status.recycle_required);
-        assert!(WorkerSlot::open(directory.path(), shape())
+        assert!(WorkerSlot::open(directory.path(), shape(), Duration::ZERO)
             .expect("marker check")
             .is_none());
+    }
+
+    #[test]
+    fn clean_slot_waits_for_the_configured_stabilization_age() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let worker = WorkerSlot::open(directory.path(), shape(), Duration::from_secs(60))
+            .expect("worker")
+            .expect("clean pod");
+        worker.mark_clean().expect("clean");
+        assert!(!worker.status().ready());
+        assert!(worker.lease(&key("tenant-a")).is_err());
     }
 }

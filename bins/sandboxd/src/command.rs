@@ -17,6 +17,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 work_order_key,
                 maximum_connections,
                 io_timeout_seconds,
+                minimum_clean_age_milliseconds,
                 worker_id,
                 worker_pod_uid_env,
                 resource_shape,
@@ -161,6 +162,7 @@ pub(crate) fn execute(cli: Cli) -> Result<(), SandboxError> {
                 nft,
                 maximum_connections,
                 io_timeout: std::time::Duration::from_secs(io_timeout_seconds),
+                minimum_clean_age: std::time::Duration::from_millis(minimum_clean_age_milliseconds),
             })? {
                 server::ServeOutcome::Shutdown => Ok(()),
                 server::ServeOutcome::Recycle => std::process::exit(75),

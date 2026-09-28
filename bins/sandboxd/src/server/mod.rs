@@ -84,7 +84,12 @@ pub(crate) fn serve(config: ServerConfig) -> Result<ServeOutcome, SandboxError> 
     let recovery = executor::recover(&sandbox_root, &runsc, &config.ip, &config.nft)?;
     let assignments = AssignmentLedger::open(&control_root)?;
     assignments.reconcile_after_recovery()?;
-    let Some(worker) = WorkerSlot::open(&control_root, config.resource_shape.clone())? else {
+    let Some(worker) = WorkerSlot::open(
+        &control_root,
+        config.resource_shape.clone(),
+        config.minimum_clean_age,
+    )?
+    else {
         return Ok(ServeOutcome::Recycle);
     };
     let audit = AuditLog::open(&control_root)?;

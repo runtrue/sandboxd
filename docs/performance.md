@@ -81,3 +81,57 @@ garbage-collection races, and abandoned multipart cleanup.
 
 Loopback MinIO measurements isolate provider overhead. For WAN or AWS S3
 measurements, record the commit, host cohort, configuration, and raw JSON.
+
+## Dense-worker decision gate
+
+The optional multi-sandbox worker design was rejected after a real k3s
+measurement and an intentionally optimistic dense upper-bound comparison.
+Reproduce the gate with:
+
+```bash
+tools/performance/run-density-gate.sh \
+  --slots 16 \
+  --output /tmp/sandboxd-density-gate.json
+```
+
+See [Dense multi-sandbox worker decision](dense-worker-decision.md) for the
+measured P50/P95/P99 results, security constraints, decision thresholds, and
+reconsideration criteria. The production boundary remains one active sandbox
+per worker Pod.
+
+## Warm-pool service objective
+
+The production workload model, pause semantics, capacity formula, and measured
+one-second activation gate are documented in
+[Workload and suspension model](workload-model.md).
+
+Run the complete primed and measured k3s gate with:
+
+```bash
+tools/performance/run-warm-pool-slo.sh \
+  --output /tmp/sandboxd-warm-pool-slo.json
+```
+
+The checked-in reference policy validates two concurrent activations per node,
+a one-second activation P99 over at least 100 samples, a nine-second
+replacement P99, one peak arrival per second, a two-task burst, and a 25
+percent capacity margin. The evaluator requires twelve configured clean workers
+and reports both the node count for the declared burst and the conservative
+count for consuming the full reserve at once.
+
+The k3s integration workflow runs after all functional conformance tests,
+including multi-node recovery, and waits for the conformance namespace to be
+deleted before sampling. Earlier workers, gateways, and databases would otherwise
+compete with the measured workers on the same node.
+
+GitHub-hosted runners use
+[`tools/performance/warm-pool-ci.json`](../tools/performance/warm-pool-ci.json),
+with a two-second activation P99 regression budget. Two isolated hosted runs
+measured 797 ms and 1,200 ms P99 on September 27, 2026. Both used the same runtime
+code and 100 activation samples. The CI policy retains two concurrent starts,
+the nine-second replacement budget, and all capacity checks. Passing CI does not
+establish the one-second production objective; run the default policy on the
+intended production node cohort to validate that objective.
+
+Changes to the performance tools trigger k3s integration, and the workflow uses
+Bash with `pipefail` so a script failure cannot be hidden by diagnostic logging.

@@ -55,6 +55,14 @@ Dynamic images, networking, storage, cgroups, and durable state are independent
 authority axes. Do not enable a higher level wholesale when only one axis is
 needed.
 
+Dense multi-sandbox workers are not a deployment level. The measured optimistic
+upper bound saved 3.94% active worker memory and improved brokered node packing
+10.34%, below the 25% and 20% decision gates, while multiplying the worker
+failure blast radius. Hard per-sandbox enforcement would also require Level E
+host/runtime delegation or a trusted node broker. The production profiles
+therefore retain one active sandbox per worker Pod; see
+[the retained decision](../../docs/dense-worker-decision.md).
+
 ## Linux capability contract
 
 ### Normal gVisor create path

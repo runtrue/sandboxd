@@ -160,6 +160,9 @@ pub(crate) struct ServeArgs {
     pub(crate) maximum_connections: usize,
     #[arg(long, default_value_t = 5)]
     pub(crate) io_timeout_seconds: u64,
+    /// Delay clean-slot eligibility after startup so runtime initialization settles.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) minimum_clean_age_milliseconds: u64,
     #[arg(long, default_value = "worker-local")]
     pub(crate) worker_id: String,
     /// Downward-API environment variable containing the Pod UID.

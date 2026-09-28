@@ -44,7 +44,11 @@ cleanup() {
 trap 'printf "autoscaling conformance failed at line %s\n" "$LINENO" >&2' ERR
 trap cleanup EXIT
 
-install -m 0600 deploy/k3s/worker-pools.json "$temporary/catalog.json"
+jq '
+  (.pools[] | select(.name == "fixed-standard-warm")
+    | .policy.warm_headroom) = 2
+' deploy/k3s/worker-pools.json >"$temporary/catalog.json"
+chmod 0600 "$temporary/catalog.json"
 printf %s \
   "postgres://sandboxd:sandboxd@127.0.0.1:${database_port}/sandboxd_placement_test" \
   >"$temporary/database-url"
