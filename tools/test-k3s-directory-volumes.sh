@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "directory-volume conformance failed at line %s\n" "$LINENO" >&2' ERR
 
 namespace=${SANDBOXD_K3S_NAMESPACE:-sandboxd-system}
 worker=sandboxd-fixed-runtime
@@ -10,6 +11,7 @@ pv_name="sandboxd-directory-conformance-${suffix}"
 ctl=${SANDBOXD_CTL:-target/release/runtrue-sandboxctl}
 pv_path=
 pod=
+temporary=$(mktemp -d)
 
 if [[ $(id -u) -eq 0 ]]; then
   privilege=()
@@ -18,7 +20,7 @@ else
 fi
 
 cleanup() {
-  kubectl delete deployment -n "$namespace" "$worker" \
+  kubectl delete deployment -n "$namespace" "$worker" --cascade=foreground \
     --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kubectl delete pvc -n "$namespace" sandboxd-directory-state \
     --ignore-not-found --wait=true >/dev/null 2>&1 || true
@@ -26,6 +28,7 @@ cleanup() {
   if [[ $pv_path == /var/lib/runtrue-sandboxd-directory-conformance.* ]]; then
     "${privilege[@]}" rm -rf -- "$pv_path"
   fi
+  rm -rf -- "$temporary"
   kubectl apply -f deploy/k3s/sandboxd-fixed-runtime.yaml >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -42,6 +45,7 @@ wait_for_worker() {
       jq -r --arg previous "$previous" '
         .items[]
         | select(.metadata.uid != $previous)
+        | select(.metadata.deletionTimestamp == null)
         | select(.status.phase == "Running")
         | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
         | [.metadata.name, .metadata.uid]
@@ -62,7 +66,7 @@ wait_for_worker() {
 generate_lock() {
   local compose=$1
   local output=$2
-  "$ctl" \
+  "${privilege[@]}" "$ctl" \
     --ctr /usr/bin/ctr \
     --containerd-address /run/k3s/containerd/containerd.sock \
     --containerd-namespace k8s.io \
@@ -87,7 +91,7 @@ stop_sandbox() {
     runtrue-sandboxd stop --socket "$socket" --sandbox "$sandbox" >/dev/null
 }
 
-kubectl delete deployment -n "$namespace" "$worker" \
+kubectl delete deployment -n "$namespace" "$worker" --cascade=foreground \
   --ignore-not-found --wait=true >/dev/null
 kubectl delete pvc -n "$namespace" sandboxd-directory-state \
   --ignore-not-found --wait=true >/dev/null
@@ -121,7 +125,7 @@ spec:
                 - ${node}
 EOF
 
-rendered=$(mktemp /tmp/sandboxd-directory-volumes.XXXXXX.yaml)
+rendered=$(mktemp "$temporary"/sandboxd-directory-volumes.XXXXXX.yaml)
 kubectl kustomize --load-restrictor LoadRestrictionsNone \
   deploy/k3s/directory-volumes >"$rendered"
 kubectl apply -f "$rendered" >/dev/null
@@ -139,10 +143,13 @@ jq -e '
   and ([.spec.volumes[] | select(has("hostPath"))] | length) == 0
   and ([.spec.containers[].volumeMounts[] | select(.mountPropagation != null)]
     | length) == 0
-' >/dev/null <<<"$pod_json"
+' >/dev/null <<<"$pod_json" || {
+  printf 'unexpected directory-volume worker configuration: %s\n' "$pod_json" >&2
+  exit 1
+}
 
-strict_lock=$(mktemp /tmp/sandboxd-volume-strict.XXXXXX.lock.json)
-reopen_lock=$(mktemp /tmp/sandboxd-volume-reopen.XXXXXX.lock.json)
+strict_lock=$(mktemp "$temporary"/sandboxd-volume-strict.XXXXXX.lock.json)
+reopen_lock=$(mktemp "$temporary"/sandboxd-volume-reopen.XXXXXX.lock.json)
 generate_lock deploy/k3s/conformance-volume.yaml "$strict_lock"
 generate_lock deploy/k3s/conformance-volume-reopen.yaml "$reopen_lock"
 
@@ -197,34 +204,36 @@ stop_sandbox "directory-reopen-${suffix}"
 
 previous_uid=$pod_uid
 wait_for_worker "$previous_uid"
-missing_compose=$(mktemp /tmp/sandboxd-volume-missing.XXXXXX.yaml)
+missing_compose=$(mktemp "$temporary"/sandboxd-volume-missing.XXXXXX.yaml)
 cp deploy/k3s/conformance-volume.yaml "$missing_compose"
 sed -i 's#/mnt#/missing/nested/mnt#g' "$missing_compose"
-missing_lock=$(mktemp /tmp/sandboxd-volume-missing.XXXXXX.lock.json)
+missing_lock=$(mktemp "$temporary"/sandboxd-volume-missing.XXXXXX.lock.json)
 generate_lock "$missing_compose" "$missing_lock"
-set +e
-missing=$(kubectl exec -i -n "$namespace" "$pod" -- \
+if missing=$(kubectl exec -i -n "$namespace" "$pod" -- \
   runtrue-sandboxd admit --socket "$socket" --lock /dev/stdin \
-  <"$missing_lock" 2>&1)
-status=$?
-set -e
+  <"$missing_lock" 2>&1); then
+  status=0
+else
+  status=$?
+fi
 if [[ $status -eq 0 ]] ||
   ! grep -Fq "does not exist in the admitted image" <<<"$missing"; then
   echo "missing volume mountpoint was not rejected during admission: $missing" >&2
   exit 1
 fi
 
-quota_compose=$(mktemp /tmp/sandboxd-volume-quota.XXXXXX.yaml)
+quota_compose=$(mktemp "$temporary"/sandboxd-volume-quota.XXXXXX.yaml)
 cp deploy/k3s/conformance-volume-profile.yaml "$quota_compose"
 sed -i 's/quota_bytes: 8388608/quota_bytes: 3221225472/' "$quota_compose"
-quota_lock=$(mktemp /tmp/sandboxd-volume-quota.XXXXXX.lock.json)
+quota_lock=$(mktemp "$temporary"/sandboxd-volume-quota.XXXXXX.lock.json)
 generate_lock "$quota_compose" "$quota_lock"
-set +e
-quota=$(kubectl exec -i -n "$namespace" "$pod" -- \
+if quota=$(kubectl exec -i -n "$namespace" "$pod" -- \
   runtrue-sandboxd admit --socket "$socket" --lock /dev/stdin \
-  <"$quota_lock" 2>&1)
-status=$?
-set -e
+  <"$quota_lock" 2>&1); then
+  status=0
+else
+  status=$?
+fi
 if [[ $status -eq 0 ]] ||
   ! grep -Fq "exceeds worker resource shape" <<<"$quota"; then
   echo "aggregate storage demand above the worker boundary was not rejected: $quota" >&2
@@ -232,10 +241,10 @@ if [[ $status -eq 0 ]] ||
 fi
 
 for profile in root-in-sandbox-v1 oci-compat-v1; do
-  profile_compose=$(mktemp "/tmp/sandboxd-volume-${profile}.XXXXXX.yaml")
+  profile_compose=$(mktemp "$temporary/sandboxd-volume-${profile}.XXXXXX.yaml")
   cp deploy/k3s/conformance-volume-profile.yaml "$profile_compose"
   sed -i "2i x-runtrue-guest-profile: ${profile}" "$profile_compose"
-  profile_lock=$(mktemp "/tmp/sandboxd-volume-${profile}.XXXXXX.lock.json")
+  profile_lock=$(mktemp "$temporary/sandboxd-volume-${profile}.XXXXXX.lock.json")
   generate_lock "$profile_compose" "$profile_lock"
   create=$(create_sandbox "$profile_lock" "directory-${profile}-${suffix}")
   jq -e '.ok == true and .result.running_services == 1' >/dev/null <<<"$create"
