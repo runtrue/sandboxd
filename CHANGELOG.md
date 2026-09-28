@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes to sandboxd will be recorded here. The project uses
-[Semantic Versioning](https://semver.org/) for release identifiers. During
-alpha, interfaces may evolve between `0.x` releases.
+This file records notable changes to sandboxd. The project uses [Semantic
+Versioning](https://semver.org/) for release identifiers. During alpha,
+interfaces may evolve between `0.x` releases.
 
 ## Unreleased
 

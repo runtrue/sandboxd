@@ -1,8 +1,7 @@
 # Kubernetes security profiles and feature authority
 
-This document is the deployment authority contract for sandboxd. It records
-the minimum configuration observed for each feature and separates validated
-behavior from required release work.
+This document lists the permissions each sandboxd deployment profile requires,
+the behavior tested, and the work still required before release.
 
 Validation environment on 2026-07-25:
 
@@ -18,8 +17,8 @@ device, service-account token, Service, Ingress, or host port.
 
 ## Recommended baseline
 
-The fixed-runtime profile is the least-authority normal daemon configuration
-that completed multi-container create:
+The fixed-runtime profile used the fewest privileges of the normal daemon
+configurations that passed multi-container creation:
 
 - Kubernetes user namespace (`hostUsers: false`);
 - `SETGID`, `SETUID`, `SYS_CHROOT`, and `SYS_ADMIN`, scoped to that user
@@ -43,24 +42,24 @@ live snapshot/restore of a read-only topology.
 | A. Rootless direct run | Non-root UID; all capabilities dropped; `allowPrivilegeEscalation: false` | One direct `runsc --rootless=true --network=none run` | Normal daemon create, save/restore, Netstack, managed cgroups | The node's AppArmor user-namespace restriction had to be disabled for this test. gVisor rootless documents the remaining runtime limits. This is not a viable full daemon profile. |
 | B. Fixed runtime | User namespace plus `SETGID`, `SETUID`, `SYS_CHROOT`, `SYS_ADMIN` | Fixed or signed pre-expanded images, multi-container Sentry, loopback, lifecycle APIs, directory-backed writable roots, local live snapshot, cross-worker recovery through shared S3-compatible artifacts | In-worker pulls, ingress/egress, named writable volumes, managed cgroups, recovery without a durable shared artifact backend | Custom AppArmor/seccomp and qualification against the selected production object store |
 | B-V. PVC directory volumes | Level B plus `CHOWN`, `DAC_OVERRIDE`, and one operator-selected bounded RWO PVC | Strict, root, and OCI-compatible named-volume writes; tenant-scoped persistent reopen after Pod loss; portable directory snapshot/restore between workers with compatible ownership mapping | Hard per-volume write quota on a shared directory, CSI-native snapshots, portable cross-worker restore between independently mapped Pod user namespaces | Encrypted CSI class, retention/backup policy, per-slot claims, idmapped or equivalent portable ownership, custom AppArmor/seccomp |
-| B-N. Userspace policy network | Level B; no networking capability or host-network setting; `network-mode=userspace`; gVisor `network=none` and `host-uds=open` | Policy-approved HTTP CONNECT and declared reverse HTTP ingress over one read-only mounted Unix-socket directory; static unprivileged guest agent; heartbeat-renewed serving leases; gateway/broker adapter; connection, byte, bandwidth, and deadline ceilings | Raw TCP/UDP, guest DNS, transparent proxying, software without explicit HTTP proxy support | Bake the released agent into each measured application image, restrict outer Pod egress with an FQDN-aware CNI or egress gateway, qualify custom MAC/seccomp profiles |
+| B-N. Userspace policy network | Level B; no networking capability or host-network setting; `network-mode=userspace`; gVisor `network=none` and `host-uds=open` | Policy-approved HTTP CONNECT and declared reverse HTTP ingress over one read-only mounted Unix-socket directory; static unprivileged guest agent; heartbeat-renewed serving leases; gateway/broker adapter; connection, byte, bandwidth, and deadline ceilings | Raw TCP/UDP, guest DNS, transparent proxying, software without explicit HTTP proxy support | Include the released agent in each measured application image, restrict outer Pod egress with an FQDN-aware CNI or egress gateway, qualify custom MAC/seccomp profiles |
 | B+ measured runtime | Level B plus `DAC_READ_SEARCH` | Recomputes full root digest, entry count, and byte count at admission | Same feature limits as B | Use only when runtime measurement is worth pod-wide read/search bypass authority |
 | P. Isolated image preparation | Separate user-namespaced Job with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SYS_ADMIN`; no privilege escalation; default seccomp; private containerd | Resolve a mutable reference once, verify and unpack OCI content, attach evidence, sign, atomically publish an immutable root, audit revocation/pool impact, and lock-aware GC | Sandbox execution, host-runtime access, worker credential access | FQDN-aware registry egress, external key service or short-lived signing key, CSI physical quota, custom AppArmor profile permitting only required mounts/signals |
 | C. Dynamic runtime | One user-namespaced worker container with `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, `SYS_ADMIN`, `SYS_CHROOT` and a private containerd process | Arbitrary pinned OCI pull, validation, unpack, and loopback execution | Kernel policy networking, current loop/ext4 storage, managed cgroups | Registry trust, credential delivery/rotation, image GC, egress policy, supervisor qualification, and a future safe privilege split |
-| D. Kernel networking | Level B or C plus `NET_ADMIN`, `NET_RAW`; `network-mode=private`; namespaced `net.ipv4.ip_forward=1` | Bridge/veth network, nftables policy, policy proxies, HTTP/TCP egress, ingress plumbing | Still no current writable storage or managed cgroups | Kubelet unsafe-sysctl allowlist, pod sysctl, dedicated nodes, custom network security profiles |
+| D. Kernel networking | Level B or C plus `NET_ADMIN`, `NET_RAW`; `network-mode=private`; namespaced `net.ipv4.ip_forward=1` | Bridge/veth network, nftables policy, policy proxies, HTTP/TCP egress, ingress routing | Still no current writable storage or managed cgroups | Kubelet unsafe-sysctl allowlist, pod sysctl, dedicated nodes, custom network security profiles |
 | E. Delegated cgroups or advanced CSI | Level B or B-V plus a reviewed CSI integration or trusted resource broker | CSI-native snapshots, backend-specific hard quota, delegated per-sandbox resources | Depends on the selected provider | Provider-specific fencing, recovery, quota, and threat model |
 | F. Host integrated | Privileged pod, host containerd paths/socket, bidirectional mount propagation, host-backed state | Full current image, networking, loop/ext4 storage, and cgroup implementation | No meaningful worker/host kernel boundary | Dedicated tainted nodes or VMs, strict scheduling/admission, host hardening; compatibility profile only |
 
-Dynamic images, networking, storage, cgroups, and durable state are independent
-authority axes. Do not enable a higher level wholesale when only one axis is
-needed.
+Dynamic images, networking, storage, cgroups, and durable state require
+separate permissions. Grant only the permissions needed for the features you
+use.
 
-Dense multi-sandbox workers are not a deployment level. The measured optimistic
-upper bound saved 3.94% active worker memory and improved brokered node packing
-10.34%, below the 25% and 20% decision gates, while multiplying the worker
-failure blast radius. Hard per-sandbox enforcement would also require Level E
-host/runtime delegation or a trusted node broker. The production profiles
-therefore retain one active sandbox per worker Pod; see
+Dense multi-sandbox workers are not a deployment level. The measured
+optimistic upper bound saved 3.94% active worker memory and improved brokered
+node packing 10.34%, below the 25% and 20% adoption thresholds. A worker
+failure would also affect more sandboxes. Hard per-sandbox enforcement would
+also require Level E host/runtime delegation or a trusted node broker. The
+production profiles therefore retain one active sandbox per worker Pod; see
 [the retained decision](../../docs/dense-worker-decision.md).
 
 ## Linux capability contract
@@ -77,8 +76,8 @@ therefore retain one active sandbox per worker Pod; see
 These capabilities are effective only in the Kubernetes-created user
 namespace; they are not equivalent to the same capabilities in the initial
 host user namespace. `SYS_ADMIN` remains high-risk because it exposes a broad
-kernel namespace and mount surface. User namespaces reduce host-object access,
-but they do not eliminate kernel exploit risk.
+set of kernel namespace and mount operations. User namespaces reduce
+host-object access, but they do not eliminate kernel exploit risk.
 
 Putting the four capabilities only on the `runsc` file was tested and failed:
 gVisor's internal gofer re-exec did not retain the required capability state.
@@ -225,9 +224,9 @@ signed per-topology policy remains mandatory.
 | Local live snapshot/restore, read-only root | B | Passed; restored gofers are reaped by exact recorded PID during root teardown | Repeated fault injection in each released runtime cohort |
 | Dynamic pinned OCI images inside worker | C | Passed with private containerd | Prefer P+B; otherwise registry credentials, trust policy, controlled registry egress, and GC remain worker concerns |
 | Policy-approved HTTPS CONNECT egress | B-N | Passed in local k3s without host network mutation; released static agent translates standard HTTP proxy traffic | FQDN-aware outer Pod egress; no transparent compatibility |
-| Declared reverse HTTP ingress | B-N | Full local-k3s path passed: scale-from-zero, signed dispatch, guest reverse tunnel, exact declared route, bounded bulk response, heartbeat renewal, and immediate withdrawal on cancel | Bake the released static agent into every measured application root; qualify outer FQDN egress and custom MAC/seccomp profiles |
+| Declared reverse HTTP ingress | B-N | Full local-k3s path passed: scale-from-zero, signed dispatch, guest reverse tunnel, exact declared route, bounded bulk response, heartbeat renewal, and immediate withdrawal on cancel | Include the released static agent in every measured application root; qualify outer FQDN egress and custom MAC/seccomp profiles |
 | Restricted raw TCP/UDP egress | D | Passed only in host-integrated profile | Keep disabled or qualify the kernel-network profile |
-| Kernel-network ingress | D | Plumbing exists; public exposure intentionally not tested | Prefer B-N reverse ingress; otherwise authenticated local/ClusterIP endpoint and policy tests, never host networking |
+| Kernel-network ingress | D | Routing is implemented; public exposure has not been tested | Prefer B-N reverse ingress; otherwise authenticated local/ClusterIP endpoint and policy tests, never host networking |
 | Writable OCI root | B | Strict UID write, bounded live snapshot, and cross-worker replacement restore passed through the directory-backed gVisor upper layer | Qualify the selected production object store and runtime cohort |
 | Persistent named writable volume | B-V | Strict, root, and OCI-compatible writes plus reopen after forced Pod replacement passed on a PVC-backed worker | Encrypted production CSI qualification; use separate claims/project quota when hard per-volume enforcement is required |
 | Attested root on read-only RWO content volume | P+B | Integrity, signature, mount permission, and nested execution passed | CSI-specific recovery, multi-node delivery, quota, and GC conformance |
@@ -308,14 +307,14 @@ operator/control-plane path.
    before dependents join, `service_completed_successfully` topologies fail.
    Select and manage an independent durable anchor.
 3. Secret-volume lifecycle and CSI-specific snapshot delivery still require
-   release conformance. Cross-worker directory-volume recovery additionally
+   release conformance. Cross-worker directory-volume recovery also
    needs a portable ownership mapping across Pod user namespaces.
 4. Custom AppArmor and seccomp profiles are mandatory before mutually
    untrusted workloads.
 
-Until these are closed, the fixed-runtime manifest is a hardened deployment
-candidate for controlled fixed workloads, not a blanket claim that every
-sandboxd feature is production-qualified.
+Until these issues are resolved, the fixed-runtime manifest remains a
+deployment candidate for controlled fixed workloads. It does not qualify every
+sandboxd feature for production.
 
 Relevant upstream constraints:
 

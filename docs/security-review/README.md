@@ -1,8 +1,8 @@
 # Independent security review package
 
 This package defines the release gate for an independent adversarial review of
-sandboxd. It prepares reproducible evidence; it does not replace an independent
-reviewer or assert that a review has happened.
+sandboxd. Use it to collect reproducible evidence for an independent reviewer.
+This package does not record a completed review.
 
 ## Independence and candidate identity
 
@@ -25,7 +25,7 @@ git push origin security-review-candidate-20260725.1
 Candidate tags use the `security-review-candidate-YYYYMMDD.N` namespace and do
 not trigger artifact publication. Do not move or reuse a candidate tag. Any
 code change after review starts requires a new candidate tag and explicit
-reviewer confirmation of the delta.
+reviewer confirmation of the changes.
 
 The reviewer checks out the tag in a clean clone, builds all in-scope images
 from that checkout, and runs:
@@ -51,8 +51,8 @@ review evidence.
 
 ## Minimum adversarial scope
 
-Passing existing tests is a starting point, not the review result. The reviewer
-must attempt bypasses and failure cases in every row.
+The reviewer must reproduce the existing tests and attempt bypasses and
+failure cases in every row.
 
 | Boundary | Required implementation areas | Existing evidence to reproduce | Required adversarial emphasis |
 | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ mandatory.
 
 Critical and high findings must be fixed, regression-tested, and retested by
 the independent reviewer against a new signed candidate before sandboxd is
-positioned as production-ready or as a complete multi-tenant security boundary.
+described as production-ready or as a complete multi-tenant security boundary.
 They cannot pass this gate through risk acceptance. Medium and lower findings
 require an explicit disposition and tracked remediation or documented residual
 risk.
@@ -93,4 +93,4 @@ Completion requires a public document derived from
 [`public-summary-template.md`](public-summary-template.md). The reviewer must
 approve it. It identifies the reviewer, candidate tag and commit, cohort,
 scope, exclusions, finding counts, critical/high disposition, limitations, and
-review conclusion without including weaponizable detail.
+review conclusion without including details that enable exploitation.

@@ -9,6 +9,7 @@ client -> identity and policy -> work-order signer -> local broker
        -> workload socket -> sandboxd -> gVisor sandbox
 
 operator ---------------------> operator socket
+```
 
 HTTP ingress follows the same authority chain:
 
@@ -16,7 +17,6 @@ HTTP ingress follows the same authority chain:
 tenant HTTP -> authenticated gateway -> assigned worker broker
             -> signed current-epoch inspect -> sandboxd loopback endpoint
             -> authenticated reverse tunnel -> declared guest service
-```
 ```
 
 ## Request path
@@ -91,8 +91,8 @@ The listener defaults to loopback. A non-loopback listener is rejected unless
 service mesh terminates and authenticates the connection. The broker itself
 does not terminate TLS, hold the signing key, mount the operator socket, use a
 service-account token, or require Linux capabilities. Its request body,
-response, concurrency, and I/O time are bounded. Kubernetes must additionally
-apply default-deny policy and allow the broker port only from the placement
+response, concurrency, and I/O time are bounded. Kubernetes must also apply
+default-deny policy and allow the broker port only from the placement
 dispatcher identity.
 
 With `--registration-config`, `--gateway-address`, and `--advertise-ip`, the
@@ -277,11 +277,12 @@ Create and restore submissions may opt into a bounded recovery policy:
 }
 ```
 
-The interval controls checkpoint cadence and storage cost. Maximum staleness is
-the declared RPO ceiling: an expired lease with no checkpoint inside that
-window terminates as `recovery_failed` instead of starting an empty sandbox.
-The attempt limit bounds controller, network, artifact-backend, and restore
-retries. Recovery is opt-in.
+The interval controls how often checkpoints run and how much storage they use.
+Maximum staleness sets the recovery point objective, or RPO. If a lease
+expires without a checkpoint inside that window, recovery ends as
+`recovery_failed` instead of starting an empty sandbox. The attempt limit
+bounds controller, network, artifact-backend, and restore retries. Recovery is
+opt-in.
 
 A gateway replica transactionally claims each due checkpoint, signs a live
 snapshot operation for the current worker and epoch, and records the snapshot
@@ -317,11 +318,12 @@ Metrics publish `recovery_rpo/<resource-shape>` and
 Recovery preserves checkpointed process, memory, tmpfs, internal sockets,
 supported writable roots, and portable provider volumes. The checked-in
 multi-node k3s conformance proves this path for forced worker-Pod deletion and
-complete source-agent loss. It requires the declared 120-second RPO ceiling,
-a 10-second per-recovery RTO ceiling, a newer epoch, confirmed source fencing,
-and the complete audit chain. The reference Level B run resumed process
-memory, a pre-opened internal TCP socket, tmpfs, and the writable OCI root with
-four capabilities and no privileged worker Pod or host integration.
+complete source-agent loss. The test enforces the declared 120-second RPO
+ceiling and a recovery time objective, or RTO, of at most 10 seconds per
+recovery. It also requires a newer epoch, confirmed source fencing, and the
+complete audit chain. The reference Level B run resumed process memory, a
+pre-opened internal TCP socket, tmpfs, and the writable OCI root with four
+capabilities and no privileged worker Pod or host integration.
 
 Directory provider archives preserve numeric ownership. A named directory
 volume is portable only when the destination storage provider supplies the
@@ -330,9 +332,9 @@ Independent Kubernetes Pod user namespaces do not guarantee that mapping.
 
 The guest may observe the read-only gVisor restore notification at
 `/proc/gvisor/checkpoint`; the worker does not enable the guest checkpoint
-trigger. Recovery does not make external effects exactly once. Work after the
-recovery point can repeat; clients need idempotency keys or transactional
-sinks at external side-effect boundaries.
+trigger. Work after the recovery point can repeat. Clients must use
+idempotency keys or transactions to prevent duplicate changes in external
+systems.
 
 ## Compatibility
 

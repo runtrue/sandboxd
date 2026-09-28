@@ -1,9 +1,8 @@
 # Security
 
-`sandboxd` is designed as a hardened execution worker for untrusted OCI
-workloads. It combines gVisor isolation with host namespaces, cgroup v2,
-default-deny networking, signed workload authorization, and encrypted snapshot
-storage.
+`sandboxd` runs untrusted OCI workloads. It uses gVisor isolation, host
+namespaces, cgroup v2, default-deny networking, signed workload authorization,
+and encrypted snapshot storage.
 
 The current release channel is alpha. Security fixes are maintained on `main`.
 
@@ -29,9 +28,9 @@ The trusted computing base includes:
 - the worker state and artifact stores; and
 - work-order and artifact master keys.
 
-Topology documents, OCI images, guest arguments and environment, workload
-requests, guest network traffic, filesystem activity, and checkpoint-time
-process state are treated as untrusted.
+The worker treats topology documents, OCI images, guest arguments and
+environment, workload requests, guest network traffic, filesystem activity,
+and checkpoint-time process state as untrusted.
 
 ## Enforced controls
 
@@ -50,8 +49,7 @@ The worker enforces:
 - encrypted, authenticated snapshots with conditional publication and
   restore-time compatibility checks.
 
-Unsupported topology and runtime input is rejected rather than silently
-downgraded.
+The worker rejects unsupported topology and runtime input.
 
 See [docs/architecture.md](docs/architecture.md) for the detailed isolation
 design and [docs/control-plane.md](docs/control-plane.md) for the authorization
@@ -88,10 +86,10 @@ Every pull request runs Rust tests, dependency policy checks, CodeQL analysis,
 and a reproducible release build. The release process adds S3 conformance and
 gVisor lifecycle and snapshot runs on the validated worker cohort.
 
-Production-ready or complete multi-tenant security-boundary claims additionally
+Claims of production readiness or a complete multi-tenant security boundary
 require an independent adversarial review against a signed candidate and the
-exact pinned host/runtime cohort. The review contract, target verifier, private
-finding schema, and public-summary requirements are in
+exact pinned host/runtime cohort. The review contract, target verifier,
+private finding schema, and public-summary requirements are in
 [docs/security-review](docs/security-review/README.md). Repository tests and
 maintainer self-review do not satisfy that independent gate.
 

@@ -9,10 +9,10 @@ containers.
 
 Every independent task receives a fresh sandbox. The worker starts the locked
 topology against an already prepared image root, returns the bounded result,
-and becomes consumed. `sandboxd` deliberately provides no general command
-injection or `exec` operation against an existing sandbox. Reusing a mutable
-tenant process across unrelated assignments would weaken image attestation,
-idempotency, resource accounting, cleanup, and tenant isolation.
+and enters the consumed state. `sandboxd` has no general command injection or
+`exec` operation against an existing sandbox. Reusing a mutable tenant process
+across unrelated assignments would weaken image attestation, idempotency,
+resource accounting, cleanup, and tenant isolation.
 
 A long-lived application may expose its own authenticated task protocol through
 a declared ingress service. That is application traffic inside one leased
@@ -28,7 +28,7 @@ same Sentry. This is appropriate for tightly coupled components such as a
 server, sidecar, and task client.
 
 The complete topology shares one lifecycle, network boundary, checkpoint, and
-aggregate Pod resource envelope. Child containers cannot be independently
+aggregate Pod resource limits. Child containers cannot be independently
 paused, restored, reassigned, or given a separate hard Kubernetes resource
 boundary.
 
@@ -41,9 +41,9 @@ worker slot and cannot accept another assignment.
 
 When suspension must return capacity, use a `stop_and_move` snapshot. It
 checkpoints the complete sandbox, fences and removes the source, and allows a
-later restore under a new assignment. Operators choose the maximum economical
-pause duration from workload cost and restore latency; sandboxd does not
-silently convert pause into a destructive or storage-bearing operation.
+later restore under a new assignment. Operators choose how long to retain a
+paused sandbox based on workload cost and restore latency. Pausing alone does
+not trigger a checkpoint or remove the sandbox.
 
 The reviewed policy is recorded in
 [`deploy/k3s/warm-pool-slo.json`](../deploy/k3s/warm-pool-slo.json):
@@ -58,8 +58,8 @@ The reviewed policy is recorded in
 The checked-in reference objective requires concurrent activation P99 at or
 below one second for two simultaneous starts per sandbox node. A separate
 nine-second P99 budget covers clean-worker replacement, including the
-one-second post-initialization stabilization window. The gate requires at least
-100 measured activations so a P99 result is never inferred from a tiny sample.
+one-second post-initialization stabilization window. The gate requires at
+least 100 measured activations to pass.
 
 At a peak of one new assignment per second, a nine-second replacement window
 consumes nine clean slots. Applying the declared 25 percent safety margin
@@ -70,8 +70,9 @@ ceil(max(2-task burst, 1 task/s * 9 s) * 1.25) = 12
 ```
 
 The calculation is enforced against the worker-pool catalog by
-`tools/performance/warm_pool.py`. The end-to-end runner performs an unscored
-priming cohort followed by a measured concurrent cohort:
+`tools/performance/warm_pool.py`. The end-to-end runner warms up a group of
+workers without scoring them, then measures a second group with concurrent
+activations:
 
 ```bash
 tools/performance/run-warm-pool-slo.sh \

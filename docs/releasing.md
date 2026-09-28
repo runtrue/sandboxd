@@ -55,8 +55,9 @@ retention policy.
    validated host cohort.
 4. Run the manual AWS S3 compatibility check with temporary operator
    credentials.
-5. For production positioning, confirm the independent review public summary
-   covers the exact candidate, commit, cohort, and enabled profiles, with every
+5. Before describing a release as production-ready, confirm the independent
+   review public summary covers the exact candidate, commit, cohort, and enabled
+   profiles, with every
    critical and high finding independently retested as resolved.
 6. Update `CHANGELOG.md`, the workspace version, and validated host
    dependencies.

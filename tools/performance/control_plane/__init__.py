@@ -1,1 +1,1 @@
-"""Trusted control-plane performance harness."""
+"""Benchmark control-plane latency and throughput."""

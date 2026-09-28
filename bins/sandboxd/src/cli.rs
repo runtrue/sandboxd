@@ -160,7 +160,7 @@ pub(crate) struct ServeArgs {
     pub(crate) maximum_connections: usize,
     #[arg(long, default_value_t = 5)]
     pub(crate) io_timeout_seconds: u64,
-    /// Delay clean-slot eligibility after startup so runtime initialization settles.
+    /// Wait after initialization before reporting the worker as ready for an assignment.
     #[arg(long, default_value_t = 0)]
     pub(crate) minimum_clean_age_milliseconds: u64,
     #[arg(long, default_value = "worker-local")]

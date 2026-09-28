@@ -81,11 +81,11 @@ with `HTTP_PROXY=http://127.0.0.1:3128` and
 guest identity as application code and needs no capability, device, host
 mount, Kubernetes API access, or cluster-network access.
 
-The agent does not make transparent sockets work. Software that ignores proxy
+The agent does not intercept application sockets. Software that ignores proxy
 environment variables needs explicit proxy configuration or application
-changes. UDP, QUIC, arbitrary TCP, inbound UDP, caller-selected host ports, and
-protocols other than HTTP proxy egress and reverse TCP transport for declared
-HTTP routes remain unsupported.
+changes. UDP, QUIC, arbitrary TCP, inbound UDP, caller-selected host ports,
+and protocols other than HTTP proxy egress and reverse TCP transport for
+declared HTTP routes remain unsupported.
 
 The following larger set is only for the host-integrated compatibility profile
 that exercises kernel networking and the legacy loop-backed named volume
@@ -168,7 +168,7 @@ Workers in one migration pool need:
 - compatible runtime and host cohorts; and
 - distinct worker IDs and local state roots.
 
-Automatic worker-loss recovery additionally requires:
+Automatic worker-loss recovery also requires:
 
 - a shared, durable S3-compatible backend; the local provider remains
   same-worker only;
@@ -186,9 +186,9 @@ profile: `SETGID`, `SETUID`, `SYS_CHROOT`, and `SYS_ADMIN` in a
 Kubernetes-created Pod user namespace. Recovery adds no capability, device,
 host path, host namespace, host runtime socket, or service-account token.
 Directory-backed writable OCI roots are portable through the artifact backend.
-Named directory volumes additionally require a storage provider with a
-portable UID/GID mapping across the source and destination Pod user namespaces;
-`CHOWN` and `DAC_OVERRIDE` alone do not provide that translation.
+Named directory volumes also require a storage provider with a portable
+UID/GID mapping across the source and destination Pod user namespaces; `CHOWN`
+and `DAC_OVERRIDE` alone do not provide that translation.
 
 Do not use node-local object storage for this feature. Configure replication,
 encryption, retention, and availability for the declared RPO. The controller
