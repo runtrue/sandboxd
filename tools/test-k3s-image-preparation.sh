@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "image-preparation conformance failed at line %s\n" "$LINENO" >&2' ERR
 
 namespace=sandboxd-system
 preparer_job=sandbox-image-preparer
@@ -152,7 +153,7 @@ target/release/runtrue-sandboxctl verify-image-attestation \
   --public-key "$temporary/public-key" >/dev/null
 
 private_digest=$(sha256sum "$temporary/private-key" | cut -d' ' -f1)
-if find "$artifact_directory" -type f -size 32c -exec sha256sum {} + \
+if sudo find "$artifact_directory" -type f -size 32c -exec sha256sum {} + \
   | cut -d' ' -f1 \
   | grep -Fxq "$private_digest"; then
   echo "private preparation key was retained in the published artifact" >&2
@@ -192,7 +193,7 @@ jq -n \
 
 echo "== Audit retained root and cache pressure =="
 trusted_audit=$(
-  target/release/runtrue-sandboxctl audit-attested-cache \
+  sudo target/release/runtrue-sandboxctl audit-attested-cache \
     --cache "$cache_root" \
     --trust-policy "$temporary/trust.json" \
     --prepared-root-catalog "$temporary/prepared-roots.json" \
@@ -220,7 +221,7 @@ cp -- "$artifact_directory/attestation.json" "$orphan_directory/attestation.json
 cp -- "$artifact_directory/sbom.json" "$orphan_directory/sbom.json"
 cp -- "$artifact_directory/provenance.json" "$orphan_directory/provenance.json"
 gc_plan=$(
-  target/release/runtrue-sandboxctl garbage-collect-attested-cache \
+  sudo target/release/runtrue-sandboxctl garbage-collect-attested-cache \
     --cache "$cache_root" \
     --prepared-root-catalog "$temporary/prepared-roots.json" \
     --maximum-cache-artifacts 1 \
@@ -241,7 +242,7 @@ jq -e --arg orphan "sha256:$orphan_key" '
   }]
 ' >/dev/null <<<"$gc_plan"
 gc_result=$(
-  target/release/runtrue-sandboxctl garbage-collect-attested-cache \
+  sudo target/release/runtrue-sandboxctl garbage-collect-attested-cache \
     --cache "$cache_root" \
     --prepared-root-catalog "$temporary/prepared-roots.json" \
     --maximum-cache-artifacts 1 \
@@ -407,7 +408,7 @@ jq --arg artifact_digest "$artifact_digest" \
   '.revoked_worker_artifact_digests = [$artifact_digest]' \
   "$temporary/trust.json" >"$temporary/revoked.json"
 revoked_audit=$(
-  target/release/runtrue-sandboxctl audit-attested-cache \
+  sudo target/release/runtrue-sandboxctl audit-attested-cache \
     --cache "$cache_root" \
     --trust-policy "$temporary/revoked.json" \
     --prepared-root-catalog "$temporary/prepared-roots.json" \

@@ -1,0 +1,17 @@
+# Test-only S3 service. The former Docker Hub image is no longer available.
+# Keep the same MinIO release, fetched from its checksum-pinned GitHub asset.
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb AS fetch
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+    && curl --fail --location --retry 5 --retry-all-errors \
+        https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z \
+        --output /usr/local/bin/minio \
+    && echo '7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f  /usr/local/bin/minio' \
+        | sha256sum --check --strict \
+    && chmod 0755 /usr/local/bin/minio
+
+FROM ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
+COPY --from=fetch /usr/local/bin/minio /usr/local/bin/minio
+ENTRYPOINT ["/usr/local/bin/minio"]
+CMD ["server", "/data"]

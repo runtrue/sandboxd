@@ -118,3 +118,20 @@ replacement P99, one peak arrival per second, a two-task burst, and a 25
 percent capacity margin. The evaluator requires twelve configured clean workers
 and reports both the node count for the declared burst and the conservative
 count for consuming the full reserve at once.
+
+The k3s integration workflow runs after all functional conformance tests,
+including multi-node recovery, and waits for the conformance namespace to be
+deleted before sampling. Earlier workers, gateways, and databases would otherwise
+compete with the measured workers on the same node.
+
+GitHub-hosted runners use
+[`tools/performance/warm-pool-ci.json`](../tools/performance/warm-pool-ci.json),
+with a two-second activation P99 regression budget. Two isolated hosted runs
+measured 797 ms and 1,200 ms P99 on September 27, 2026. Both used the same runtime
+code and 100 activation samples. The CI policy retains two concurrent starts,
+the nine-second replacement budget, and all capacity checks. Passing CI does not
+establish the one-second production objective; run the default policy on the
+intended production node cohort to validate that objective.
+
+Changes to the performance tools trigger k3s integration, and the workflow uses
+Bash with `pipefail` so a script failure cannot be hidden by diagnostic logging.
