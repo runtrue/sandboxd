@@ -53,7 +53,8 @@ impl EnvelopeKey {
     }
 
     fn tenant_key(&self, scope: &ArtifactScope) -> Result<Zeroizing<[u8; 32]>, ArtifactError> {
-        let hkdf = Hkdf::<Sha256>::new(Some(b"runtrue-artifact-envelope-v1"), self.0.as_ref());
+        let hkdf =
+            Hkdf::<sha2_hkdf::Sha256>::new(Some(b"runtrue-artifact-envelope-v1"), self.0.as_ref());
         let mut key = Zeroizing::new([0_u8; 32]);
         hkdf.expand(scope.binding().as_bytes(), key.as_mut())
             .map_err(|_| ArtifactError::Storage("derive tenant envelope key".to_owned()))?;
@@ -418,4 +419,23 @@ fn check_deadline(deadline: Instant, operation: &str) -> Result<(), ArtifactErro
         return Err(ArtifactError::Timeout(operation.to_owned()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtrue_sandbox_core::{TenantId, WorkspaceId};
+
+    #[test]
+    fn tenant_key_matches_existing_artifact_format() {
+        let scope = ArtifactScope::new(
+            TenantId::parse("tenant-a").expect("tenant"),
+            WorkspaceId::parse("workspace-a").expect("workspace"),
+        );
+        let key = EnvelopeKey::new([7_u8; 32]);
+        assert_eq!(
+            hex::encode(key.tenant_key(&scope).expect("tenant key").as_ref()),
+            "03caab156dd364fbce7dd7d3c8e2620303430a100d6b94625ed851f4ce5757f8"
+        );
+    }
 }
