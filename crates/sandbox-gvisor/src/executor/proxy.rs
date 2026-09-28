@@ -483,13 +483,15 @@ fn serve_tunnel_registrations(
                             );
                             return;
                         }
-                        if stream
+                        // Bind the generation before pause/resume can race with the READY reply.
+                        let mut tunnel = reservation.into_tunnel(stream);
+                        if tunnel
+                            .stream
                             .write_all(b"RUNTRUE-TUNNEL/1 200 READY\r\n\r\n")
                             .is_err()
                         {
                             return;
                         }
-                        let tunnel = reservation.into_tunnel(stream);
                         let _ = registration_sender.try_send(tunnel);
                     })
                 {
@@ -1621,9 +1623,11 @@ mod tests {
                 .as_bytes(),
             )
             .expect("gateway request");
-        let mut response = vec![0_u8; 1024];
-        let read = client.read(&mut response).expect("gateway response");
-        response.truncate(read);
+        let mut response = Vec::new();
+        client
+            .take(1024)
+            .read_to_end(&mut response)
+            .expect("gateway response");
         response
     }
 
