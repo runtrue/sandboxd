@@ -54,7 +54,7 @@ tokio-postgres = "=0.7.18"
 tokio-postgres-rustls = { version = "=0.14.0", features = ["ring"] }
 tower = { version = "=0.5.3", features = ["limit", "util"] }
 xattr = { version = "=1.6.1", default-features = false }
-zstd = { version = "=0.13.3", default-features = false }
+zstd = { version = "=0.14.0", default-features = false }
 zeroize = "=1.9.0"
 runtrue-sandbox-artifact = { version = "=0.1.0-alpha.1", path = "crates/sandbox-artifact" }
 runtrue-sandbox-core = { version = "=0.1.0-alpha.1", path = "crates/sandbox-core" }
